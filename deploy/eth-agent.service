@@ -1,0 +1,22 @@
+[Unit]
+Description=ETH Trading Agent — hourly broadcast to Telegram
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=ethagent
+Group=ethagent
+WorkingDirectory=/opt/eth-trading-agent
+EnvironmentFile=/opt/eth-trading-agent/.env
+ExecStart=/opt/eth-trading-agent/.venv/bin/python scheduler.py
+Restart=always
+RestartSec=30
+
+# Logging
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=eth-agent
+
+[Install]
+WantedBy=multi-user.target

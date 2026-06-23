@@ -1,0 +1,160 @@
+"""Claude vision analysis: charts + rules -> structured trade suggestion."""
+
+from __future__ import annotations
+
+import base64
+import json
+import logging
+import re
+from datetime import datetime, timezone
+from pathlib import Path
+
+import anthropic
+
+import config
+from models import Suggestion
+
+logger = logging.getLogger(__name__)
+
+RULES_PATH = Path(__file__).resolve().parent / "rules.md"
+VALID_ACTIONS = {"spot_buy", "spot_sell", "deriv_buy", "deriv_sell", "no_trade"}
+CHART_ORDER = ("W1", "D1", "H4", "H1")
+
+# TODO: add critic.py second-pass review before broadcast.
+
+
+def load_rules() -> str:
+    if not RULES_PATH.exists():
+        raise FileNotFoundError(f"Strategy rules not found: {RULES_PATH}")
+    text = RULES_PATH.read_text(encoding="utf-8")
+    return text.replace("PORTFOLIO_VALUE", str(config.PORTFOLIO_VALUE))
+
+
+def _encode_image(path: str) -> str:
+    return base64.standard_b64encode(Path(path).read_bytes()).decode("utf-8")
+
+
+def _build_user_content(chart_paths: dict[str, str]) -> list[dict]:
+    content: list[dict] = [
+        {
+            "type": "text",
+            "text": (
+                "Analyze these ETH-USD charts (W1, D1, H4, H1) and return one JSON trade "
+                "suggestion per the rules. JSON only."
+            ),
+        }
+    ]
+    for tf in CHART_ORDER:
+        path = chart_paths[tf]
+        content.append({"type": "text", "text": f"--- {tf} chart ---"})
+        content.append(
+            {
+                "type": "image",
+                "source": {
+                    "type": "base64",
+                    "media_type": "image/png",
+                    "data": _encode_image(path),
+                },
+            }
+        )
+    return content
+
+
+def _extract_json(text: str) -> dict:
+    text = text.strip()
+    if text.startswith("```"):
+        text = re.sub(r"^```(?:json)?\s*", "", text)
+        text = re.sub(r"\s*```$", "", text)
+    return json.loads(text)
+
+
+def _validate(data: dict) -> Suggestion:
+    action = str(data.get("action", "no_trade"))
+    if action not in VALID_ACTIONS:
+        raise ValueError(f"Invalid action: {action}")
+
+    suggestion = Suggestion.from_dict(data)
+
+    if action == "no_trade":
+        return suggestion
+
+    for field_name in ("entry", "stop_loss"):
+        val = getattr(suggestion, field_name)
+        if val is None or not isinstance(val, (int, float)):
+            raise ValueError(f"Missing or invalid {field_name}")
+
+    if not suggestion.take_profits:
+        raise ValueError("take_profits required for trade actions")
+
+    if suggestion.risk_reward is not None and suggestion.risk_reward < 1.5:
+        raise ValueError(f"R/R {suggestion.risk_reward} below 1.5 gate")
+
+    if suggestion.order_block is None:
+        raise ValueError("order_block required for chart markup")
+
+    ob = suggestion.order_block
+    for key in ("low", "high", "start_ts", "end_ts"):
+        if key not in ob:
+            raise ValueError(f"order_block missing {key}")
+
+    return suggestion
+
+
+def propose_trade(chart_paths: dict[str, str], rules: str | None = None) -> Suggestion:
+    """Single Claude call: chart images + rules -> Suggestion (or no_trade on failure)."""
+    rules_text = rules if rules is not None else load_rules()
+    client = anthropic.Anthropic(api_key=config.ANTHROPIC_API_KEY)
+
+    try:
+        response = client.messages.create(
+            model=config.ANTHROPIC_MODEL,
+            max_tokens=1024,
+            system=[
+                {
+                    "type": "text",
+                    "text": rules_text,
+                    "cache_control": {"type": "ephemeral"},
+                }
+            ],
+            messages=[{"role": "user", "content": _build_user_content(chart_paths)}],
+        )
+    except Exception as exc:
+        logger.exception("Claude API call failed")
+        return Suggestion.no_trade(f"api_error: {exc}")
+
+    raw_text = ""
+    for block in response.content:
+        if block.type == "text":
+            raw_text += block.text
+
+    try:
+        data = _extract_json(raw_text)
+        return _validate(data)
+    except (json.JSONDecodeError, ValueError, KeyError, TypeError) as exc:
+        logger.warning("Malformed suggestion: %s | raw=%s", exc, raw_text[:500])
+        return Suggestion.no_trade(f"parse_error: {exc}")
+
+
+if __name__ == "__main__":
+    import research
+    from charts import annotate_chart, render_charts
+
+    logging.basicConfig(level=logging.INFO)
+    cycle_id = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+
+    print("Fetching OHLC and rendering charts...")
+    data = research.get_all_timeframes()
+    paths = render_charts(data, cycle_id=cycle_id)
+
+    print("Calling Claude...")
+    suggestion = propose_trade(paths)
+    print(f"action={suggestion.action}")
+    print(f"entry={suggestion.entry} sl={suggestion.stop_loss} tps={suggestion.take_profits}")
+    print(f"rr={suggestion.risk_reward}")
+    print(f"rationale={suggestion.rationale}")
+    if suggestion.order_block:
+        print(f"order_block={suggestion.order_block}")
+
+    print("\nAnnotating H1 chart...")
+    annotated = annotate_chart(paths["H1"], suggestion, cycle_id, h1_bars=data["H1"])
+    print(f"Annotated chart: {annotated}")
