@@ -41,7 +41,7 @@ elif [[ -f "$(dirname "$0")/../scheduler.py" ]]; then
     --exclude '__pycache__' "$(dirname "$0")/../" "$APP_DIR/"
   chown -R "$APP_USER:$APP_USER" "$APP_DIR"
 else
-  echo "Set REPO_URL=https://github.com/you/eth-trading-agent.git or run from a cloned repo."
+  echo "Set REPO_URL=https://github.com/abagui11/eth-trading-bot.git or run from a cloned repo."
   exit 1
 fi
 
