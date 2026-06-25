@@ -20,6 +20,13 @@ RULES_PATH = Path(__file__).resolve().parent / "rules.md"
 VALID_ACTIONS = {"spot_buy", "spot_sell", "deriv_buy", "deriv_sell", "no_trade"}
 CHART_ORDER = ("W1", "D1", "H4", "H1")
 
+PATTERN_IMAGES: tuple[tuple[str, str], ...] = (
+    ("SFP example (sfp_examples.png)", "sfp_examples.png"),
+    ("FVG example (fair_value_gap_example.png)", "fair_value_gap_example.png"),
+    ("OB setup example (trading_setup.png)", "trading_setup.png"),
+    ("Breaker example (trade_off_breaker.png)", "trade_off_breaker.png"),
+)
+
 # TODO: add critic.py second-pass review before broadcast.
 
 
@@ -30,8 +37,30 @@ def load_rules() -> str:
     return text.replace("PORTFOLIO_VALUE", str(config.PORTFOLIO_VALUE))
 
 
-def _encode_image(path: str) -> str:
+def _encode_image(path: str | Path) -> str:
     return base64.standard_b64encode(Path(path).read_bytes()).decode("utf-8")
+
+
+def load_pattern_images() -> list[tuple[str, Path]]:
+    """Trading Guide reference pattern PNGs for Claude vision."""
+    images: list[tuple[str, Path]] = []
+    for label, filename in PATTERN_IMAGES:
+        path = config.TRADING_GUIDE_DIR / filename
+        if not path.exists():
+            raise FileNotFoundError(f"Pattern image not found: {path}")
+        images.append((label, path))
+    return images
+
+
+def _image_block(path: str | Path) -> dict:
+    return {
+        "type": "image",
+        "source": {
+            "type": "base64",
+            "media_type": "image/png",
+            "data": _encode_image(path),
+        },
+    }
 
 
 def _build_user_content(chart_paths: dict[str, str]) -> list[dict]:
@@ -39,24 +68,59 @@ def _build_user_content(chart_paths: dict[str, str]) -> list[dict]:
         {
             "type": "text",
             "text": (
-                "Analyze these ETH-USD charts (W1, D1, H4, H1) and return one JSON trade "
-                "suggestion per the rules. JSON only."
+                "Analyze live ETH-USD charts and apply the strategy rules. "
+                "Compare live structure to the reference pattern examples below. "
+                "Return one JSON trade suggestion. JSON only."
             ),
         }
     ]
     for tf in CHART_ORDER:
         path = chart_paths[tf]
-        content.append({"type": "text", "text": f"--- {tf} chart ---"})
+        content.append({"type": "text", "text": f"--- Live {tf} chart ---"})
+        content.append(_image_block(path))
+
+    content.append(
+        {
+            "type": "text",
+            "text": "--- Reference pattern examples (match similar structure on live charts) ---",
+        }
+    )
+    for label, path in load_pattern_images():
+        content.append({"type": "text", "text": f"--- {label} ---"})
+        content.append(_image_block(path))
+
+    return content
+
+
+def build_vision_content(
+    chart_paths: dict[str, str] | None = None,
+    annotated_h1_path: str | Path | None = None,
+    include_live_charts: bool = True,
+    include_patterns: bool = True,
+) -> list[dict]:
+    """Build Claude vision content blocks for analyze or chat."""
+    content: list[dict] = []
+
+    if include_live_charts and chart_paths:
+        for tf in CHART_ORDER:
+            content.append({"type": "text", "text": f"--- Live {tf} chart ---"})
+            content.append(_image_block(chart_paths[tf]))
+
+    if annotated_h1_path:
+        content.append({"type": "text", "text": "--- Latest annotated H1 suggestion chart ---"})
+        content.append(_image_block(annotated_h1_path))
+
+    if include_patterns:
         content.append(
             {
-                "type": "image",
-                "source": {
-                    "type": "base64",
-                    "media_type": "image/png",
-                    "data": _encode_image(path),
-                },
+                "type": "text",
+                "text": "--- Reference pattern examples ---",
             }
         )
+        for label, path in load_pattern_images():
+            content.append({"type": "text", "text": f"--- {label} ---"})
+            content.append(_image_block(path))
+
     return content
 
 

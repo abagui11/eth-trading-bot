@@ -1,4 +1,4 @@
-"""Hourly scheduler: run agent.run_cycle every hour, 24/7."""
+"""Deprecated: use main.py (bot polling + hourly job). Kept for one-shot scheduler testing."""
 
 from __future__ import annotations
 
@@ -27,7 +27,7 @@ def main() -> None:
         stream=sys.stdout,
     )
 
-    logger.info("Starting ETH trading agent scheduler (hourly)")
+    logger.warning("scheduler.py is deprecated — use main.py for production")
     _run_cycle_safe()
 
     scheduler = BlockingScheduler()

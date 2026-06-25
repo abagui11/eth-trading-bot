@@ -78,6 +78,26 @@ def append(
         return int(cursor.lastrowid)
 
 
+def get_latest_suggestion() -> dict | None:
+    """Return the most recent ledger row, or None if empty."""
+    rows = get_latest(1)
+    return rows[0] if rows else None
+
+
+def get_suggestion_by_cycle_id(cycle_id: str) -> dict | None:
+    init_db()
+    with _connect() as conn:
+        row = conn.execute(
+            "SELECT * FROM suggestions WHERE cycle_id = ? ORDER BY id DESC LIMIT 1",
+            (cycle_id,),
+        ).fetchone()
+    if row is None:
+        return None
+    record = dict(row)
+    record["take_profits"] = json.loads(record["take_profits"] or "[]")
+    return record
+
+
 def get_latest(n: int = 10) -> list[dict]:
     """Return the most recent n ledger rows as plain dicts."""
     init_db()
@@ -118,7 +138,8 @@ if __name__ == "__main__":
     )
     print(f"Appended row id={row_id}")
 
-    latest = get_latest(1)[0]
+    latest = get_latest_suggestion()
+    assert latest is not None
     print(json.dumps(latest, indent=2))
 
     assert latest["cycle_id"] == cycle_id

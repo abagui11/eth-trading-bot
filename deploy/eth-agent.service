@@ -1,5 +1,5 @@
 [Unit]
-Description=ETH Trading Agent — hourly broadcast to Telegram
+Description=ETH Trading Agent — Telegram bot + hourly trade suggestions
 After=network-online.target
 Wants=network-online.target
 
@@ -9,7 +9,7 @@ User=ethagent
 Group=ethagent
 WorkingDirectory=/opt/eth-trading-agent
 EnvironmentFile=/opt/eth-trading-agent/.env
-ExecStart=/opt/eth-trading-agent/.venv/bin/python scheduler.py
+ExecStart=/opt/eth-trading-agent/.venv/bin/python main.py
 Restart=always
 RestartSec=30
 

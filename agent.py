@@ -1,4 +1,4 @@
-"""End-to-end agent cycle: research -> charts -> analyze -> notify -> ledger."""
+"""End-to-end agent cycle: research -> charts -> analyze -> notify -> ledger -> paper."""
 
 from __future__ import annotations
 
@@ -9,13 +9,15 @@ import analyze
 import charts
 import ledger
 import notify
+import paper
 import research
+from models import Suggestion
 
 logger = logging.getLogger(__name__)
 
 
-def run_cycle() -> None:
-    """Run one full broadcast cycle."""
+def run_cycle() -> tuple[Suggestion, str] | None:
+    """Run one full cycle. Returns (suggestion, annotated_path) on success."""
     cycle_id = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
     logger.info("Starting cycle %s", cycle_id)
 
@@ -33,14 +35,16 @@ def run_cycle() -> None:
             h1_bars=data["H1"],
         )
 
-        # TODO: validate.py — Layer 2 risk caps, R/R enforcement, size recompute
-        try:
-            notify.broadcast(suggestion, annotated)
-        except Exception:
-            logger.exception("Broadcast failed for cycle %s", cycle_id)
-
         price = research.get_spot_price()
         row_id = ledger.append(suggestion, cycle_id, price, annotated)
+        paper.update(suggestion, price, cycle_id=cycle_id)
+        pnl_footer = paper.format_pnl_footer(price)
+
+        # TODO: validate.py — Layer 2 risk caps, R/R enforcement, size recompute
+        try:
+            notify.broadcast(suggestion, annotated, pnl_footer=pnl_footer)
+        except Exception:
+            logger.exception("Broadcast failed for cycle %s", cycle_id)
 
         # TODO: execute.py — EXECUTION_MODE=shadow|live order path
         logger.info(
@@ -50,8 +54,10 @@ def run_cycle() -> None:
             row_id,
             annotated,
         )
+        return suggestion, annotated
     except Exception:
         logger.exception("Cycle %s failed", cycle_id)
+        return None
 
 
 if __name__ == "__main__":

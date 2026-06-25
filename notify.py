@@ -1,4 +1,4 @@
-"""One-way Telegram broadcast: chart image + suggestion caption."""
+"""Telegram delivery: per-subscriber DMs with chart, rationale, and PnL footer."""
 
 from __future__ import annotations
 
@@ -9,6 +9,7 @@ from pathlib import Path
 from telegram import Bot
 
 import config
+import paper
 from models import Suggestion
 
 logger = logging.getLogger(__name__)
@@ -33,40 +34,75 @@ def build_caption(suggestion: Suggestion) -> str:
     )
 
 
-def build_rationale_message(suggestion: Suggestion) -> str:
-    """Full rationale as a follow-up text message (Telegram limit: 4096 characters)."""
-    if not suggestion.rationale.strip():
-        return ""
-    header = "NO TRADE" if suggestion.action == "no_trade" else suggestion.action.upper()
-    text = f"{header}\n\nRationale:\n{suggestion.rationale.strip()}"
-    return text[:4096]
+def build_rationale_message(suggestion: Suggestion, pnl_footer: str) -> str:
+    """Full rationale + PnL as a follow-up text message."""
+    parts: list[str] = []
+    if suggestion.rationale.strip():
+        header = "NO TRADE" if suggestion.action == "no_trade" else suggestion.action.upper()
+        parts.append(f"{header}\n\nRationale:\n{suggestion.rationale.strip()}")
+    parts.append(pnl_footer)
+    return "\n\n".join(parts)[:4096]
 
 
-async def _send_photo(chart_path: str, caption: str, rationale_message: str) -> None:
-    bot = Bot(token=config.TELEGRAM_BOT_TOKEN)
-    with open(chart_path, "rb") as photo:
-        await bot.send_photo(
-            chat_id=config.TELEGRAM_CHAT_ID,
-            photo=photo,
-            caption=caption,
-        )
-    if rationale_message:
-        await bot.send_message(
-            chat_id=config.TELEGRAM_CHAT_ID,
-            text=rationale_message,
-        )
-
-
-def broadcast(suggestion: Suggestion, marked_up_chart_path: str) -> None:
-    """Post the marked-up chart and caption to the configured Telegram channel."""
-    path = Path(marked_up_chart_path)
+async def send_suggestion_to_chat(
+    bot: Bot,
+    chat_id: int | str,
+    suggestion: Suggestion,
+    chart_path: str,
+    pnl_footer: str,
+) -> None:
+    path = Path(chart_path)
     if not path.exists():
-        raise FileNotFoundError(f"Chart not found: {marked_up_chart_path}")
+        raise FileNotFoundError(f"Chart not found: {chart_path}")
 
     caption = build_caption(suggestion)
-    rationale_message = build_rationale_message(suggestion)
-    asyncio.run(_send_photo(str(path), caption, rationale_message))
-    logger.info("Broadcast sent to chat %s", config.TELEGRAM_CHAT_ID)
+    rationale_message = build_rationale_message(suggestion, pnl_footer)
+
+    with open(path, "rb") as photo:
+        await bot.send_photo(chat_id=chat_id, photo=photo, caption=caption)
+    if rationale_message:
+        await bot.send_message(chat_id=chat_id, text=rationale_message)
+
+
+async def broadcast_to_subscribers(
+    bot: Bot,
+    suggestion: Suggestion,
+    chart_path: str,
+    pnl_footer: str | None = None,
+) -> None:
+    """DM the suggestion to every allowlisted Telegram user."""
+    footer = pnl_footer or paper.format_pnl_footer()
+    for user_id in config.ALLOWED_TELEGRAM_IDS:
+        try:
+            await send_suggestion_to_chat(bot, user_id, suggestion, chart_path, footer)
+            logger.info("Sent suggestion to user %s", user_id)
+        except Exception:
+            logger.exception("Failed to send to user %s", user_id)
+
+    allowed = set(config.ALLOWED_TELEGRAM_IDS)
+    admin_chat = config.TELEGRAM_ADMIN_CHAT_ID or config.TELEGRAM_CHAT_ID
+    if admin_chat:
+        try:
+            admin_id = int(str(admin_chat).strip())
+        except ValueError:
+            admin_id = None
+        if admin_id is not None and admin_id not in allowed:
+            try:
+                await send_suggestion_to_chat(bot, admin_chat, suggestion, chart_path, footer)
+                logger.info("Sent suggestion to admin chat %s", admin_chat)
+            except Exception:
+                logger.exception("Failed to send to admin chat %s", admin_chat)
+
+
+def broadcast(suggestion: Suggestion, marked_up_chart_path: str, pnl_footer: str | None = None) -> None:
+    """Sync wrapper for standalone agent.py / tests."""
+    footer = pnl_footer or paper.format_pnl_footer()
+
+    async def _run() -> None:
+        bot = Bot(token=config.TELEGRAM_BOT_TOKEN)
+        await broadcast_to_subscribers(bot, suggestion, marked_up_chart_path, footer)
+
+    asyncio.run(_run())
 
 
 def _latest_annotated_chart() -> Path:
@@ -83,14 +119,9 @@ if __name__ == "__main__":
 
     chart = Path(sys.argv[1]) if len(sys.argv) > 1 else _latest_annotated_chart()
     suggestion = Suggestion.no_trade(
-        rationale=(
-            "W1 structure is strongly bearish: series of lower highs and lower lows from "
-            "~4800 peak in Aug 2025 down to current ~1650 area. D1 confirms breakdown from "
-            "~2000 support. H4 shows lower high near 1780 on Jun 22 with sharp rejection. "
-            "H1 confirms aggressive selloff to ~1650 with no base-building. No trade this cycle."
-        ),
+        rationale="Notify checkpoint — test broadcast to allowlisted users.",
     )
 
     print(f"Broadcasting {chart} ...")
     broadcast(suggestion, str(chart))
-    print("Done. Check your Telegram channel.")
+    print("Done. Check Telegram DMs.")
