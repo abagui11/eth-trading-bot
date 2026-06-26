@@ -75,20 +75,81 @@ def _sweep_depth_pct(
     return (swept_level - float(bar["low"])) / swept_level
 
 
+def _detection_params(timeframe: str) -> dict[str, int | float | bool]:
+    defaults: dict[str, int | float | bool] = {
+        "pivot_left": config.PIVOT_LEFT,
+        "pivot_right": config.PIVOT_RIGHT,
+        "min_sweep_pct": config.MIN_SWEEP_PCT,
+        "max_pivot_age": 0,
+        "min_bars_since_pivot": config.PIVOT_RIGHT,
+        "latest_pivot_only": False,
+    }
+    tf_cfg = config.DETECTION.get(timeframe, {})
+    return {**defaults, **tf_cfg}
+
+
+def _candidate_pivots(
+    pivots: list[Pivot],
+    bar_idx: int,
+    params: dict[str, int | float | bool],
+) -> list[tuple[Direction, Pivot]]:
+    max_age = int(params["max_pivot_age"])
+    min_gap = int(params["min_bars_since_pivot"])
+    latest_only = bool(params["latest_pivot_only"])
+
+    if latest_only:
+        latest_high: Pivot | None = None
+        latest_low: Pivot | None = None
+        for pivot in pivots:
+            if pivot.idx >= bar_idx:
+                break
+            age = bar_idx - pivot.idx
+            if max_age and age > max_age:
+                continue
+            if pivot.kind == "high":
+                latest_high = pivot
+            else:
+                latest_low = pivot
+        candidates: list[tuple[Direction, Pivot]] = []
+        if latest_high is not None:
+            candidates.append(("bearish", latest_high))
+        if latest_low is not None:
+            candidates.append(("bullish", latest_low))
+        return candidates
+
+    candidates = []
+    for pivot in pivots:
+        if pivot.idx >= bar_idx:
+            break
+        age = bar_idx - pivot.idx
+        if max_age and age > max_age:
+            continue
+        if age < min_gap:
+            continue
+        direction: Direction = "bearish" if pivot.kind == "high" else "bullish"
+        candidates.append((direction, pivot))
+    return candidates
+
+
 def detect_sfps(
     bars: list[dict],
     timeframe: str = "W1",
 ) -> list[SFPEvent]:
     """Detect SFP events on OHLC bars and score outcomes A/B/C."""
+    params = _detection_params(timeframe)
+    pivot_left = int(params["pivot_left"])
+    pivot_right = int(params["pivot_right"])
+    min_sweep = float(params["min_sweep_pct"])
+    min_gap = int(params["min_bars_since_pivot"])
+
     df = pd.DataFrame(bars)
     df["ts"] = pd.to_datetime(df["ts"], utc=True)
     df = df.set_index("ts").astype(
         {"open": float, "high": float, "low": float, "close": float, "volume": float}
     )
 
-    pivots = find_pivots(df)
+    pivots = find_pivots(df, left=pivot_left, right=pivot_right)
     n_bars = config.OUTCOME_N.get(timeframe, config.OUTCOME_N["W1"])
-    events: list[SFPEvent] = []
     best_by_bar: dict[tuple[int, str], tuple[int, SFPEvent]] = {}
 
     for i in range(len(df)):
@@ -96,21 +157,19 @@ def detect_sfps(
         high = float(bar["high"])
         low = float(bar["low"])
         close = float(bar["close"])
-        prior_pivots = [p for p in pivots if p.idx < i]
 
-        for pivot in prior_pivots:
-            direction: Direction | None = None
-            if pivot.kind == "high":
-                min_high = pivot.price * (1 + config.MIN_SWEEP_PCT)
-                if high > min_high and close < pivot.price:
-                    direction = "bearish"
-            elif pivot.kind == "low":
-                max_low = pivot.price * (1 - config.MIN_SWEEP_PCT)
-                if low < max_low and close > pivot.price:
-                    direction = "bullish"
-
-            if direction is None:
+        for direction, pivot in _candidate_pivots(pivots, i, params):
+            if i - pivot.idx < min_gap:
                 continue
+
+            if direction == "bearish":
+                min_high = pivot.price * (1 + min_sweep)
+                if not (high > min_high and close < pivot.price):
+                    continue
+            else:
+                max_low = pivot.price * (1 - min_sweep)
+                if not (low < max_low and close > pivot.price):
+                    continue
 
             key = (i, direction)
             if key in best_by_bar and pivot.idx <= best_by_bar[key][0]:

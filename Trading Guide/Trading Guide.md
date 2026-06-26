@@ -6,21 +6,21 @@ Portfolio value for sizing: use **PORTFOLIO_VALUE** USD from config. Default ris
 
 When analyzing live charts, compare price action to the **reference pattern images** included in the same request (all PNGs from this Trading Guide folder).
 
-**This agent's chart set:** W1 → D1 → **H4 as H12 proxy** → H1 (Coinbase has no native H12 candles; H4 is the intermediate frame between D1 and H1).
+**This agent's chart set:** **H12 → H4 → H1** (H12 resampled from Coinbase H1 candles; H4 native).
 
 ---
 
 # General
 
 Note:
-This is a high level framework for trading and can be used to trade on any timeframe. References throughout will be based on a swing trading strategy where holding periods are minimum 2+ weeks. For short duration trades, make the starting timeframe shorter and zoom in further (e.g., instead of starting from W1, start from D1, and zoom in further). This will work on any timeframe, but recommend sticking with the popular ones (W1, D1, H12, H4, H1).
+This is a high level framework for trading and can be used to trade on any timeframe. The live agent uses **H12/H4/H1** with average holding period under 10 days. For slower swing trades, start from W1/D1 and zoom in; for faster scalps, stay on H4/H1.
 
 **Trade Setup:**
 
-1. Determine HTF (high time frame) structure starting from the W1 (Weekly) chart.
+1. Determine HTF structure starting from the **H12** chart.
    1. Trending upwards or downwards? 2+ HH (higher highs) or LL (lower lows) makes a trend
    2. Determine key levels (liquidity draws)
-      1. Identify weekly OB (order blocks) & breakers
+      1. Identify H12 OB (order blocks) & breakers
          1. Order block above current price = resistance
          2. Order block below current price = support
          3. Use the fib retracement tool to determine the 0.618 - 0.786 retracement zone (this is the sweet spot)
@@ -30,13 +30,13 @@ This is a high level framework for trading and can be used to trade on any timef
    5. Order block is last candle before displacement in the opposite direction that breaks market structure
       1. Ie last green candle before down which breaks market structure
 
-2. With directional bias, zoom in on D1 (daily) or H12 (12 hour) and focus on the order block identified in 1b above.
+2. With directional bias, zoom in on **H4** and focus on the order block identified in 1b above.
    1. Find LTF trend that matches HTF trend
       1. I.e., There may be rallies/drops that last a couple hours or days in LTF. We want to catch those. Inversely, we **may not** want to long a LTF low in a HTF downtrend, or short a LTF high in a HTF uptrend.
    2. Repeat steps 1bcd
       1. Mark key levels
 
-3. Repeat Step 2 but on the H1 (1 hour) chart.
+3. Repeat Step 2 but on the **H1** (1 hour) chart.
    1. Entries are decided based on H1 chart
    2. Enter 0.5 units at 0.618 mark of H1 OB.
    3. Enter 0.5 units at 0.768 mark of H1 OB.
@@ -108,15 +108,18 @@ Three-candle imbalance leaving a shaded gap (price often revisits to fill).
 
 **General Strategy:**
 
-Agent will trade the D1/H12/H1 candles looking for entries with average holding period less than 10 days. This agent uses W1/D1/H4/H1 charts with H4 standing in for H12.
+Agent trades **H12/H4/H1** candles looking for entries with average holding period less than 10 days.
+
+Each hourly cycle includes **programmatic context** (24h range, detected OB zones, recent H12/H1 SFPs). Verify and refine these on the charts — do not ignore conflicting structure.
 
 **Live H1 example — `strategy_example.png`:**
 
 When the H1 chart shows structure similar to this reference screenshot, the agent should:
 
 1. **Identify the 24h range** (example: 58.5–60.4 in the reference). State that the range exists in `rationale`, and flag again if price breaks above or below the range.
-2. **Identify the potential order block** — the live chart will not have a drawn box; infer OB from last candle before displacement that breaks structure (same rules as above).
-3. **Alert a potential short inside the order block** when HTF/LTF structure aligns (e.g., bearish OB retest in the 0.618–0.768 zone with R/R ≥ 1.5).
+2. **Identify ranging conditions** when price oscillates inside the 24h range without a clean trend.
+3. **Identify the potential order block** — the live chart will not have a drawn box; infer OB from last candle before displacement that breaks structure (same rules as above). Programmatic OB hints may appear on the annotated chart.
+4. **Alert a potential short inside the order block** when HTF/LTF structure aligns (e.g., bearish OB retest in the 0.618–0.786 zone with R/R ≥ 1.5).
 
 **Deviations / Adjustments:**
 
@@ -141,15 +144,27 @@ When the H1 chart shows structure similar to this reference screenshot, the agen
 
 ---
 
+# Research commands
+
+Historical backtests (Telegram `/research`):
+
+1. `weekly_sfp` — weekly SFP reversal stats (4 years, W-FRI bars)
+2. `h12_sfp` — H12 SFP reversal stats (4 years, resampled from H1)
+
+SFP scoring: Outcome A = reversal vs invalidation within N bars; B = ≥5% move; C = structure break.
+
+---
+
 # Future research questions
 
 Types of questions we should be able to ask the bot later:
 
 1. What % of weekly SFPs resulted in a reversal in the past 4 years?
-2. What happens after the chart prints three bearish dojis in a row?
-3. What happens each time after the ETH funding rate bottoms?
-4. Find the 10 largest liquidations in past 4 years and tell me what happened in the 1 week after.
-5. The last 10 times a H12 SFP was invalidated, what happened after?
+2. What % of H12 SFPs resulted in a reversal in the past 4 years?
+3. What happens after the chart prints three bearish dojis in a row?
+4. What happens each time after the ETH funding rate bottoms?
+5. Find the 10 largest liquidations in past 4 years and tell me what happened in the 1 week after.
+6. The last 10 times a H12 SFP was invalidated, what happened after?
 
 ---
 
@@ -176,7 +191,7 @@ Respond with **only** a JSON object — no markdown fences, no prose outside JSO
   "stop_loss": 2350.0,
   "take_profits": [2500.0, 2600.0, 2700.0],
   "risk_reward": 2.0,
-  "rationale": "W1 bullish HH/HL, D1/H4 aligned OB retest in 0.618–0.768 zone, H1 ladder entry.",
+  "rationale": "H12 bullish HH/HL, H4 aligned OB retest in 0.618–0.786 zone, H1 ladder entry. 24h range 2380–2420, ranging.",
   "order_block": {
     "low": 2380.0,
     "high": 2420.0,
@@ -204,6 +219,6 @@ Respond with **only** a JSON object — no markdown fences, no prose outside JSO
 
 ## Charts provided each cycle
 
-Four live PNG candlestick charts: **W1, D1, H4, H1** (in that order). Gray dashed lines mark recent swing high/low on each chart. Plus all reference pattern images from this Trading Guide folder.
+Three live PNG candlestick charts: **H12, H4, H1** (in that order). Gray dashed lines mark recent swing high/low on each chart. Programmatic 24h range and OB hints are drawn on the annotated H1 output. Plus all reference pattern images from this Trading Guide folder.
 
 Form **one** trade idea (or `no_trade`) for this hour.

@@ -20,6 +20,14 @@ _TIMEFRAME_CONFIG: dict[str, dict[str, Any]] = {
     "H1": {"granularity": "ONE_HOUR", "seconds": 3600, "limit": 120},
     "H4": {"granularity": "FOUR_HOUR", "seconds": 14400, "limit": 90},
     "D1": {"granularity": "ONE_DAY", "seconds": 86400, "limit": 90},
+    # H12: resample from paginated H1 fetch (Coinbase has no native 12h candles).
+    "H12": {
+        "granularity": "ONE_HOUR",
+        "seconds": 3600,
+        "limit": 90,
+        "h1_fetch_bars": 90 * 12 + 12,
+        "resample_h12": True,
+    },
     # W1: fetch max daily window, resample to weekly, return last 52 weeks.
     "W1": {
         "granularity": "ONE_DAY",
@@ -29,6 +37,8 @@ _TIMEFRAME_CONFIG: dict[str, dict[str, Any]] = {
         "resample_weekly": True,
     },
 }
+
+STRATEGY_TIMEFRAMES = ("H12", "H4", "H1")
 
 _GRANULARITY_SECONDS = {
     "ONE_HOUR": 3600,
@@ -127,6 +137,38 @@ def fetch_coinbase_candles_range(
     return sorted(all_bars.values(), key=lambda b: b["ts"])
 
 
+def _resample_h12(h1_bars: list[dict[str, float | str]], limit: int) -> list[dict[str, float | str]]:
+    """Aggregate H1 candles into 12-hour bars."""
+    df = pd.DataFrame(h1_bars)
+    df["ts"] = pd.to_datetime(df["ts"], utc=True)
+    df = df.set_index("ts")
+
+    h12 = df.resample("12h", origin="start").agg(
+        {
+            "open": "first",
+            "high": "max",
+            "low": "min",
+            "close": "last",
+            "volume": "sum",
+        }
+    ).dropna()
+
+    h12 = h12.tail(limit)
+    rows: list[dict[str, float | str]] = []
+    for ts, row in h12.iterrows():
+        rows.append(
+            {
+                "ts": ts.strftime("%Y-%m-%dT%H:%M:%SZ"),
+                "open": float(row["open"]),
+                "high": float(row["high"]),
+                "low": float(row["low"]),
+                "close": float(row["close"]),
+                "volume": float(row["volume"]),
+            }
+        )
+    return rows
+
+
 def _resample_weekly(daily_bars: list[dict[str, float | str]], limit: int) -> list[dict[str, float | str]]:
     df = pd.DataFrame(daily_bars)
     df["ts"] = pd.to_datetime(df["ts"], utc=True)
@@ -158,8 +200,22 @@ def _resample_weekly(daily_bars: list[dict[str, float | str]], limit: int) -> li
     return rows
 
 
+def fetch_h1_bars(count: int) -> list[dict[str, float | str]]:
+    """Fetch `count` most recent H1 bars, paginating past the 350-candle API cap."""
+    if count <= _MAX_CANDLES:
+        return _fetch_coinbase_candles("ONE_HOUR", count)
+
+    end = int(time.time())
+    seconds = _GRANULARITY_SECONDS["ONE_HOUR"]
+    start = end - count * seconds
+    bars = fetch_coinbase_candles_range("ONE_HOUR", start, end)
+    if not bars:
+        raise RuntimeError(f"No H1 candles returned for {PRODUCT_ID}")
+    return bars[-count:]
+
+
 def get_ohlc(timeframe: str, limit: int | None = None) -> list[dict[str, float | str]]:
-    """Pull ETH candles for a supported timeframe (W1, D1, H4, H1)."""
+    """Pull ETH candles for a supported timeframe (H12, H4, H1, D1, W1)."""
     tf = timeframe.upper()
     if tf not in _TIMEFRAME_CONFIG:
         raise ValueError(f"Unsupported timeframe: {timeframe}. Use one of {list(_TIMEFRAME_CONFIG)}")
@@ -170,19 +226,27 @@ def get_ohlc(timeframe: str, limit: int | None = None) -> list[dict[str, float |
 
     if cfg.get("resample_weekly"):
         fetch_limit = cfg.get("daily_fetch_limit", _MAX_CANDLES)
-    else:
-        fetch_limit = bar_limit
-    bars = _fetch_coinbase_candles(granularity, fetch_limit)
-
-    if cfg.get("resample_weekly"):
+        bars = _fetch_coinbase_candles(granularity, fetch_limit)
         return _resample_weekly(bars, bar_limit)
 
+    if cfg.get("resample_h12"):
+        h1_count = cfg.get("h1_fetch_bars", bar_limit * 12 + 12)
+        if limit is not None:
+            h1_count = max(h1_count, bar_limit * 12 + 12)
+        h1_bars = fetch_h1_bars(h1_count)
+        return _resample_h12(h1_bars, bar_limit)
+
+    bars = _fetch_coinbase_candles(granularity, bar_limit)
     return bars
 
 
 def get_all_timeframes() -> dict[str, list[dict[str, float | str]]]:
-    """Fetch OHLC for all strategy timeframes."""
-    return {tf: get_ohlc(tf) for tf in ("W1", "D1", "H4", "H1")}
+    """Fetch OHLC for live strategy timeframes (H12, H4, H1)."""
+    h1 = get_ohlc("H1")
+    h4 = get_ohlc("H4")
+    h1_for_h12 = fetch_h1_bars(_TIMEFRAME_CONFIG["H12"]["h1_fetch_bars"])
+    h12 = _resample_h12(h1_for_h12, _TIMEFRAME_CONFIG["H12"]["limit"])
+    return {"H12": h12, "H4": h4, "H1": h1}
 
 
 def to_dataframe(bars: list[dict[str, float | str]]) -> pd.DataFrame:

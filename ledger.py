@@ -24,9 +24,20 @@ CREATE TABLE IF NOT EXISTS suggestions (
     risk_reward REAL,
     price_at_suggestion REAL,
     rationale TEXT,
-    chart_path TEXT
+    chart_path TEXT,
+    setup_tags TEXT
 );
 """
+
+
+def _ensure_columns(conn: sqlite3.Connection) -> None:
+    """Add new columns to existing ledgers without migration framework."""
+    cols = {
+        row[1]
+        for row in conn.execute("PRAGMA table_info(suggestions)").fetchall()
+    }
+    if "setup_tags" not in cols:
+        conn.execute("ALTER TABLE suggestions ADD COLUMN setup_tags TEXT")
 
 
 def _connect() -> sqlite3.Connection:
@@ -38,6 +49,7 @@ def _connect() -> sqlite3.Connection:
 def init_db() -> None:
     with _connect() as conn:
         conn.execute(_SCHEMA)
+        _ensure_columns(conn)
         conn.commit()
 
 
@@ -47,6 +59,7 @@ def append(
     price_at_suggestion: float,
     chart_path: str,
     ts: str | None = None,
+    setup_tags: str | None = None,
 ) -> int:
     """Append one suggestion row. Returns the new row id."""
     init_db()
@@ -57,8 +70,9 @@ def append(
             """
             INSERT INTO suggestions (
                 ts, cycle_id, action, size, entry, stop_loss,
-                take_profits, risk_reward, price_at_suggestion, rationale, chart_path
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                take_profits, risk_reward, price_at_suggestion, rationale, chart_path,
+                setup_tags
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 row_ts,
@@ -72,6 +86,7 @@ def append(
                 price_at_suggestion,
                 suggestion.rationale,
                 chart_path,
+                setup_tags,
             ),
         )
         conn.commit()

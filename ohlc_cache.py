@@ -11,6 +11,7 @@ import research
 
 PRODUCT_ID = research.PRODUCT_ID
 DAILY_GRANULARITY = "ONE_DAY"
+HOURLY_GRANULARITY = "ONE_HOUR"
 
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS candles (
@@ -153,6 +154,47 @@ def ensure_daily_history(years: int = 4) -> list[dict[str, float | str]]:
         backfill_daily(years=years)
 
     return get_candles(DAILY_GRANULARITY, start_ts=min_needed)
+
+
+def backfill_hourly(years: int = 4) -> dict:
+    """Fetch and cache H1 candles for the past `years` years."""
+    init_cache()
+    end = int(time.time())
+    start = int((datetime.now(timezone.utc) - timedelta(days=365 * years)).timestamp())
+
+    bars = research.fetch_coinbase_candles_range(HOURLY_GRANULARITY, start, end)
+    written = upsert_candles(HOURLY_GRANULARITY, bars)
+    min_ts, max_ts, count = cache_coverage(HOURLY_GRANULARITY)
+    return {
+        "granularity": HOURLY_GRANULARITY,
+        "fetched": len(bars),
+        "written": written,
+        "count": count,
+        "min_ts": min_ts,
+        "max_ts": max_ts,
+    }
+
+
+def ensure_hourly_history(years: int = 4) -> list[dict[str, float | str]]:
+    """Return H1 bars for the past `years` years, backfilling cache if needed."""
+    min_needed = (
+        datetime.now(timezone.utc) - timedelta(days=365 * years)
+    ).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+    min_ts, max_ts, count = cache_coverage(HOURLY_GRANULARITY)
+    if count == 0 or (min_ts and min_ts > min_needed):
+        backfill_hourly(years=years)
+
+    return get_candles(HOURLY_GRANULARITY, start_ts=min_needed)
+
+
+def get_h12_bars(years: int = 4) -> list[dict[str, float | str]]:
+    """H1 cache resampled to 12-hour bars."""
+    hourly = ensure_hourly_history(years=years)
+    if not hourly:
+        return []
+    # ~2 twelve-hour bars per calendar day.
+    return research._resample_h12(hourly, limit=years * 365 * 2 + 8)
 
 
 def get_weekly_bars(years: int = 4) -> list[dict[str, float | str]]:

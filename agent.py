@@ -12,6 +12,7 @@ import notify
 import paper
 import research
 from models import Suggestion
+from patterns.market_context import build_market_context
 
 logger = logging.getLogger(__name__)
 
@@ -23,20 +24,37 @@ def run_cycle() -> tuple[Suggestion, str] | None:
 
     try:
         data = research.get_all_timeframes()
+        market_context = build_market_context(data["H12"], data["H4"], data["H1"])
         chart_paths = charts.render_charts(data, cycle_id=cycle_id)
 
         guide = analyze.load_trading_guide()
-        suggestion = analyze.propose_trade(chart_paths, trading_guide=guide)
+        suggestion = analyze.propose_trade(
+            chart_paths,
+            trading_guide=guide,
+            market_context=market_context,
+        )
+
+        if market_context.alerts:
+            alert_block = "Signals: " + " | ".join(market_context.alerts)
+            suggestion.rationale = f"{alert_block}\n\n{suggestion.rationale}".strip()
 
         annotated = charts.annotate_chart(
             chart_paths["H1"],
             suggestion,
             cycle_id,
             h1_bars=data["H1"],
+            market_context=market_context,
         )
 
         price = research.get_spot_price()
-        row_id = ledger.append(suggestion, cycle_id, price, annotated)
+        setup_tags = ",".join(market_context.setup_tags) if market_context.setup_tags else None
+        row_id = ledger.append(
+            suggestion,
+            cycle_id,
+            price,
+            annotated,
+            setup_tags=setup_tags,
+        )
         paper.update(suggestion, price, cycle_id=cycle_id)
         pnl_footer = paper.format_pnl_footer(price)
 

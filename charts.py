@@ -18,6 +18,7 @@ from matplotlib.patches import Rectangle
 import config
 import research
 from models import Suggestion
+from patterns.market_context import MarketContext
 
 FIGSIZE = (12, 8)
 ANNOTATED_FIGSIZE = (16, 8)
@@ -70,7 +71,7 @@ def render_charts(
   cycle_id = cycle_id or datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
   paths: dict[str, str] = {}
 
-  for tf in ("W1", "D1", "H4", "H1"):
+  for tf in research.STRATEGY_TIMEFRAMES:
     bars = data.get(tf)
     if not bars:
       raise ValueError(f"Missing OHLC data for {tf}")
@@ -179,11 +180,51 @@ def _draw_price_line(ax, price: float, label: str, color: str, linestyle: str) -
   )
 
 
+def _draw_detected_overlays(
+  ax,
+  df: pd.DataFrame,
+  market_context: MarketContext | None,
+) -> None:
+  """Draw programmatic 24h range and order blocks on the H1 chart."""
+  if market_context is None:
+    return
+
+  if market_context.range_24h:
+    r = market_context.range_24h
+    _draw_price_line(ax, r.high, "24h High", "#7B68EE", ":")
+    _draw_price_line(ax, r.low, "24h Low", "#7B68EE", ":")
+
+  for ob in market_context.order_blocks[-3:]:
+    try:
+      x0 = _nearest_index(df, ob.start_ts)
+      x1 = _nearest_index(df, ob.end_ts)
+      if x0 > x1:
+        x0, x1 = x1, x0
+      x0_num = mdates.date2num(x0)
+      width = max(mdates.date2num(x1) - x0_num, 0.02)
+      color = "#90EE90" if ob.direction == "bullish" else "#FFB6C1"
+      edge = "#228B22" if ob.direction == "bullish" else "#CD5C5C"
+      rect = Rectangle(
+        (x0_num, float(ob.low)),
+        width,
+        float(ob.high) - float(ob.low),
+        facecolor=color,
+        edgecolor=edge,
+        alpha=0.25,
+        linewidth=1.0,
+        zorder=1,
+      )
+      ax.add_patch(rect)
+    except (KeyError, ValueError, IndexError):
+      continue
+
+
 def annotate_chart(
   h1_path: str,
   suggestion: Suggestion,
   cycle_id: str,
   h1_bars: list[dict] | None = None,
+  market_context: MarketContext | None = None,
 ) -> str:
   """
   Draw trade markup on the H1 chart; rationale sits in a panel beside the chart.
@@ -198,6 +239,8 @@ def annotate_chart(
 
   title = "ETH-USD H1 — Trade Idea" if suggestion.action != "no_trade" else "ETH-USD H1 — No Trade"
   fig, ax, ax_text = _build_annotated_figure(df, title)
+
+  _draw_detected_overlays(ax, df, market_context)
 
   if suggestion.action == "no_trade":
     _draw_rationale_panel(ax_text, "NO TRADE", suggestion.rationale)
@@ -277,7 +320,7 @@ def render_research_chart(
 
   date_start = df.index[0].strftime("%Y-%m")
   date_end = df.index[-1].strftime("%Y-%m")
-  title = f"ETH-USD {timeframe} — Weekly SFP Study ({years}y)"
+  title = f"ETH-USD {timeframe} — SFP Study ({years}y)"
   fig, ax_price, ax_text = _build_annotated_figure(df, title)
 
   outcome_colors = {
@@ -287,19 +330,18 @@ def render_research_chart(
     "pending": "#AAAAAA",
   }
 
+  # mplfinance uses integer bar indices on custom axes, not matplotlib dates.
   for event in events:
     if not isinstance(event, SFPEvent):
       continue
-    ts = pd.Timestamp(event.ts)
-    if ts.tzinfo is None:
-      ts = ts.tz_localize("UTC")
-    if ts not in df.index:
-      idx_pos = df.index.get_indexer([ts], method="nearest")[0]
-      ts = df.index[idx_pos]
-    x = mdates.date2num(ts)
+    bar_idx = event.bar_idx
+    if bar_idx < 0 or bar_idx >= len(df):
+      continue
+    x = float(bar_idx)
     color = outcome_colors.get(event.outcome_a, "#888888")
     marker = "v" if event.direction == "bearish" else "^"
-    y = float(df.loc[ts, "High"]) if event.direction == "bearish" else float(df.loc[ts, "Low"])
+    row = df.iloc[bar_idx]
+    y = float(row["High"]) if event.direction == "bearish" else float(row["Low"])
     offset = 1.02 if event.direction == "bearish" else 0.98
     ax_price.scatter(
       [x],
@@ -311,7 +353,7 @@ def render_research_chart(
       linewidths=0.5,
       zorder=5,
     )
-    tick_len = (df.index[-1] - df.index[0]).days * 0.01
+    tick_len = 0.45
     ax_price.hlines(
       event.swept_level,
       x - tick_len,
@@ -331,10 +373,11 @@ def render_research_chart(
   b_pct = stats.get("outcome_b_pct", 0)
   c_pct = stats.get("outcome_c_pct", 0)
 
+  tf_label = "W-FRI weekly" if timeframe == "W1" else f"{timeframe} Coinbase"
   panel = (
-    f"Weekly SFP Results\n\n"
+    f"{timeframe} SFP Results\n\n"
     f"Period: {date_start} to {date_end}\n"
-    f"Coinbase ETH-USD (W-FRI)\n\n"
+    f"Coinbase ETH-USD ({tf_label})\n\n"
     f"Headline (Outcome A):\n"
     f"  {reversal_pct}% reversal\n"
     f"  ({rev} rev / {inv} inv)\n"

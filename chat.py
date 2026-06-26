@@ -21,8 +21,8 @@ You are the ETH trading agent assistant. Answer only about:
 - The current or latest hourly trade suggestion
 - Paper portfolio performance shown in the PnL line
 
-Be concise and practical. For historical pattern research (e.g. weekly SFP stats over past years),
-tell the user to ask directly or use /research weekly_sfp — that runs a separate analysis with charts.
+Be concise and practical. For historical pattern research (e.g. weekly or H12 SFP stats over past years),
+tell the user to ask directly or use /research h12_sfp or /research weekly_sfp — separate analysis with charts.
 This is not financial advice.
 """
 
@@ -38,6 +38,7 @@ def _format_suggestion_context(row: dict) -> str:
         f"  risk_reward: {row.get('risk_reward')}\n"
         f"  price_at_suggestion: {row.get('price_at_suggestion')}\n"
         f"  rationale: {row.get('rationale', '')}\n"
+        f"  setup_tags: {row.get('setup_tags') or 'n/a'}\n"
         f"  chart_path: {row.get('chart_path')}"
     )
 

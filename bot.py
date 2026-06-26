@@ -30,14 +30,14 @@ WELCOME_MESSAGE = (
     "You will receive an hourly trade suggestion (chart + rationale) if a setup is found.\n"
     "Reply anytime to ask about the latest suggestion — e.g. \"Why this entry?\" or "
     "\"What would invalidate the trade?\"\n\n"
-    "Research: ask about historical patterns, e.g. \"What % of weekly SFPs reversed "
-    "in the past 4 years?\" or use /research weekly_sfp\n\n"
+    "Research: ask about historical patterns, e.g. \"What % of H12 SFPs reversed "
+    "in the past 4 years?\" or use /research h12_sfp\n\n"
     "Paper PnL assumes a ${start:,.0f} portfolio with 1% risk per trade. Not financial advice."
 )
 
 _RESEARCH_KEYWORDS = re.compile(
-    r"(weekly\s+sfp|sfp\s+reversal|%.*sfp|sfp.*%|sfp.*past|past.*sfp|"
-    r"research\s+weekly|how\s+many\s+sfp)",
+    r"(weekly\s+sfp|h12\s+sfp|sfp\s+reversal|%.*sfp|sfp.*%|sfp.*past|past.*sfp|"
+    r"research\s+(weekly|h12)|how\s+many\s+sfp)",
     re.IGNORECASE,
 )
 
@@ -69,16 +69,28 @@ async def _reply(update: Update, text: str) -> None:
     await update.message.reply_text(text)
 
 
+def _research_timeframe(text: str) -> str:
+    normalized = text.strip().lower()
+    if "h12" in normalized or "12h" in normalized or "12-hour" in normalized:
+        return "H12"
+    return "W1"
+
+
 async def _handle_research(update: Update, context: ContextTypes.DEFAULT_TYPE, text: str) -> None:
     if update.message is None:
         return
 
     years = _research_years(text)
-    await _reply(update, f"Analyzing weekly SFPs over the past {years} years...")
+    timeframe = _research_timeframe(text)
+    label = "H12" if timeframe == "H12" else "weekly"
+    await _reply(update, f"Analyzing {label} SFPs over the past {years} years...")
 
     loop = asyncio.get_running_loop()
     try:
-        result = await loop.run_in_executor(None, analytics.weekly_sfp_report, years)
+        if timeframe == "H12":
+            result = await loop.run_in_executor(None, analytics.h12_sfp_report, years)
+        else:
+            result = await loop.run_in_executor(None, analytics.weekly_sfp_report, years)
     except Exception:
         logger.exception("Research handler failed")
         await _reply(update, "Sorry, the research analysis failed. Try again later.")
@@ -144,13 +156,15 @@ async def cmd_help(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         "/start — welcome + latest status\n"
         "/status — current suggestion + paper PnL\n"
         "/research weekly_sfp — weekly SFP reversal study (4 years)\n"
+        "/research h12_sfp — H12 SFP reversal study (4 years)\n"
         "/help — this message\n\n"
         "Ask about the latest hourly suggestion, e.g.:\n"
         "• Why this entry?\n"
         "• What invalidates the trade?\n"
         "• How does this match the SFP example?\n\n"
         "Research questions (returns chart + stats), e.g.:\n"
-        "• What % of weekly SFPs resulted in a reversal in the past 4 years?\n"
+        "• What % of H12 SFPs resulted in a reversal in the past 4 years?\n"
+        "• /research h12_sfp\n"
         "• /research weekly_sfp",
     )
 
@@ -198,12 +212,18 @@ async def cmd_research(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         return
 
     args = context.args or []
-    subcmd = args[0].lower() if args else "weekly_sfp"
-    if subcmd not in ("weekly_sfp", "weekly-sfp", "sfp"):
+    subcmd = args[0].lower() if args else "h12_sfp"
+    if subcmd in ("weekly_sfp", "weekly-sfp", "weekly"):
+        timeframe = "W1"
+    elif subcmd in ("h12_sfp", "h12-sfp", "h12", "sfp"):
+        timeframe = "H12"
+    else:
         await _reply(
             update,
-            "Usage: /research weekly_sfp\n\n"
-            "Or ask in plain text, e.g. \"What % of weekly SFPs reversed in the past 4 years?\"",
+            "Usage:\n"
+            "/research h12_sfp — H12 SFP study (default)\n"
+            "/research weekly_sfp — weekly SFP study\n\n"
+            "Or ask in plain text, e.g. \"What % of H12 SFPs reversed in the past 4 years?\"",
         )
         return
 
@@ -214,7 +234,8 @@ async def cmd_research(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
             years = max(1, min(int(match.group(1)), 10))
             break
 
-    text = f"weekly sfp past {years} years"
+    prefix = "h12" if timeframe == "H12" else "weekly"
+    text = f"{prefix} sfp past {years} years"
     await _handle_research(update, context, text)
 
 

@@ -13,12 +13,13 @@ import anthropic
 
 import config
 from models import Suggestion
+from patterns.market_context import MarketContext
 
 logger = logging.getLogger(__name__)
 
 TRADING_GUIDE_PATH = config.TRADING_GUIDE_DIR / "Trading Guide.md"
 VALID_ACTIONS = {"spot_buy", "spot_sell", "deriv_buy", "deriv_sell", "no_trade"}
-CHART_ORDER = ("W1", "D1", "H4", "H1")
+CHART_ORDER = ("H12", "H4", "H1")
 
 # TODO: add critic.py second-pass review before broadcast.
 
@@ -55,7 +56,10 @@ def _image_block(path: str | Path) -> dict:
     }
 
 
-def _build_user_content(chart_paths: dict[str, str]) -> list[dict]:
+def _build_user_content(
+    chart_paths: dict[str, str],
+    market_context: MarketContext | None = None,
+) -> list[dict]:
     content: list[dict] = [
         {
             "type": "text",
@@ -66,6 +70,13 @@ def _build_user_content(chart_paths: dict[str, str]) -> list[dict]:
             ),
         }
     ]
+    if market_context and market_context.summary_text:
+        content.append(
+            {
+                "type": "text",
+                "text": market_context.to_prompt_block(),
+            }
+        )
     for tf in CHART_ORDER:
         path = chart_paths[tf]
         content.append({"type": "text", "text": f"--- Live {tf} chart ---"})
@@ -157,7 +168,9 @@ def _validate(data: dict) -> Suggestion:
 
 
 def propose_trade(
-    chart_paths: dict[str, str], trading_guide: str | None = None
+    chart_paths: dict[str, str],
+    trading_guide: str | None = None,
+    market_context: MarketContext | None = None,
 ) -> Suggestion:
     """Single Claude call: chart images + Trading Guide -> Suggestion (or no_trade on failure)."""
     guide_text = trading_guide if trading_guide is not None else load_trading_guide()
@@ -174,7 +187,12 @@ def propose_trade(
                     "cache_control": {"type": "ephemeral"},
                 }
             ],
-            messages=[{"role": "user", "content": _build_user_content(chart_paths)}],
+            messages=[
+                {
+                    "role": "user",
+                    "content": _build_user_content(chart_paths, market_context),
+                }
+            ],
         )
     except Exception as exc:
         logger.exception("Claude API call failed")
@@ -196,6 +214,7 @@ def propose_trade(
 if __name__ == "__main__":
     import research
     from charts import annotate_chart, render_charts
+    from patterns.market_context import build_market_context
 
     logging.basicConfig(level=logging.INFO)
     cycle_id = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
@@ -203,9 +222,10 @@ if __name__ == "__main__":
     print("Fetching OHLC and rendering charts...")
     data = research.get_all_timeframes()
     paths = render_charts(data, cycle_id=cycle_id)
+    ctx = build_market_context(data["H12"], data["H4"], data["H1"])
 
     print("Calling Claude...")
-    suggestion = propose_trade(paths)
+    suggestion = propose_trade(paths, market_context=ctx)
     print(f"action={suggestion.action}")
     print(f"entry={suggestion.entry} sl={suggestion.stop_loss} tps={suggestion.take_profits}")
     print(f"rr={suggestion.risk_reward}")
@@ -214,5 +234,5 @@ if __name__ == "__main__":
         print(f"order_block={suggestion.order_block}")
 
     print("\nAnnotating H1 chart...")
-    annotated = annotate_chart(paths["H1"], suggestion, cycle_id, h1_bars=data["H1"])
+    annotated = annotate_chart(paths["H1"], suggestion, cycle_id, h1_bars=data["H1"], market_context=ctx)
     print(f"Annotated chart: {annotated}")
