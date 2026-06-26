@@ -1,4 +1,4 @@
-"""Claude vision analysis: charts + rules -> structured trade suggestion."""
+"""Claude vision analysis: charts + Trading Guide -> structured trade suggestion."""
 
 from __future__ import annotations
 
@@ -16,39 +16,31 @@ from models import Suggestion
 
 logger = logging.getLogger(__name__)
 
-RULES_PATH = Path(__file__).resolve().parent / "rules.md"
+TRADING_GUIDE_PATH = config.TRADING_GUIDE_DIR / "Trading Guide.md"
 VALID_ACTIONS = {"spot_buy", "spot_sell", "deriv_buy", "deriv_sell", "no_trade"}
 CHART_ORDER = ("W1", "D1", "H4", "H1")
-
-PATTERN_IMAGES: tuple[tuple[str, str], ...] = (
-    ("SFP example (sfp_examples.png)", "sfp_examples.png"),
-    ("FVG example (fair_value_gap_example.png)", "fair_value_gap_example.png"),
-    ("OB setup example (trading_setup.png)", "trading_setup.png"),
-    ("Breaker example (trade_off_breaker.png)", "trade_off_breaker.png"),
-)
 
 # TODO: add critic.py second-pass review before broadcast.
 
 
-def load_rules() -> str:
-    if not RULES_PATH.exists():
-        raise FileNotFoundError(f"Strategy rules not found: {RULES_PATH}")
-    text = RULES_PATH.read_text(encoding="utf-8")
+def load_trading_guide() -> str:
+    if not TRADING_GUIDE_PATH.exists():
+        raise FileNotFoundError(f"Trading guide not found: {TRADING_GUIDE_PATH}")
+    text = TRADING_GUIDE_PATH.read_text(encoding="utf-8")
     return text.replace("PORTFOLIO_VALUE", str(config.PORTFOLIO_VALUE))
-
 
 def _encode_image(path: str | Path) -> str:
     return base64.standard_b64encode(Path(path).read_bytes()).decode("utf-8")
 
 
 def load_pattern_images() -> list[tuple[str, Path]]:
-    """Trading Guide reference pattern PNGs for Claude vision."""
+    """All reference PNGs in Trading Guide/ for Claude vision."""
     images: list[tuple[str, Path]] = []
-    for label, filename in PATTERN_IMAGES:
-        path = config.TRADING_GUIDE_DIR / filename
-        if not path.exists():
-            raise FileNotFoundError(f"Pattern image not found: {path}")
-        images.append((label, path))
+    for path in sorted(config.TRADING_GUIDE_DIR.glob("*.png")):
+        label = path.stem.replace("_", " ")
+        images.append((f"{label} ({path.name})", path))
+    if not images:
+        raise FileNotFoundError(f"No pattern images found in {config.TRADING_GUIDE_DIR}")
     return images
 
 
@@ -68,8 +60,8 @@ def _build_user_content(chart_paths: dict[str, str]) -> list[dict]:
         {
             "type": "text",
             "text": (
-                "Analyze live ETH-USD charts and apply the strategy rules. "
-                "Compare live structure to the reference pattern examples below. "
+                "Analyze live ETH-USD charts and apply the Trading Guide strategy. "
+                "Compare live structure to all reference pattern images below. "
                 "Return one JSON trade suggestion. JSON only."
             ),
         }
@@ -164,9 +156,11 @@ def _validate(data: dict) -> Suggestion:
     return suggestion
 
 
-def propose_trade(chart_paths: dict[str, str], rules: str | None = None) -> Suggestion:
-    """Single Claude call: chart images + rules -> Suggestion (or no_trade on failure)."""
-    rules_text = rules if rules is not None else load_rules()
+def propose_trade(
+    chart_paths: dict[str, str], trading_guide: str | None = None
+) -> Suggestion:
+    """Single Claude call: chart images + Trading Guide -> Suggestion (or no_trade on failure)."""
+    guide_text = trading_guide if trading_guide is not None else load_trading_guide()
     client = anthropic.Anthropic(api_key=config.ANTHROPIC_API_KEY)
 
     try:
@@ -176,7 +170,7 @@ def propose_trade(chart_paths: dict[str, str], rules: str | None = None) -> Sugg
             system=[
                 {
                     "type": "text",
-                    "text": rules_text,
+                    "text": guide_text,
                     "cache_control": {"type": "ephemeral"},
                 }
             ],

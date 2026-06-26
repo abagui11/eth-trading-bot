@@ -7,6 +7,7 @@ import sys
 from pathlib import Path
 
 import access
+import analyze
 import config
 import ledger
 import paper
@@ -27,10 +28,8 @@ def main() -> None:
     tg_ok = ":" in config.TELEGRAM_BOT_TOKEN and "test" not in config.TELEGRAM_BOT_TOKEN.lower()
     allow_ok = config.PAYWALL_ENABLED and len(config.ALLOWED_TELEGRAM_IDS) > 0 or not config.PAYWALL_ENABLED
 
-    pattern_ok = all(
-        (config.TRADING_GUIDE_DIR / name).exists()
-        for _, name in __import__("analyze").PATTERN_IMAGES
-    )
+    guide_ok = analyze.TRADING_GUIDE_PATH.exists()
+    pattern_ok = len(list(config.TRADING_GUIDE_DIR.glob("*.png"))) > 0
 
     print("=== Pre-flight check ===\n")
     print(f"ANTHROPIC_MODEL:       {config.ANTHROPIC_MODEL}")
@@ -42,6 +41,7 @@ def main() -> None:
     print(f"Allowlist configured:  {'OK' if allow_ok else 'SET ALLOWED_TELEGRAM_IDS or PAYWALL_ENABLED=false'}")
     print(f"PORTFOLIO_VALUE:       {config.PORTFOLIO_VALUE}")
     print(f"PAPER_PORTFOLIO_VALUE: {config.PAPER_PORTFOLIO_VALUE}")
+    print(f"Trading Guide:         {'OK' if guide_ok else 'MISSING Trading Guide/Trading Guide.md'}")
     print(f"Pattern images:        {'OK' if pattern_ok else 'MISSING in Trading Guide/'}")
     print(f"Ledger row count:      {len(ledger.get_latest(100))}")
     print(f"Annotated charts:      {len(charts)}")
@@ -68,7 +68,7 @@ def main() -> None:
     print("\n=== Recent ledger (last 3) ===")
     print(json.dumps(rows[:3], indent=2))
 
-    if not api_ok or not tg_ok or not allow_ok or not pattern_ok:
+    if not api_ok or not tg_ok or not allow_ok or not guide_ok or not pattern_ok:
         print("\nFix .env before main.py — see .env.example")
         sys.exit(1)
 

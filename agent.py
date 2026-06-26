@@ -25,8 +25,8 @@ def run_cycle() -> tuple[Suggestion, str] | None:
         data = research.get_all_timeframes()
         chart_paths = charts.render_charts(data, cycle_id=cycle_id)
 
-        rules = analyze.load_rules()
-        suggestion = analyze.propose_trade(chart_paths, rules=rules)
+        guide = analyze.load_trading_guide()
+        suggestion = analyze.propose_trade(chart_paths, trading_guide=guide)
 
         annotated = charts.annotate_chart(
             chart_paths["H1"],

@@ -17,7 +17,7 @@ logger = logging.getLogger(__name__)
 
 _SYSTEM_SUFFIX = """
 You are the ETH trading agent assistant. Answer only about:
-- The agent's ICT swing strategy and rules
+- The agent's ICT swing strategy and Trading Guide
 - The current or latest hourly trade suggestion
 - Paper portfolio performance shown in the PnL line
 
@@ -44,7 +44,7 @@ def _format_suggestion_context(row: dict) -> str:
 
 def answer(user_message: str) -> str:
     """Return Claude's reply about the latest suggestion (caller appends PnL footer)."""
-    rules = analyze.load_rules()
+    guide = analyze.load_trading_guide()
     latest = ledger.get_latest_suggestion()
     spot = research.get_spot_price()
 
@@ -80,7 +80,7 @@ def answer(user_message: str) -> str:
             system=[
                 {
                     "type": "text",
-                    "text": rules + "\n\n" + _SYSTEM_SUFFIX,
+                    "text": guide + "\n\n" + _SYSTEM_SUFFIX,
                     "cache_control": {"type": "ephemeral"},
                 }
             ],
