@@ -13,14 +13,14 @@ _METHODOLOGY: dict[str, str] = {
     "W1": (
         "Methodology: Coinbase ETH-USD, weekly W-FRI bars. "
         "SFP = L=3 pivot, wick sweeps >=0.2% past a swing from the last ~20 weeks, close back inside. "
-        "Reversal (A) = close in SFP direction within N bars without first closing past swept level. "
-        "B/C logged separately (>=5% move, structure break). Not financial advice."
+        "Outcome A = >=2% follow-through from event close within N bars (or invalidation if close past level). "
+        "B/C = >=5% move / structure break (same window). Not financial advice."
     ),
     "H12": (
         "Methodology: Coinbase ETH-USD, 12h bars resampled from H1. "
-        "SFP = L=4 pivot, latest swing swept >=0.2% within ~4 weeks, close back inside. "
-        "Reversal (A) = close in SFP direction within N bars without first closing past swept level. "
-        "B/C logged separately (>=5% move, structure break). Not financial advice."
+        "SFP = L=4 extreme pivot, latest swing swept >=0.3% within ~3 weeks, close back inside. "
+        "Outcome A = >=1.5% follow-through from event close within N bars (or invalidation). "
+        "B/C = >=5% move / structure break (same window). Not financial advice."
     ),
 }
 
@@ -65,9 +65,9 @@ def _format_summary(
         "",
         f"Total SFPs detected: {stats['total_sfps']}",
         f"Outcome B (>=5% move in direction): {stats['outcome_b_pct']}% "
-        f"({stats['outcome_b_count']}/{stats['total_sfps'] - stats['pending']})",
+        f"({stats['outcome_b_count']}/{stats['outcome_bc_eligible']})",
         f"Outcome C (structure break): {stats['outcome_c_pct']}% "
-        f"({stats['outcome_c_count']}/{stats['total_sfps'] - stats['pending']})",
+        f"({stats['outcome_c_count']}/{stats['outcome_bc_eligible']})",
         "",
         "Recent events:",
     ]
