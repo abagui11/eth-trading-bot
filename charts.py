@@ -187,16 +187,17 @@ def _draw_price_line(ax, price: float, label: str, color: str, linestyle: str) -
 
 
 def _save_figure(fig, path: Path) -> str:
-  """Save PNG and clamp dimensions so Telegram accepts the photo."""
+  """Save PNG at fixed figsize (avoid bbox_inches=tight blowing up width)."""
   path.parent.mkdir(parents=True, exist_ok=True)
-  fig.savefig(path, dpi=DPI, bbox_inches="tight", pad_inches=0.15)
+  fig.tight_layout()
+  fig.savefig(path, dpi=DPI, pad_inches=0.15)
   plt.close(fig)
   _ensure_telegram_safe_image(path)
   return str(path)
 
 
 def _ensure_telegram_safe_image(path: Path) -> None:
-  """Downscale charts that exceed Telegram or sanity pixel limits."""
+  """Downscale charts that exceed Telegram limits; never squash to a thin strip."""
   try:
     from PIL import Image
   except ImportError:
@@ -204,6 +205,14 @@ def _ensure_telegram_safe_image(path: Path) -> None:
 
   with Image.open(path) as im:
     width, height = im.size
+    if height <= 0 or width <= 0:
+      return
+
+    aspect = width / height
+    if aspect > 8 or aspect < 0.125:
+      # Degenerate export — resizing would produce an unusable sliver.
+      return
+
     too_large = (
       width > TELEGRAM_MAX_CHART_WIDTH
       or height > TELEGRAM_MAX_CHART_HEIGHT
@@ -211,11 +220,14 @@ def _ensure_telegram_safe_image(path: Path) -> None:
     )
     if not too_large:
       return
-    resized = im.copy()
-    resized.thumbnail(
-      (TELEGRAM_MAX_CHART_WIDTH, TELEGRAM_MAX_CHART_HEIGHT),
-      Image.Resampling.LANCZOS,
+
+    scale = min(
+      TELEGRAM_MAX_CHART_WIDTH / width,
+      TELEGRAM_MAX_CHART_HEIGHT / height,
+      1.0,
     )
+    new_size = (max(1, int(width * scale)), max(1, int(height * scale)))
+    resized = im.resize(new_size, Image.Resampling.LANCZOS)
     resized.save(path, optimize=True)
 
 
@@ -315,6 +327,7 @@ def annotate_chart(
       fontsize=FONT_SIZE,
       fontweight="bold",
       va="bottom",
+      clip_on=True,
     )
 
   if suggestion.entry is not None:
