@@ -11,6 +11,7 @@ import matplotlib
 matplotlib.use("Agg")
 import matplotlib.dates as mdates
 import matplotlib.pyplot as plt
+from matplotlib.transforms import blended_transform_factory
 import mplfinance as mpf
 import pandas as pd
 from matplotlib.patches import Rectangle
@@ -25,6 +26,9 @@ ANNOTATED_FIGSIZE = (16, 8)
 DPI = 120
 FONT_SIZE = 11
 RATIONALE_WRAP_WIDTH = 38
+# Telegram rejects extreme PNG dimensions; keep saved charts within these bounds.
+TELEGRAM_MAX_CHART_WIDTH = 4096
+TELEGRAM_MAX_CHART_HEIGHT = 4096
 
 _STYLE = mpf.make_mpf_style(
   base_mpf_style="charles",
@@ -165,19 +169,54 @@ def _draw_rationale_panel(ax_text, header: str, rationale: str) -> None:
 
 
 def _draw_price_line(ax, price: float, label: str, color: str, linestyle: str) -> None:
+  """Draw a horizontal level with a label pinned inside the chart (Telegram-safe)."""
   ax.axhline(price, color=color, linestyle=linestyle, linewidth=1.8, alpha=0.95)
-  xlim = ax.get_xlim()
+  transform = blended_transform_factory(ax.transAxes, ax.transData)
   ax.text(
-    xlim[1],
+    0.99,
     price,
-    f"  {label} {price:,.2f}",
+    f" {label} {price:,.2f}",
     color=color,
     fontsize=FONT_SIZE,
     fontweight="bold",
     va="center",
-    ha="left",
-    clip_on=False,
+    ha="right",
+    transform=transform,
+    clip_on=True,
   )
+
+
+def _save_figure(fig, path: Path) -> str:
+  """Save PNG and clamp dimensions so Telegram accepts the photo."""
+  path.parent.mkdir(parents=True, exist_ok=True)
+  fig.savefig(path, dpi=DPI, bbox_inches="tight", pad_inches=0.15)
+  plt.close(fig)
+  _ensure_telegram_safe_image(path)
+  return str(path)
+
+
+def _ensure_telegram_safe_image(path: Path) -> None:
+  """Downscale charts that exceed Telegram or sanity pixel limits."""
+  try:
+    from PIL import Image
+  except ImportError:
+    return
+
+  with Image.open(path) as im:
+    width, height = im.size
+    too_large = (
+      width > TELEGRAM_MAX_CHART_WIDTH
+      or height > TELEGRAM_MAX_CHART_HEIGHT
+      or width * height > 25_000_000
+    )
+    if not too_large:
+      return
+    resized = im.copy()
+    resized.thumbnail(
+      (TELEGRAM_MAX_CHART_WIDTH, TELEGRAM_MAX_CHART_HEIGHT),
+      Image.Resampling.LANCZOS,
+    )
+    resized.save(path, optimize=True)
 
 
 def _draw_detected_overlays(
@@ -244,9 +283,7 @@ def annotate_chart(
 
   if suggestion.action == "no_trade":
     _draw_rationale_panel(ax_text, "NO TRADE", suggestion.rationale)
-    fig.savefig(annotated_path, dpi=DPI, bbox_inches="tight")
-    plt.close(fig)
-    return str(annotated_path)
+    return _save_figure(fig, annotated_path)
 
   # --- trade markup on chart only ---
   # Order block zone
@@ -291,9 +328,7 @@ def annotate_chart(
   header = f"{suggestion.action.upper()}  |  R/R {rr}"
   _draw_rationale_panel(ax_text, header, suggestion.rationale)
 
-  fig.savefig(annotated_path, dpi=DPI, bbox_inches="tight")
-  plt.close(fig)
-  return str(annotated_path)
+  return _save_figure(fig, annotated_path)
 
 
 def render_research_chart(
@@ -392,9 +427,7 @@ def render_research_chart(
   )
   _draw_rationale_panel(ax_text, "Research", panel)
 
-  fig.savefig(path, dpi=DPI, bbox_inches="tight")
-  plt.close(fig)
-  return str(path)
+  return _save_figure(fig, path)
 
 
 def _fake_suggestion(h1_bars: list[dict]) -> Suggestion:

@@ -74,8 +74,19 @@ async def send_suggestion_to_chat(
     caption = build_caption(suggestion)
     rationale_message = build_rationale_message(suggestion, pnl_footer)
 
-    with open(path, "rb") as photo:
-        await bot.send_photo(chat_id=chat_id, photo=photo, caption=caption)
+    try:
+        with open(path, "rb") as photo:
+            await bot.send_photo(chat_id=chat_id, photo=photo, caption=caption)
+    except Exception:
+        logger.exception(
+            "Photo send failed for chat %s (%s), falling back to text",
+            chat_id,
+            path.name,
+        )
+        fallback = f"{caption}\n\n{rationale_message}" if rationale_message else caption
+        await bot.send_message(chat_id=chat_id, text=fallback[:4096])
+        return
+
     if rationale_message:
         await bot.send_message(chat_id=chat_id, text=rationale_message)
 

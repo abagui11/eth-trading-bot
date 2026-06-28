@@ -36,6 +36,18 @@ def load_allowed_ids() -> set[int]:
     return set(config.ALLOWED_TELEGRAM_IDS)
 
 
+def _drop_truncated_id_typos(ids: set[int]) -> list[int]:
+    """Skip allowlist IDs that are a prefix of another ID (e.g. 203724579 vs 2037245798)."""
+    sorted_ids = sorted(ids)
+    kept: list[int] = []
+    for uid in sorted_ids:
+        uid_str = str(uid)
+        if any(uid != other and str(other).startswith(uid_str) for other in sorted_ids):
+            continue
+        kept.append(uid)
+    return kept
+
+
 def is_allowed(user_id: int) -> bool:
     if not config.PAYWALL_ENABLED:
         return True
@@ -47,8 +59,8 @@ def broadcast_recipient_ids() -> list[int]:
     if not config.PAYWALL_ENABLED:
         ids = {row["telegram_id"] for row in list_subscribers()}
         ids.update(load_allowed_ids())
-        return sorted(ids)
-    return sorted(load_allowed_ids())
+        return _drop_truncated_id_typos(ids)
+    return _drop_truncated_id_typos(set(load_allowed_ids()))
 
 
 def register_user(user_id: int, username: str | None = None) -> None:
