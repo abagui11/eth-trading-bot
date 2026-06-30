@@ -66,6 +66,7 @@ def run_cycle() -> tuple[Suggestion, list[str]] | None:
             chart_for_ledger,
             setup_tags=setup_tags,
         )
+        ledger.require_cycle_recorded(cycle_id)
         paper.update(suggestion, price, cycle_id=cycle_id)
         pnl_footer = paper.format_pnl_footer(price)
 

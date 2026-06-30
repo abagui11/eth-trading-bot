@@ -374,6 +374,10 @@ def update(suggestion: Suggestion, spot_price: float, cycle_id: str | None = Non
     return get_state()
 
 
+class OpenPositionConflictError(ValueError):
+    """Raised when restore_open_position would overwrite an existing open position."""
+
+
 def restore_open_position(
     *,
     action: str,
@@ -386,9 +390,26 @@ def restore_open_position(
     opened_at: str,
     open_cycle_id: str,
     spot_price: float,
+    force: bool = False,
 ) -> dict:
-    """Manually set an open paper position (e.g. backfill after a missed broadcast)."""
+    """Manually set an open paper position (e.g. backfill after a missed broadcast).
+
+    Refuses to overwrite a different open position unless force=True (closes first).
+    Re-running with the same open_cycle_id is a no-op when already open.
+    """
     init_db()
+    state = get_state()
+    if is_open(state):
+        existing_cycle = str(state.get("open_cycle_id") or "")
+        if existing_cycle == open_cycle_id:
+            return state
+        if not force:
+            raise OpenPositionConflictError(
+                f"Paper already has {state.get('action')} open "
+                f"(cycle {existing_cycle}); refusing to overwrite with "
+                f"{action} (cycle {open_cycle_id}). Pass force=True to close first."
+            )
+
     side = "long" if action in LONG_ACTIONS else "short"
     notional = eth_qty * entry
     starting = config.PAPER_PORTFOLIO_VALUE
@@ -397,6 +418,24 @@ def restore_open_position(
         raise ValueError(f"Notional ${notional:,.2f} exceeds paper portfolio ${starting:,.2f}")
 
     with _connect() as conn:
+        if is_open(state):
+            cash = float(state["cash_usd"])
+            cash, _, _, _ = _close_position(
+                conn,
+                cash,
+                str(state["side"]),
+                float(state["eth_qty"]),
+                state["avg_entry"],
+                spot_price,
+                open_cycle_id,
+            )
+            notional = eth_qty * entry
+            cash -= notional
+            if cash < 0:
+                raise ValueError(
+                    f"Notional ${notional:,.2f} exceeds available cash ${cash + notional:,.2f}"
+                )
+
         conn.execute(
             """
             UPDATE paper_state

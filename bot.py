@@ -187,12 +187,37 @@ async def cmd_status(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
     pnl = paper.format_pnl_footer(spot)
     position_detail = paper.format_position_detail(spot)
 
+    latest = ledger.get_latest_suggestion()
     if position_detail:
-        body = f"{position_detail}\n\n{pnl}"
-        await _reply(update, body[:4096])
+        lines = [position_detail]
+        if latest:
+            open_pos = paper.get_open_position(spot)
+            open_cid = open_pos.get("open_cycle_id") if open_pos else None
+            header = "Latest hourly cycle"
+            if open_cid and latest.get("cycle_id") != open_cid:
+                header += " (may differ from open position)"
+            tps = ", ".join(f"{tp:,.2f}" for tp in latest.get("take_profits", [])) or "n/a"
+            lines.extend(
+                [
+                    "",
+                    f"--- {header} ---",
+                    f"Cycle: {latest['cycle_id']} ({latest['ts']})",
+                    f"Action: {latest['action']}",
+                    f"Entry: {latest.get('entry')} | SL: {latest.get('stop_loss')} | TP: {tps}",
+                    f"R/R: {latest.get('risk_reward')}",
+                ]
+            )
+            rationale = str(latest.get("rationale", "")).strip()
+            if rationale:
+                max_len = 600
+                if len(rationale) > max_len:
+                    rationale = rationale[:max_len].rstrip() + "..."
+                lines.extend(["", rationale])
+        lines.extend(["", pnl])
+        await _reply(update, "\n".join(lines)[:4096])
         return
 
-    latest = ledger.get_latest_trade_suggestion() or ledger.get_latest_suggestion()
+    latest = ledger.get_latest_trade_suggestion() or latest
     if latest is None:
         await _reply(update, f"No suggestions yet.\n\n{pnl}")
         return

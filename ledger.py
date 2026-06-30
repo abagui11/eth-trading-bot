@@ -132,6 +132,14 @@ def get_suggestion_by_cycle_id(cycle_id: str) -> dict | None:
     return record
 
 
+def require_cycle_recorded(cycle_id: str) -> dict:
+    """Return the ledger row for cycle_id or raise if the cycle was not persisted."""
+    row = get_suggestion_by_cycle_id(cycle_id)
+    if row is None:
+        raise RuntimeError(f"Ledger row missing for cycle_id={cycle_id!r}")
+    return row
+
+
 def get_latest(n: int = 10) -> list[dict]:
     """Return the most recent n ledger rows as plain dicts."""
     init_db()

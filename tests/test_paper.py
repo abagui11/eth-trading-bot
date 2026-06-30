@@ -85,6 +85,64 @@ class PaperPositionTests(unittest.TestCase):
         self.assertTrue(paper.is_open())
         self.assertEqual(paper.get_state()["stop_loss"], 1592.0)
 
+    def test_restore_refuses_overwrite_without_force(self) -> None:
+        paper.restore_open_position(
+            action="deriv_sell",
+            entry=1576.0,
+            eth_qty=0.625,
+            stop_loss=1592.0,
+            take_profits=[1545.0],
+            risk_reward=2.0,
+            suggested_size=0.64,
+            opened_at="2026-06-27T17:29:25Z",
+            open_cycle_id="cycle_short",
+            spot_price=1570.0,
+        )
+        with self.assertRaises(paper.OpenPositionConflictError):
+            paper.restore_open_position(
+                action="spot_buy",
+                entry=1572.0,
+                eth_qty=0.34,
+                stop_loss=1543.0,
+                take_profits=[1610.0],
+                risk_reward=2.27,
+                suggested_size=0.32,
+                opened_at="2026-06-30T15:26:20Z",
+                open_cycle_id="cycle_long",
+                spot_price=1570.0,
+            )
+        self.assertEqual(paper.get_state()["open_cycle_id"], "cycle_short")
+
+    def test_restore_force_closes_then_opens(self) -> None:
+        paper.restore_open_position(
+            action="deriv_sell",
+            entry=1576.0,
+            eth_qty=0.625,
+            stop_loss=1592.0,
+            take_profits=[1545.0],
+            risk_reward=2.0,
+            suggested_size=0.64,
+            opened_at="2026-06-27T17:29:25Z",
+            open_cycle_id="cycle_short",
+            spot_price=1570.0,
+        )
+        paper.restore_open_position(
+            action="spot_buy",
+            entry=1572.0,
+            eth_qty=0.34,
+            stop_loss=1543.0,
+            take_profits=[1610.0],
+            risk_reward=2.27,
+            suggested_size=0.32,
+            opened_at="2026-06-30T15:26:20Z",
+            open_cycle_id="cycle_long",
+            spot_price=1570.0,
+            force=True,
+        )
+        state = paper.get_state()
+        self.assertEqual(state["side"], "long")
+        self.assertEqual(state["open_cycle_id"], "cycle_long")
+
 
 if __name__ == "__main__":
     unittest.main()

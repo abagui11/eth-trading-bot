@@ -71,6 +71,7 @@ def main() -> None:
         opened_at=OPENED_AT,
         open_cycle_id=CYCLE_ID,
         spot_price=spot,
+        force=True,
     )
     print(f"Paper: restored short {eth_qty:.4f} ETH @ {entry:,.2f}")
     print()
