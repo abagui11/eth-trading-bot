@@ -49,6 +49,9 @@ def main() -> None:
     print(f"Ledger row count:      {len(ledger.get_latest(100))}")
     print(f"Output charts:         {len(charts)}")
     print(f"Paper PnL footer:      {paper.format_pnl_footer()}")
+    position = paper.format_position_detail()
+    if position:
+        print(f"\nOpen position:\n{position}")
 
     subs = access.list_subscribers()
     pending = access.pending_subscribers()
