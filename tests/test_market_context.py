@@ -65,9 +65,29 @@ class MarketContextTests(unittest.TestCase):
             outcome_b=True,
             outcome_c=True,
         )
-        recent = _filter_recent_sfps([old, fresh], now=now)
+        recent = _filter_recent_sfps([old, fresh], now=now)[0]
         self.assertEqual(len(recent), 1)
         self.assertEqual(recent[0].direction, "bearish")
+
+    def test_filter_excludes_live_invalidated_bearish_sfp(self) -> None:
+        now = datetime(2026, 6, 30, 18, 0, tzinfo=timezone.utc)
+        event = SFPEvent(
+            ts="2026-06-30T12:00:00Z",
+            bar_idx=12,
+            timeframe="H1",
+            direction="bearish",
+            swept_level=1587.0,
+            sweep_depth_pct=0.2,
+            aligns_prior_swing=False,
+            volume_spike=False,
+            outcome_a="reversal",
+            outcome_b=True,
+            outcome_c=True,
+        )
+        valid, invalidated = _filter_recent_sfps([event], spot=1595.0, now=now)
+        self.assertEqual(len(valid), 0)
+        self.assertEqual(len(invalidated), 1)
+        self.assertEqual(invalidated[0].swept_level, 1587.0)
 
     def test_context_includes_spot_and_decision_rules(self) -> None:
         h1 = _h1_series(30)

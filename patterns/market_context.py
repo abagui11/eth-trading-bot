@@ -44,17 +44,26 @@ def _parse_ts(ts: str) -> datetime:
     return datetime.fromisoformat(ts.replace("Z", "+00:00"))
 
 
+def _is_sfp_live_valid(event: SFPEvent, spot: float) -> bool:
+    """False when spot has closed back through the swept level (post-window invalidation)."""
+    if event.direction == "bullish":
+        return spot >= event.swept_level
+    return spot <= event.swept_level
+
+
 def _filter_recent_sfps(
     events: list[SFPEvent],
     *,
+    spot: float | None = None,
     max_age_hours: int = SFP_MAX_AGE_HOURS,
     max_bars: int | None = None,
     now: datetime | None = None,
-) -> list[SFPEvent]:
-    """Keep only SFPs within the recent time window (reversal or pending)."""
+) -> tuple[list[SFPEvent], list[SFPEvent]]:
+    """Keep recent reversal/pending SFPs; return (valid, live_invalidated)."""
     now = now or datetime.now(timezone.utc)
     cutoff = now - timedelta(hours=max_age_hours)
     recent: list[SFPEvent] = []
+    live_invalidated: list[SFPEvent] = []
     for event in events:
         if event.outcome_a not in ("reversal", "pending"):
             continue
@@ -64,10 +73,13 @@ def _filter_recent_sfps(
             continue
         if event_ts < cutoff:
             continue
+        if spot is not None and not _is_sfp_live_valid(event, spot):
+            live_invalidated.append(event)
+            continue
         recent.append(event)
     if max_bars is not None and len(recent) > max_bars:
         recent = recent[-max_bars:]
-    return recent[-3:]
+    return recent[-3:], live_invalidated
 
 
 def _bars_since_extreme(h1_bars: list[dict], field_name: str) -> tuple[int, float] | None:
@@ -184,10 +196,14 @@ def build_market_context(
 
     h12_sfps = detect_sfps(h12_bars, timeframe="H12")
     h1_sfps = detect_sfps(h1_bars, timeframe="H1")
-    recent_h12 = _filter_recent_sfps(h12_sfps, max_age_hours=36)
-    recent_h1 = _filter_recent_sfps(
-        h1_sfps, max_age_hours=SFP_MAX_AGE_HOURS, max_bars=H1_SFP_MAX_BARS
+    recent_h12, inv_h12 = _filter_recent_sfps(h12_sfps, spot=spot, max_age_hours=36)
+    recent_h1, inv_h1 = _filter_recent_sfps(
+        h1_sfps,
+        spot=spot,
+        max_age_hours=SFP_MAX_AGE_HOURS,
+        max_bars=H1_SFP_MAX_BARS,
     )
+    live_invalidated = inv_h12 + inv_h1
 
     for event in recent_h12:
         setup_tags.append(f"h12_sfp_{event.direction}")
@@ -340,6 +356,16 @@ def build_market_context(
     else:
         lines.append("Recent H1 SFPs: none in time window")
 
+    if live_invalidated:
+        lines.append("Live-invalidated SFPs (excluded — spot negated swept level):")
+        for event in live_invalidated:
+            reason = (
+                f"spot {spot:,.2f} below swept {event.swept_level:,.2f}"
+                if event.direction == "bullish"
+                else f"spot {spot:,.2f} above swept {event.swept_level:,.2f}"
+            )
+            lines.append(f"  - {_format_sfp(event)} ({reason})")
+
     if key_levels_near:
         lines.append("Nearest key levels to spot:")
         for lv in key_levels_near:
@@ -352,7 +378,7 @@ def build_market_context(
             "- If RETEST STATUS is FILLED, do NOT say price has not reached the retest zone.",
             "- If setup state is bearish_retest_rejected or short_trigger_retest, strongly favor SHORT.",
             "- If HTF zone conflict, default no_trade unless LTF+HTF align clearly.",
-            "- Only cite SFPs listed above; older SFPs are stale.",
+            "- Only cite SFPs listed under Recent H12/H1 SFPs; do not cite Live-invalidated SFPs.",
             "- Trades: structure_chart=H12, entry_chart=H1 unless exceptional.",
             "",
             "Use marked charts plus this context. Mention 24h range and setup state in rationale.",
