@@ -141,6 +141,10 @@ async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
                 rationale = rationale[:max_len].rstrip() + "..."
             lines.append(rationale)
         lines.append("")
+    closed_detail = paper.format_closed_trades_detail()
+    if closed_detail:
+        lines.append(closed_detail)
+        lines.append("")
     lines.append(pnl)
 
     await _reply(update, "\n".join(lines)[:4096])
@@ -213,13 +217,20 @@ async def cmd_status(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
                 if len(rationale) > max_len:
                     rationale = rationale[:max_len].rstrip() + "..."
                 lines.extend(["", rationale])
+        closed_detail = paper.format_closed_trades_detail()
+        if closed_detail:
+            lines.extend(["", closed_detail])
         lines.extend(["", pnl])
         await _reply(update, "\n".join(lines)[:4096])
         return
 
     latest = ledger.get_latest_trade_suggestion() or latest
     if latest is None:
-        await _reply(update, f"No suggestions yet.\n\n{pnl}")
+        closed_detail = paper.format_closed_trades_detail()
+        body = f"No suggestions yet."
+        if closed_detail:
+            body += f"\n\n{closed_detail}"
+        await _reply(update, f"{body}\n\n{pnl}")
         return
 
     tps = ", ".join(f"{tp:,.2f}" for tp in latest.get("take_profits", [])) or "n/a"
@@ -230,9 +241,12 @@ async def cmd_status(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
         f"SL: {latest.get('stop_loss')}\n"
         f"TP: {tps}\n"
         f"R/R: {latest.get('risk_reward')}\n\n"
-        f"Rationale:\n{latest.get('rationale', '')}\n\n"
-        f"{pnl}"
+        f"Rationale:\n{latest.get('rationale', '')}\n"
     )
+    closed_detail = paper.format_closed_trades_detail()
+    if closed_detail:
+        body += f"\n{closed_detail}\n"
+    body += f"\n{pnl}"
     await _reply(update, body[:4096])
 
 

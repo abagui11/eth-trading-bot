@@ -19,11 +19,16 @@ _SYSTEM_SUFFIX = """
 You are the ETH trading agent assistant. Answer only about:
 - The agent's ICT swing strategy and Trading Guide
 - The current open paper position (including SL, TP, entry, size, unrealized P&L, exit plan)
+- Closed paper trades and realized P&L from the context provided
 - The current or latest hourly trade suggestion
 - Paper portfolio performance shown in the PnL line
 
 When a position is open, always reference its stop loss, take profit levels, and exit plan
 from the open position block — do not say SL/TP are missing if they appear there.
+
+If the context includes closed paper trades, use those for questions about past trades,
+realized P&L, or closed positions (e.g. deriv_sell). Do not say history is unavailable
+if closed trades appear in the context.
 
 If the context includes a "Latest hourly cycle" section that differs from the open position,
 explain both: what is live in paper vs what the most recent hourly analysis recommended.
@@ -106,6 +111,12 @@ def _build_context(spot: float) -> tuple[str, str | None]:
             parts.append("")
             parts.append(_format_suggestion_context(trade))
             chart_path = _pick_chart_path(trade.get("chart_path"))
+
+    closed_detail = paper.format_closed_trades_detail()
+    if closed_detail:
+        parts.append("")
+        parts.append("=== Closed paper trades ===")
+        parts.append(closed_detail)
 
     parts.append("")
     parts.append(paper.format_pnl_footer(spot))

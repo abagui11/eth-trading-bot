@@ -253,6 +253,103 @@ def format_position_detail(spot_price: float | None = None) -> str | None:
     return "\n".join(lines)
 
 
+def get_closed_trades(limit: int = 10) -> list[dict]:
+    """Pair open/close rows from paper_trades; return most recent closed trades first."""
+    init_db()
+    with _connect() as conn:
+        rows = [
+            dict(row)
+            for row in conn.execute(
+                "SELECT * FROM paper_trades ORDER BY id ASC"
+            ).fetchall()
+        ]
+
+    pending_opens: list[dict] = []
+    closed: list[dict] = []
+
+    for row in rows:
+        event = str(row.get("event") or "")
+        if event == "open":
+            pending_opens.append(row)
+            continue
+        if event != "close":
+            continue
+
+        side = str(row.get("side") or "")
+        match_idx: int | None = None
+        for i in range(len(pending_opens) - 1, -1, -1):
+            if str(pending_opens[i].get("side") or "") == side:
+                match_idx = i
+                break
+        if match_idx is None:
+            continue
+
+        opened = pending_opens.pop(match_idx)
+        entry = float(opened["price"])
+        exit_price = float(row["price"])
+        qty = float(opened["eth_qty"])
+        if side == "long":
+            realized_pnl = qty * (exit_price - entry)
+        else:
+            realized_pnl = qty * (entry - exit_price)
+        notional = qty * entry
+        closed.append(
+            {
+                "side": side,
+                "open_cycle_id": opened.get("cycle_id"),
+                "close_cycle_id": row.get("cycle_id"),
+                "eth_qty": qty,
+                "entry": entry,
+                "exit": exit_price,
+                "opened_at": opened.get("ts"),
+                "closed_at": row.get("ts"),
+                "realized_pnl_usd": realized_pnl,
+                "realized_pnl_pct": (realized_pnl / notional * 100) if notional else 0.0,
+            }
+        )
+
+    closed.reverse()
+    return closed[:limit]
+
+
+def format_closed_trades_detail(limit: int = 5) -> str | None:
+    """Format recent closed paper trades with realized P&L, or None if none."""
+    trades = get_closed_trades(limit=limit)
+    if not trades:
+        return None
+
+    try:
+        import ledger
+    except ImportError:
+        ledger = None  # type: ignore[assignment]
+
+    lines = ["Closed paper trades (most recent first):"]
+    for idx, trade in enumerate(trades, start=1):
+        side = str(trade["side"])
+        action = "spot_buy" if side == "long" else "deriv_sell"
+        open_cycle_id = trade.get("open_cycle_id")
+        if ledger and open_cycle_id:
+            row = ledger.get_suggestion_by_cycle_id(str(open_cycle_id))
+            if row and row.get("action"):
+                action = str(row["action"])
+
+        pnl = float(trade["realized_pnl_usd"])
+        pnl_pct = float(trade["realized_pnl_pct"])
+        if pnl >= 0:
+            pnl_str = f"+${pnl:,.2f} (+{pnl_pct:.2f}%)"
+        else:
+            pnl_str = f"-${abs(pnl):,.2f} ({pnl_pct:.2f}%)"
+        lines.append(
+            f"{idx}. {action.upper()} {float(trade['eth_qty']):.4f} ETH "
+            f"@ ${float(trade['entry']):,.2f} -> ${float(trade['exit']):,.2f} "
+            f"| realized {pnl_str} "
+            f"| opened {trade.get('opened_at')} (cycle {open_cycle_id}) "
+            f"| closed {trade.get('closed_at')}"
+        )
+
+    return "\n".join(lines)
+
+
 def _log_trade(
     conn: sqlite3.Connection,
     event: str,

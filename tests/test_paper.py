@@ -143,6 +143,87 @@ class PaperPositionTests(unittest.TestCase):
         self.assertEqual(state["side"], "long")
         self.assertEqual(state["open_cycle_id"], "cycle_long")
 
+    def test_get_closed_trades_after_force_flip(self) -> None:
+        paper.restore_open_position(
+            action="deriv_sell",
+            entry=1576.0,
+            eth_qty=0.625,
+            stop_loss=1592.0,
+            take_profits=[1545.0],
+            risk_reward=2.0,
+            suggested_size=0.64,
+            opened_at="2026-06-27T17:29:25Z",
+            open_cycle_id="cycle_short",
+            spot_price=1570.0,
+        )
+        paper.restore_open_position(
+            action="spot_buy",
+            entry=1572.0,
+            eth_qty=0.34,
+            stop_loss=1543.0,
+            take_profits=[1610.0],
+            risk_reward=2.27,
+            suggested_size=0.32,
+            opened_at="2026-06-30T15:26:20Z",
+            open_cycle_id="cycle_long",
+            spot_price=1578.48,
+            force=True,
+        )
+        closed = paper.get_closed_trades()
+        self.assertEqual(len(closed), 1)
+        trade = closed[0]
+        self.assertEqual(trade["side"], "short")
+        self.assertEqual(trade["open_cycle_id"], "cycle_short")
+        self.assertAlmostEqual(trade["entry"], 1576.0)
+        self.assertAlmostEqual(trade["exit"], 1578.48)
+        self.assertAlmostEqual(trade["realized_pnl_usd"], -1.55, places=2)
+
+    def test_format_closed_trades_detail(self) -> None:
+        import ledger as ledger_mod
+        from models import Suggestion
+
+        short = Suggestion(
+            action="deriv_sell",
+            size=0.64,
+            entry=1576.0,
+            stop_loss=1592.0,
+            take_profits=[1545.0],
+            risk_reward=2.0,
+            rationale="short test",
+        )
+        ledger_mod.append(short, "cycle_short", 1576.0, "")
+
+        paper.restore_open_position(
+            action="deriv_sell",
+            entry=1576.0,
+            eth_qty=0.625,
+            stop_loss=1592.0,
+            take_profits=[1545.0],
+            risk_reward=2.0,
+            suggested_size=0.64,
+            opened_at="2026-06-27T17:29:25Z",
+            open_cycle_id="cycle_short",
+            spot_price=1570.0,
+        )
+        paper.restore_open_position(
+            action="spot_buy",
+            entry=1572.0,
+            eth_qty=0.34,
+            stop_loss=1543.0,
+            take_profits=[1610.0],
+            risk_reward=2.27,
+            suggested_size=0.32,
+            opened_at="2026-06-30T15:26:20Z",
+            open_cycle_id="cycle_long",
+            spot_price=1578.48,
+            force=True,
+        )
+        detail = paper.format_closed_trades_detail()
+        assert detail is not None
+        self.assertIn("DERIV_SELL", detail)
+        self.assertIn("$1,576.00", detail)
+        self.assertIn("realized -$", detail)
+
 
 if __name__ == "__main__":
     unittest.main()
