@@ -125,11 +125,14 @@ async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     welcome = WELCOME_MESSAGE.format(start=config.PAPER_PORTFOLIO_VALUE)
     spot = research.get_spot_price()
     pnl = paper.format_pnl_footer(spot)
-    latest = ledger.get_latest_suggestion()
+    position_detail = paper.format_position_detail(spot)
+    latest = ledger.get_latest_trade_suggestion() or ledger.get_latest_suggestion()
 
-    lines = [welcome, "", pnl]
-    if latest:
+    lines = [welcome, ""]
+    if position_detail:
+        lines.append(position_detail)
         lines.append("")
+    elif latest:
         lines.append(f"Latest: {latest['action']} @ cycle {latest['cycle_id']}")
         if latest.get("rationale"):
             rationale = str(latest["rationale"]).strip()
@@ -137,6 +140,8 @@ async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
             if len(rationale) > max_len:
                 rationale = rationale[:max_len].rstrip() + "..."
             lines.append(rationale)
+        lines.append("")
+    lines.append(pnl)
 
     await _reply(update, "\n".join(lines)[:4096])
 
@@ -178,10 +183,16 @@ async def cmd_status(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
         await _reply(update, PAYWALL_MESSAGE)
         return
 
-    latest = ledger.get_latest_suggestion()
     spot = research.get_spot_price()
     pnl = paper.format_pnl_footer(spot)
+    position_detail = paper.format_position_detail(spot)
 
+    if position_detail:
+        body = f"{position_detail}\n\n{pnl}"
+        await _reply(update, body[:4096])
+        return
+
+    latest = ledger.get_latest_trade_suggestion() or ledger.get_latest_suggestion()
     if latest is None:
         await _reply(update, f"No suggestions yet.\n\n{pnl}")
         return

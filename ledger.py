@@ -99,6 +99,25 @@ def get_latest_suggestion() -> dict | None:
     return rows[0] if rows else None
 
 
+def get_latest_trade_suggestion() -> dict | None:
+    """Return the most recent non-no_trade suggestion, or None."""
+    init_db()
+    with _connect() as conn:
+        row = conn.execute(
+            """
+            SELECT * FROM suggestions
+            WHERE action != 'no_trade'
+            ORDER BY id DESC
+            LIMIT 1
+            """
+        ).fetchone()
+    if row is None:
+        return None
+    record = dict(row)
+    record["take_profits"] = json.loads(record["take_profits"] or "[]")
+    return record
+
+
 def get_suggestion_by_cycle_id(cycle_id: str) -> dict | None:
     init_db()
     with _connect() as conn:

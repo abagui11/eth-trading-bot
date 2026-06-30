@@ -18,8 +18,12 @@ logger = logging.getLogger(__name__)
 _SYSTEM_SUFFIX = """
 You are the ETH trading agent assistant. Answer only about:
 - The agent's ICT swing strategy and Trading Guide
+- The current open paper position (including SL, TP, entry, size, unrealized P&L, exit plan)
 - The current or latest hourly trade suggestion
 - Paper portfolio performance shown in the PnL line
+
+When a position is open, always reference its stop loss, take profit levels, and exit plan
+from the context provided — do not say SL/TP are missing if they appear in the open position block.
 
 Be concise and practical. For historical pattern research (e.g. weekly or H12 SFP stats over past years),
 tell the user to ask directly or use /research h12_sfp or /research weekly_sfp — separate analysis with charts.
@@ -43,26 +47,56 @@ def _format_suggestion_context(row: dict) -> str:
     )
 
 
+def _build_context(spot: float) -> tuple[str, str | None]:
+    """Return (text context, optional chart path for vision)."""
+    parts: list[str] = [f"Current ETH spot: ${spot:,.2f}"]
+
+    position_detail = paper.format_position_detail(spot)
+    chart_path: str | None = None
+
+    if position_detail:
+        parts.append("")
+        parts.append("=== Open paper position ===")
+        parts.append(position_detail)
+
+        open_cycle_id = paper.get_open_position(spot)
+        if open_cycle_id and open_cycle_id.get("open_cycle_id"):
+            trade_row = ledger.get_suggestion_by_cycle_id(str(open_cycle_id["open_cycle_id"]))
+            if trade_row:
+                parts.append("")
+                parts.append("Original trade rationale:")
+                parts.append(str(trade_row.get("rationale", "")).strip())
+                chart_path = trade_row.get("chart_path")
+    else:
+        trade = ledger.get_latest_trade_suggestion()
+        latest = ledger.get_latest_suggestion()
+        if trade:
+            parts.append("")
+            parts.append(_format_suggestion_context(trade))
+            chart_path = trade.get("chart_path")
+        elif latest:
+            parts.append("")
+            parts.append(_format_suggestion_context(latest))
+            chart_path = latest.get("chart_path")
+
+    parts.append("")
+    parts.append(paper.format_pnl_footer(spot))
+    return "\n".join(parts), chart_path
+
+
 def answer(user_message: str) -> str:
     """Return Claude's reply about the latest suggestion (caller appends PnL footer)."""
     guide = analyze.load_trading_guide()
-    latest = ledger.get_latest_suggestion()
     spot = research.get_spot_price()
 
-    if latest is None:
+    if ledger.get_latest_suggestion() is None and not paper.is_open():
         return (
             "No trade suggestions yet. The agent runs every hour — check back after the first cycle."
         )
 
-    pnl_line = paper.format_pnl_footer(spot)
-    text_context = (
-        f"{_format_suggestion_context(latest)}\n\n"
-        f"Current ETH spot: ${spot:,.2f}\n"
-        f"{pnl_line}\n\n"
-        f"User question: {user_message}"
-    )
+    text_context, chart_path = _build_context(spot)
+    text_context = f"{text_context}\n\nUser question: {user_message}"
 
-    chart_path = latest.get("chart_path")
     vision_blocks = analyze.build_vision_content(
         chart_paths=None,
         annotated_h1_path=chart_path if chart_path and Path(chart_path).exists() else None,
