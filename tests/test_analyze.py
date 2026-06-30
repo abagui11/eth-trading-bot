@@ -20,7 +20,7 @@ def test_validate_no_trade_defaults_decision_chart():
         "order_block": None,
     }
     s = _validate(data)
-    assert s.decision_charts == ["H1"]
+    assert s.decision_charts == ["H12"]
 
 
 def test_validate_trade_requires_structure_and_entry_chart():
@@ -47,7 +47,7 @@ def test_validate_trade_requires_structure_and_entry_chart():
     assert s.entry_chart == "H1"
 
 
-def test_validate_trade_rejects_missing_entry_chart():
+def test_validate_trade_defaults_missing_entry_chart_to_h1():
     data = {
         "action": "spot_buy",
         "size": 0.5,
@@ -64,5 +64,5 @@ def test_validate_trade_rejects_missing_entry_chart():
             "end_ts": "2026-06-23T08:00:00Z",
         },
     }
-    with pytest.raises(ValueError, match="entry_chart"):
-        _validate(data)
+    s = _validate(data)
+    assert s.entry_chart == "H1"

@@ -184,12 +184,16 @@ def _validate_chart_fields(suggestion: Suggestion) -> None:
     valid = set(CHART_ORDER)
     if suggestion.action == "no_trade":
         if not suggestion.decision_charts:
-            suggestion.decision_charts = ["H1"]
+            suggestion.decision_charts = ["H12"]
         invalid = [c for c in suggestion.decision_charts if c not in valid]
         if invalid:
             raise ValueError(f"Invalid decision_charts: {invalid}")
         return
 
+    if not suggestion.entry_chart or suggestion.entry_chart not in valid:
+        suggestion.entry_chart = "H1"
+    if not suggestion.structure_chart or suggestion.structure_chart not in valid:
+        suggestion.structure_chart = "H12"
     for field_name in ("structure_chart", "entry_chart"):
         val = getattr(suggestion, field_name)
         if not val or val not in valid:

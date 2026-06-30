@@ -698,9 +698,9 @@ def build_output_charts(
     return _save_chart_figure(fig, out_path)
 
   if suggestion.action == "no_trade":
-    primary = suggestion.decision_charts[0] if suggestion.decision_charts else "H1"
+    primary = suggestion.decision_charts[0] if suggestion.decision_charts else "H12"
     if primary not in valid_tfs:
-      primary = "H1"
+      primary = "H12"
     paths.append(
       _render_output_chart(
         primary,

@@ -85,13 +85,11 @@ async def send_suggestion_to_chat(
                 await bot.send_photo(chat_id=chat_id, photo=photo, caption=photo_caption[:1024])
         except Exception:
             logger.exception(
-                "Photo send failed for chat %s (%s), falling back to text",
+                "Photo send failed for chat %s (%s), skipping chart",
                 chat_id,
                 path.name,
             )
-            fallback = f"{photo_caption}\n\n{rationale_message}" if rationale_message else photo_caption
-            await bot.send_message(chat_id=chat_id, text=fallback[:4096])
-            return
+            continue
 
     if rationale_message:
         await bot.send_message(chat_id=chat_id, text=rationale_message)
