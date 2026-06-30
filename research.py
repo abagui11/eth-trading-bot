@@ -264,6 +264,20 @@ def get_spot_price() -> float:
     return float(h1[-1]["close"])
 
 
+def get_daily_bars_for_levels(limit: int = 400) -> list[dict[str, float | str]]:
+    """Fetch enough daily candles for calendar key levels (week/month/quarter/year)."""
+    if limit <= _MAX_CANDLES:
+        return _fetch_coinbase_candles("ONE_DAY", limit)
+
+    end = int(time.time())
+    seconds = _GRANULARITY_SECONDS["ONE_DAY"]
+    start = end - limit * seconds
+    bars = fetch_coinbase_candles_range("ONE_DAY", start, end)
+    if not bars:
+        raise RuntimeError(f"No daily candles returned for {PRODUCT_ID}")
+    return bars[-limit:]
+
+
 if __name__ == "__main__":
     data = get_all_timeframes()
     summary = {

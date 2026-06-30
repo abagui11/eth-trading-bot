@@ -19,12 +19,15 @@ from matplotlib.patches import Rectangle
 import config
 import research
 from models import Suggestion
+from patterns.htf_structure import HTFZone
+from patterns.key_levels import KeyLevel
 from patterns.market_context import MarketContext
 
-FIGSIZE = (12, 8)
+FIGSIZE = (16, 10)
+OUTPUT_FIGSIZE = (16, 10)
 ANNOTATED_FIGSIZE = (16, 8)
-DPI = 120
-FONT_SIZE = 11
+DPI = 144
+FONT_SIZE = 12
 RATIONALE_WRAP_WIDTH = 38
 # Telegram rejects extreme PNG dimensions; keep saved charts within these bounds.
 TELEGRAM_MAX_CHART_WIDTH = 4096
@@ -64,6 +67,340 @@ def _swing_levels(df: pd.DataFrame, lookback: int = 20) -> tuple[float, float]:
   """Recent swing high/low for light HTF reference lines."""
   window = df.tail(lookback)
   return float(window["High"].max()), float(window["Low"].min())
+
+
+def _visible_key_levels(levels: list[KeyLevel], df: pd.DataFrame, padding_pct: float = 0.12) -> list[KeyLevel]:
+  """Key levels near the visible candle range (avoid cluttering far HTF lines)."""
+  if df.empty or not levels:
+    return levels
+  lo = float(df["Low"].min())
+  hi = float(df["High"].max())
+  pad = max((hi - lo) * padding_pct, hi * 0.02)
+  return [lv for lv in levels if lo - pad <= lv.price <= hi + pad]
+
+
+def _render_candlestick_figure(
+  df: pd.DataFrame,
+  title: str,
+  figsize: tuple[float, float] = FIGSIZE,
+) -> tuple:
+  """Candlestick + volume axes for overlay drawing."""
+  fig, axes = mpf.plot(
+    df,
+    type="candle",
+    style=_STYLE,
+    volume=True,
+    title=title,
+    figsize=figsize,
+    returnfig=True,
+    warn_too_much_data=1000,
+  )
+  ax_price = axes[0]
+  return fig, ax_price
+
+
+def _draw_swing_hlines(ax, df: pd.DataFrame) -> None:
+  swing_high, swing_low = _swing_levels(df)
+  ax.axhline(swing_high, color="#888888", linestyle="--", linewidth=0.8, alpha=0.6)
+  ax.axhline(swing_low, color="#888888", linestyle="--", linewidth=0.8, alpha=0.6)
+
+
+_LIGHT_LEVEL_COLORS = frozenset({"#fffcbc", "#ffffff", "#D4AF37", "#E8E8E8"})
+
+
+def _bar_index(df: pd.DataFrame, ts: str) -> int:
+  """Nearest mplfinance bar index for a UTC timestamp."""
+  target = pd.Timestamp(ts)
+  if target.tzinfo is None:
+    target = target.tz_localize("UTC")
+  idx = int(df.index.get_indexer([target], method="nearest")[0])
+  return max(0, min(idx, len(df) - 1))
+
+
+def _bar_x_range(df: pd.DataFrame, start_ts: str, end_ts: str | None) -> tuple[float, float]:
+  """Left/right bar indices for a zone (mplfinance uses integer x-axis)."""
+  x0 = float(_bar_index(df, start_ts))
+  x1 = float(_bar_index(df, end_ts)) if end_ts else float(len(df) - 1)
+  if x0 > x1:
+    x0, x1 = x1, x0
+  return x0, max(x1, x0 + 0.8)
+
+
+def _level_label_style(line_color: str) -> dict:
+  """High-contrast label styling for light SpacemanBTC line colors."""
+  color_lower = line_color.lower()
+  if color_lower in _LIGHT_LEVEL_COLORS or color_lower == "#ffffff":
+    return {
+      "color": "#1a1a1a",
+      "bbox": dict(
+        boxstyle="round,pad=0.25",
+        facecolor=line_color,
+        edgecolor="#888888",
+        alpha=0.92,
+      ),
+    }
+  return {"color": line_color, "bbox": None}
+
+
+def _plan_key_level_labels(
+  levels: list[KeyLevel],
+  y_lo: float,
+  y_hi: float,
+  *,
+  min_gap_frac: float = 0.032,
+  max_nudge_frac: float = 0.05,
+) -> list[tuple[KeyLevel, float, str]]:
+  """
+  Assign label y-offsets and left/right sides so nearby levels do not overlap.
+
+  Returns (level, label_y, side) tuples. Horizontal lines stay at true price;
+  labels may shift slightly vertically when many levels cluster together.
+  """
+  if not levels:
+    return []
+
+  span = max(y_hi - y_lo, y_hi * 0.01, 1.0)
+  min_gap = span * min_gap_frac
+  max_nudge = span * max_nudge_frac
+  cluster_gap = span * 0.10
+
+  def _fits(y: float, placed: list[float]) -> bool:
+    return all(abs(y - py) >= min_gap for py in placed)
+
+  def _nudge_toward_free(y: float, placed: list[float]) -> float:
+    if not placed or _fits(y, placed):
+      return y
+    best = y
+    best_penalty = float("inf")
+    for step in range(1, 8):
+      for candidate in (y - step * min_gap, y + step * min_gap):
+        if abs(candidate - y) > max_nudge:
+          continue
+        penalty = abs(candidate - y) + sum(
+          max(0.0, min_gap - abs(candidate - py)) for py in placed
+        )
+        if penalty < best_penalty and _fits(candidate, placed):
+          best_penalty = penalty
+          best = candidate
+    if best_penalty < float("inf"):
+      return best
+    return y - min_gap * len(placed)
+
+  right_ys: list[float] = []
+  left_ys: list[float] = []
+  planned: list[tuple[KeyLevel, float, str]] = []
+
+  for lv in sorted(levels, key=lambda item: item.price, reverse=True):
+    if planned and abs(lv.price - planned[-1][0].price) < cluster_gap:
+      side = "left" if planned[-1][2] == "right" else "right"
+    else:
+      side = "right"
+
+    label_y = lv.price
+    placed = left_ys if side == "left" else right_ys
+    if not _fits(label_y, placed):
+      label_y = _nudge_toward_free(label_y, placed)
+      if not _fits(label_y, placed):
+        alt_side = "left" if side == "right" else "right"
+        alt_placed = left_ys if alt_side == "left" else right_ys
+        alt_y = _nudge_toward_free(lv.price, alt_placed)
+        if _fits(alt_y, alt_placed):
+          side, label_y = alt_side, alt_y
+          placed = alt_placed
+
+    if side == "right":
+      right_ys.append(label_y)
+    else:
+      left_ys.append(label_y)
+    planned.append((lv, label_y, side))
+
+  return planned
+
+
+def _draw_key_levels(ax, levels: list[KeyLevel], df: pd.DataFrame | None = None) -> None:
+  """SpacemanBTC-style horizontal levels with staggered edge labels."""
+  if not levels:
+    return
+
+  if df is not None and not df.empty:
+    lo = float(df["Low"].min())
+    hi = float(df["High"].max())
+    pad = max((hi - lo) * 0.08, hi * 0.01)
+    y_lo, y_hi = lo - pad, hi + pad
+  else:
+    y_lo, y_hi = ax.get_ylim()
+
+  transform = blended_transform_factory(ax.transAxes, ax.transData)
+  for lv, label_y, side in _plan_key_level_labels(levels, y_lo, y_hi):
+    ax.axhline(lv.price, color=lv.color, linestyle="-", linewidth=1.0, alpha=0.9)
+    style = _level_label_style(lv.color)
+    text = f"{lv.label} {lv.price:,.2f}"
+    if side == "left":
+      x, ha, label_text = 0.01, "left", f"{text} "
+    else:
+      x, ha, label_text = 0.99, "right", f" {text}"
+    ax.text(
+      x,
+      label_y,
+      label_text,
+      fontsize=FONT_SIZE - 1,
+      fontweight="bold",
+      va="center",
+      ha=ha,
+      transform=transform,
+      clip_on=True,
+      color=style["color"],
+      bbox=style["bbox"],
+    )
+
+
+def _draw_htf_zones(ax, df: pd.DataFrame, zones: list[HTFZone]) -> None:
+  """IMG-style H12 OB/breaker boxes projected onto the chart timeframe."""
+  if not zones or df.empty:
+    return
+  for zone in zones:
+    try:
+      x0, x1 = _bar_x_range(df, zone.start_ts, zone.end_ts)
+    except (KeyError, ValueError, IndexError):
+      continue
+    width = max(x1 - x0 + 0.6, 0.8)
+    left = x0 - 0.3
+    if zone.zone_type == "breaker":
+      face = "#FFB6C1" if zone.direction == "bearish" else "#90EE90"
+      edge = "#CC0000" if zone.direction == "bearish" else "#228B22"
+      label = "BRKR"
+    else:
+      face = "#FFB6C1" if zone.direction == "bearish" else "#90EE90"
+      edge = "#CD5C5C" if zone.direction == "bearish" else "#228B22"
+      label = "OB"
+    height = float(zone.high) - float(zone.low)
+    rect = Rectangle(
+      (left, float(zone.low)),
+      width,
+      height,
+      facecolor=face,
+      edgecolor=edge,
+      alpha=0.28,
+      linewidth=1.2,
+      zorder=1,
+    )
+    ax.add_patch(rect)
+    mid = float(zone.low) + height / 2
+    ax.hlines(
+      mid,
+      left,
+      left + width,
+      colors=edge,
+      linewidth=0.8,
+      alpha=0.5,
+      zorder=2,
+    )
+    ax.text(
+      left,
+      float(zone.high),
+      f" H12 {label}",
+      color=edge,
+      fontsize=FONT_SIZE - 1,
+      fontweight="bold",
+      va="bottom",
+      clip_on=True,
+    )
+
+
+def _fib_zone_bounds(
+  direction: str,
+  low: float,
+  high: float,
+  fib_low: float = 0.618,
+  fib_high: float = 0.786,
+) -> tuple[float, float]:
+  span = high - low
+  if span <= 0:
+    return low, high
+  if direction == "bearish":
+    z0 = low + span * (1 - fib_high)
+    z1 = low + span * (1 - fib_low)
+  else:
+    z0 = low + span * fib_low
+    z1 = low + span * fib_high
+  return min(z0, z1), max(z0, z1)
+
+
+def _draw_fib_zone(
+  ax,
+  df: pd.DataFrame,
+  low: float,
+  high: float,
+  direction: str,
+  start_ts: str | None = None,
+  end_ts: str | None = None,
+) -> None:
+  """Shade 0.618–0.786 entry slice inside an OB."""
+  z_low, z_high = _fib_zone_bounds(direction, low, high)
+  if start_ts and end_ts:
+    x0, x1 = _bar_x_range(df, start_ts, end_ts)
+  else:
+    x0 = float(max(0, len(df) - 30))
+    x1 = float(len(df) - 1)
+  left = x0 - 0.3
+  width = max(x1 - x0 + 0.6, 0.8)
+  rect = Rectangle(
+    (left, z_low),
+    width,
+    z_high - z_low,
+    facecolor="#FFD700",
+    edgecolor="#B8860B",
+    alpha=0.35,
+    linewidth=1.2,
+    zorder=3,
+  )
+  ax.add_patch(rect)
+  ax.text(
+    left,
+    z_high,
+    " Fib 0.618–0.786",
+    color="#B8860B",
+    fontsize=FONT_SIZE - 1,
+    fontweight="bold",
+    va="bottom",
+    clip_on=True,
+  )
+
+
+def _save_chart_figure(fig, path: Path) -> str:
+  path.parent.mkdir(parents=True, exist_ok=True)
+  fig.savefig(path, dpi=DPI, bbox_inches="tight")
+  plt.close(fig)
+  _ensure_telegram_safe_image(path)
+  return str(path)
+
+
+def render_marked_charts(
+  data: dict[str, list[dict]],
+  key_levels: list[KeyLevel],
+  htf_zones: list[HTFZone],
+  cycle_id: str | None = None,
+) -> dict[str, str]:
+  """Render macro-marked candlestick PNGs per strategy timeframe."""
+  out_dir = _ensure_charts_dir()
+  cycle_id = cycle_id or datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+  paths: dict[str, str] = {}
+  visible_levels_cache: dict[str, list[KeyLevel]] = {}
+
+  for tf in research.STRATEGY_TIMEFRAMES:
+    bars = data.get(tf)
+    if not bars:
+      raise ValueError(f"Missing OHLC data for {tf}")
+    df = _to_mpf_df(bars)
+    visible_levels_cache[tf] = _visible_key_levels(key_levels, df)
+    path = out_dir / f"{cycle_id}_{tf}_marked.png"
+    fig, ax = _render_candlestick_figure(df, f"ETH-USD {tf} — Key Levels + H12 Structure")
+    _draw_htf_zones(ax, df, htf_zones)
+    _draw_swing_hlines(ax, df)
+    _draw_key_levels(ax, visible_levels_cache[tf], df)
+    paths[tf] = _save_chart_figure(fig, path)
+
+  return paths
 
 
 def render_charts(
@@ -168,19 +505,33 @@ def _draw_rationale_panel(ax_text, header: str, rationale: str) -> None:
   )
 
 
-def _draw_price_line(ax, price: float, label: str, color: str, linestyle: str) -> None:
+def _draw_price_line(
+  ax,
+  price: float,
+  label: str,
+  color: str,
+  linestyle: str,
+  *,
+  label_side: str = "right",
+) -> None:
   """Draw a horizontal level with a label pinned inside the chart (Telegram-safe)."""
   ax.axhline(price, color=color, linestyle=linestyle, linewidth=1.8, alpha=0.95)
   transform = blended_transform_factory(ax.transAxes, ax.transData)
+  if label_side == "left":
+    x, ha = 0.01, "left"
+    text = f"{label} {price:,.2f} "
+  else:
+    x, ha = 0.99, "right"
+    text = f" {label} {price:,.2f}"
   ax.text(
-    0.99,
+    x,
     price,
-    f" {label} {price:,.2f}",
+    text,
     color=color,
     fontsize=FONT_SIZE,
     fontweight="bold",
     va="center",
-    ha="right",
+    ha=ha,
     transform=transform,
     clip_on=True,
   )
@@ -247,16 +598,13 @@ def _draw_detected_overlays(
 
   for ob in market_context.order_blocks[-3:]:
     try:
-      x0 = _nearest_index(df, ob.start_ts)
-      x1 = _nearest_index(df, ob.end_ts)
-      if x0 > x1:
-        x0, x1 = x1, x0
-      x0_num = mdates.date2num(x0)
-      width = max(mdates.date2num(x1) - x0_num, 0.02)
+      x0, x1 = _bar_x_range(df, ob.start_ts, ob.end_ts)
+      left = x0 - 0.3
+      width = max(x1 - x0 + 0.6, 0.8)
       color = "#90EE90" if ob.direction == "bullish" else "#FFB6C1"
       edge = "#228B22" if ob.direction == "bullish" else "#CD5C5C"
       rect = Rectangle(
-        (x0_num, float(ob.low)),
+        (left, float(ob.low)),
         width,
         float(ob.high) - float(ob.low),
         facecolor=color,
@@ -270,6 +618,137 @@ def _draw_detected_overlays(
       continue
 
 
+def build_output_charts(
+  suggestion: Suggestion,
+  data: dict[str, list[dict]],
+  key_levels: list[KeyLevel],
+  htf_zones: list[HTFZone],
+  cycle_id: str,
+  market_context: MarketContext | None = None,
+) -> list[str]:
+  """
+  Build 1–2 proof charts (structure + entry) with macro overlays retained.
+  """
+  out_dir = _ensure_charts_dir()
+  paths: list[str] = []
+  valid_tfs = set(research.STRATEGY_TIMEFRAMES)
+
+  def _render_output_chart(
+    tf: str,
+    suffix: str,
+    title: str,
+    *,
+    show_trade: bool = False,
+    show_fib: bool = False,
+  ) -> str:
+    bars = data.get(tf)
+    if not bars:
+      raise ValueError(f"Missing OHLC for {tf}")
+    df = _to_mpf_df(bars)
+    fig, ax_price = _render_candlestick_figure(df, title, figsize=OUTPUT_FIGSIZE)
+    vis = _visible_key_levels(key_levels, df)
+    _draw_htf_zones(ax_price, df, htf_zones)
+    _draw_swing_hlines(ax_price, df)
+    _draw_key_levels(ax_price, vis, df)
+    _draw_detected_overlays(ax_price, df, market_context)
+
+    if show_fib and suggestion.order_block:
+      ob = suggestion.order_block
+      direction = "bearish" if "sell" in suggestion.action else "bullish"
+      _draw_fib_zone(
+        ax_price,
+        df,
+        float(ob["low"]),
+        float(ob["high"]),
+        direction,
+        ob.get("start_ts"),
+        ob.get("end_ts"),
+      )
+
+    if show_trade and suggestion.action != "no_trade":
+      if suggestion.order_block and not show_fib:
+        ob = suggestion.order_block
+        x0, x1 = _bar_x_range(df, ob["start_ts"], ob["end_ts"])
+        left = x0 - 0.3
+        rect = Rectangle(
+          (left, float(ob["low"])),
+          max(x1 - x0 + 0.6, 0.8),
+          float(ob["high"]) - float(ob["low"]),
+          facecolor="#FFD700",
+          edgecolor="#B8860B",
+          alpha=0.35,
+          linewidth=1.5,
+          zorder=4,
+        )
+        ax_price.add_patch(rect)
+      if suggestion.entry is not None:
+        _draw_price_line(
+          ax_price, suggestion.entry, "Entry", "#00AA00", "--", label_side="left"
+        )
+      if suggestion.stop_loss is not None:
+        _draw_price_line(
+          ax_price, suggestion.stop_loss, "SL", "#CC0000", "-", label_side="left"
+        )
+      for i, tp in enumerate(suggestion.take_profits[:3], start=1):
+        _draw_price_line(
+          ax_price, tp, f"TP{i}", "#0066CC", ":", label_side="left"
+        )
+
+    out_path = out_dir / f"{cycle_id}_{tf}_{suffix}.png"
+    return _save_chart_figure(fig, out_path)
+
+  if suggestion.action == "no_trade":
+    primary = suggestion.decision_charts[0] if suggestion.decision_charts else "H1"
+    if primary not in valid_tfs:
+      primary = "H1"
+    paths.append(
+      _render_output_chart(
+        primary,
+        "notrade",
+        f"ETH-USD {primary} — No Trade",
+      )
+    )
+    return paths
+
+  structure_tf = suggestion.structure_chart or "H12"
+  entry_tf = suggestion.entry_chart or "H1"
+  if structure_tf not in valid_tfs:
+    structure_tf = "H12"
+  if entry_tf not in valid_tfs:
+    entry_tf = "H1"
+
+  paths.append(
+    _render_output_chart(
+      structure_tf,
+      "structure",
+      f"ETH-USD {structure_tf} — HTF Structure",
+    )
+  )
+
+  if entry_tf != structure_tf or suggestion.entry is not None:
+    paths.append(
+      _render_output_chart(
+        entry_tf,
+        "entry",
+        f"ETH-USD {entry_tf} — Entry / SL / TP",
+        show_trade=True,
+        show_fib=True,
+      )
+    )
+  elif len(paths) < 2:
+    paths.append(
+      _render_output_chart(
+        entry_tf,
+        "entry",
+        f"ETH-USD {entry_tf} — Entry",
+        show_trade=True,
+        show_fib=True,
+      )
+    )
+
+  return paths[:2]
+
+
 def annotate_chart(
   h1_path: str,
   suggestion: Suggestion,
@@ -278,7 +757,7 @@ def annotate_chart(
   market_context: MarketContext | None = None,
 ) -> str:
   """
-  Draw trade markup on the H1 chart; rationale sits in a panel beside the chart.
+  Draw trade markup on a full-width H1 chart (rationale is sent separately via Telegram).
   Re-plots from h1_bars for correct price alignment (h1_path used for naming only).
   """
   out_dir = _ensure_charts_dir()
@@ -289,27 +768,20 @@ def annotate_chart(
   df = _to_mpf_df(h1_bars)
 
   title = "ETH-USD H1 — Trade Idea" if suggestion.action != "no_trade" else "ETH-USD H1 — No Trade"
-  fig, ax, ax_text = _build_annotated_figure(df, title)
+  fig, ax = _render_candlestick_figure(df, title, figsize=OUTPUT_FIGSIZE)
 
   _draw_detected_overlays(ax, df, market_context)
 
   if suggestion.action == "no_trade":
-    _draw_rationale_panel(ax_text, "NO TRADE", suggestion.rationale)
-    return _save_figure(fig, annotated_path)
+    return _save_chart_figure(fig, annotated_path)
 
-  # --- trade markup on chart only ---
-  # Order block zone
   if suggestion.order_block:
     ob = suggestion.order_block
-    x0 = _nearest_index(df, ob["start_ts"])
-    x1 = _nearest_index(df, ob["end_ts"])
-    if x0 > x1:
-      x0, x1 = x1, x0
-    x0_num = mdates.date2num(x0)
-    x1_num = mdates.date2num(x1)
-    width = max(x1_num - x0_num, 0.02)
+    x0, x1 = _bar_x_range(df, ob["start_ts"], ob["end_ts"])
+    left = x0 - 0.3
+    width = max(x1 - x0 + 0.6, 0.8)
     rect = Rectangle(
-      (x0_num, float(ob["low"])),
+      (left, float(ob["low"])),
       width,
       float(ob["high"]) - float(ob["low"]),
       facecolor="#FFD700",
@@ -320,7 +792,7 @@ def annotate_chart(
     )
     ax.add_patch(rect)
     ax.text(
-      x0_num,
+      left,
       float(ob["high"]),
       " OB",
       color="#B8860B",
@@ -331,17 +803,13 @@ def annotate_chart(
     )
 
   if suggestion.entry is not None:
-    _draw_price_line(ax, suggestion.entry, "Entry", "#00AA00", "--")
+    _draw_price_line(ax, suggestion.entry, "Entry", "#00AA00", "--", label_side="left")
   if suggestion.stop_loss is not None:
-    _draw_price_line(ax, suggestion.stop_loss, "SL", "#CC0000", "-")
+    _draw_price_line(ax, suggestion.stop_loss, "SL", "#CC0000", "-", label_side="left")
   for i, tp in enumerate(suggestion.take_profits[:3], start=1):
-    _draw_price_line(ax, tp, f"TP{i}", "#0066CC", ":")
+    _draw_price_line(ax, tp, f"TP{i}", "#0066CC", ":", label_side="left")
 
-  rr = f"{suggestion.risk_reward:.2f}" if suggestion.risk_reward is not None else "n/a"
-  header = f"{suggestion.action.upper()}  |  R/R {rr}"
-  _draw_rationale_panel(ax_text, header, suggestion.rationale)
-
-  return _save_figure(fig, annotated_path)
+  return _save_chart_figure(fig, annotated_path)
 
 
 def render_research_chart(
@@ -478,17 +946,27 @@ def _fake_suggestion(h1_bars: list[dict]) -> Suggestion:
 
 
 if __name__ == "__main__":
-  cycle_id = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
-  print(f"Fetching live OHLC...")
-  data = research.get_all_timeframes()
+  from patterns.htf_structure import detect_htf_zones
+  from patterns.key_levels import compute_key_levels
 
-  print(f"Rendering charts...")
-  paths = render_charts(data, cycle_id=cycle_id)
+  cycle_id = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+  print("Fetching live OHLC...")
+  data = research.get_all_timeframes()
+  daily = research.get_daily_bars_for_levels()
+  key_levels = compute_key_levels(daily)
+  htf_zones = detect_htf_zones(data["H12"])
+  print(f"Detected {len(htf_zones)} H12 OB/BRKR zones")
+
+  print("Rendering marked charts...")
+  paths = render_marked_charts(data, key_levels, htf_zones, cycle_id=cycle_id)
   for tf, path in paths.items():
     print(f"  {tf}: {path}")
 
   fake = _fake_suggestion(data["H1"])
-  print(f"\nFake suggestion: {fake.action} entry={fake.entry} sl={fake.stop_loss} tps={fake.take_profits}")
+  fake.structure_chart = "H12"
+  fake.entry_chart = "H1"
+  fake.decision_charts = ["H12", "H1"]
 
-  annotated = annotate_chart(paths["H1"], fake, cycle_id, h1_bars=data["H1"])
-  print(f"\nAnnotated H1 chart: {annotated}")
+  outputs = build_output_charts(fake, data, key_levels, htf_zones, cycle_id)
+  for path in outputs:
+    print(f"  output: {path}")

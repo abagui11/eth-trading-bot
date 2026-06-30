@@ -33,6 +33,15 @@ def _candle_direction(row: pd.Series) -> Direction:
     return "bullish" if float(row["close"]) >= float(row["open"]) else "bearish"
 
 
+def ob_from_displacement(
+    df: pd.DataFrame,
+    displacement_idx: int,
+    direction: Direction,
+) -> OrderBlock | None:
+    """Last opposite candle before a displacement bar that breaks structure."""
+    return _ob_from_displacement(df, displacement_idx, direction)
+
+
 def _ob_from_displacement(
     df: pd.DataFrame,
     displacement_idx: int,
@@ -82,11 +91,11 @@ def find_order_blocks(bars: list[dict], lookback: int = 60) -> list[OrderBlock]:
         swing_low = _last_swing_before(pivots, i, "low")
 
         if swing_high and close > swing_high.price:
-            ob = _ob_from_displacement(df, i, "bullish")
+            ob = ob_from_displacement(df, i, "bullish")
             if ob:
                 blocks.append(ob)
         if swing_low and close < swing_low.price:
-            ob = _ob_from_displacement(df, i, "bearish")
+            ob = ob_from_displacement(df, i, "bearish")
             if ob:
                 blocks.append(ob)
 

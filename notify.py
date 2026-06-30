@@ -64,28 +64,34 @@ async def send_suggestion_to_chat(
     bot: Bot,
     chat_id: int | str,
     suggestion: Suggestion,
-    chart_path: str,
+    chart_paths: list[str] | str,
     pnl_footer: str,
 ) -> None:
-    path = Path(chart_path)
-    if not path.exists():
-        raise FileNotFoundError(f"Chart not found: {chart_path}")
+    paths = [chart_paths] if isinstance(chart_paths, str) else list(chart_paths[:2])
+    if not paths:
+        raise FileNotFoundError("No chart paths provided")
 
     caption = build_caption(suggestion)
     rationale_message = build_rationale_message(suggestion, pnl_footer)
 
-    try:
-        with open(path, "rb") as photo:
-            await bot.send_photo(chat_id=chat_id, photo=photo, caption=caption)
-    except Exception:
-        logger.exception(
-            "Photo send failed for chat %s (%s), falling back to text",
-            chat_id,
-            path.name,
-        )
-        fallback = f"{caption}\n\n{rationale_message}" if rationale_message else caption
-        await bot.send_message(chat_id=chat_id, text=fallback[:4096])
-        return
+    for i, chart_path in enumerate(paths):
+        path = Path(chart_path)
+        if not path.exists():
+            raise FileNotFoundError(f"Chart not found: {chart_path}")
+
+        photo_caption = caption if i == 0 else f"Chart {i + 1}/{len(paths)}"
+        try:
+            with open(path, "rb") as photo:
+                await bot.send_photo(chat_id=chat_id, photo=photo, caption=photo_caption[:1024])
+        except Exception:
+            logger.exception(
+                "Photo send failed for chat %s (%s), falling back to text",
+                chat_id,
+                path.name,
+            )
+            fallback = f"{photo_caption}\n\n{rationale_message}" if rationale_message else photo_caption
+            await bot.send_message(chat_id=chat_id, text=fallback[:4096])
+            return
 
     if rationale_message:
         await bot.send_message(chat_id=chat_id, text=rationale_message)
@@ -107,7 +113,7 @@ async def send_research_to_chat(
 async def broadcast_to_subscribers(
     bot: Bot,
     suggestion: Suggestion,
-    chart_path: str,
+    chart_paths: list[str] | str,
     pnl_footer: str | None = None,
 ) -> None:
     """DM the suggestion to every registered subscriber (or allowlist if paywall on)."""
@@ -119,7 +125,7 @@ async def broadcast_to_subscribers(
         if user_id in sent:
             continue
         try:
-            await send_suggestion_to_chat(bot, user_id, suggestion, chart_path, footer)
+            await send_suggestion_to_chat(bot, user_id, suggestion, chart_paths, footer)
             sent.add(user_id)
             logger.info("Sent suggestion to user %s", user_id)
         except Exception:
@@ -133,28 +139,33 @@ async def broadcast_to_subscribers(
             admin_id = None
         if admin_id is not None and admin_id not in sent:
             try:
-                await send_suggestion_to_chat(bot, admin_chat, suggestion, chart_path, footer)
+                await send_suggestion_to_chat(bot, admin_chat, suggestion, chart_paths, footer)
                 logger.info("Sent suggestion to admin chat %s", admin_chat)
             except Exception:
                 logger.exception("Failed to send to admin chat %s", admin_chat)
 
 
-def broadcast(suggestion: Suggestion, marked_up_chart_path: str, pnl_footer: str | None = None) -> None:
+def broadcast(
+    suggestion: Suggestion,
+    chart_paths: list[str] | str,
+    pnl_footer: str | None = None,
+) -> None:
     """Sync wrapper for standalone agent.py / tests."""
     footer = pnl_footer or paper.format_pnl_footer()
 
     async def _run() -> None:
         bot = Bot(token=config.TELEGRAM_BOT_TOKEN)
-        await broadcast_to_subscribers(bot, suggestion, marked_up_chart_path, footer)
+        await broadcast_to_subscribers(bot, suggestion, chart_paths, footer)
 
     asyncio.run(_run())
 
 
-def _latest_annotated_chart() -> Path:
-    charts = sorted(config.CHARTS_DIR.glob("*_H1_annotated.png"), key=lambda p: p.stat().st_mtime)
-    if not charts:
-        raise FileNotFoundError("No annotated charts in charts/. Run analyze.py first.")
-    return charts[-1]
+def _latest_output_chart() -> Path:
+    for pattern in ("*_entry.png", "*_structure.png", "*_notrade.png", "*_H1_annotated.png"):
+        charts_found = sorted(config.CHARTS_DIR.glob(pattern), key=lambda p: p.stat().st_mtime)
+        if charts_found:
+            return charts_found[-1]
+    raise FileNotFoundError("No output charts in charts/. Run agent.py first.")
 
 
 if __name__ == "__main__":
@@ -162,7 +173,7 @@ if __name__ == "__main__":
 
     logging.basicConfig(level=logging.INFO)
 
-    chart = Path(sys.argv[1]) if len(sys.argv) > 1 else _latest_annotated_chart()
+    chart = Path(sys.argv[1]) if len(sys.argv) > 1 else _latest_output_chart()
     suggestion = Suggestion.no_trade(
         rationale="Notify checkpoint — test broadcast to allowlisted users.",
     )

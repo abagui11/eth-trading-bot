@@ -118,7 +118,7 @@ When the H1 chart shows structure similar to this reference screenshot, the agen
 
 1. **Identify the 24h range** (example: 58.5–60.4 in the reference). State that the range exists in `rationale`, and flag again if price breaks above or below the range.
 2. **Identify ranging conditions** when price oscillates inside the 24h range without a clean trend.
-3. **Identify the potential order block** — the live chart will not have a drawn box; infer OB from last candle before displacement that breaks structure (same rules as above). Programmatic OB hints may appear on the annotated chart.
+3. **Identify the potential order block** — use **H12 OB/BRKR boxes** on the marked charts when present; they are detected programmatically from H12 structure. You may also infer additional LTF OBs on H4/H1 using the same displacement rules when no box is drawn.
 4. **Alert a potential short inside the order block** when HTF/LTF structure aligns (e.g., bearish OB retest in the 0.618–0.786 zone with R/R ≥ 1.5).
 
 **Deviations / Adjustments:**
@@ -191,7 +191,10 @@ Respond with **only** a JSON object — no markdown fences, no prose outside JSO
   "stop_loss": 2350.0,
   "take_profits": [2500.0, 2600.0, 2700.0],
   "risk_reward": 2.0,
-  "rationale": "H12 bullish HH/HL, H4 aligned OB retest in 0.618–0.786 zone, H1 ladder entry. 24h range 2380–2420, ranging.",
+  "rationale": "H12 bullish HH/HL, price holding above Weekly Open. Bearish H12 breaker retest at PWM. H1 fib 0.618–0.786 inside H1 OB.",
+  "decision_charts": ["H12", "H4", "H1"],
+  "structure_chart": "H12",
+  "entry_chart": "H1",
   "order_block": {
     "low": 2380.0,
     "high": 2420.0,
@@ -210,7 +213,10 @@ Respond with **only** a JSON object — no markdown fences, no prose outside JSO
   "stop_loss": null,
   "take_profits": [],
   "risk_reward": null,
-  "rationale": "HTF bearish but H1 long setup — structure conflict. R/R below 1.5.",
+  "rationale": "HTF bearish but H1 long setup — structure conflict at Prev Week Mid. R/R below 1.5.",
+  "decision_charts": ["H12", "H1"],
+  "structure_chart": null,
+  "entry_chart": null,
   "order_block": null
 }
 ```
@@ -219,6 +225,70 @@ Respond with **only** a JSON object — no markdown fences, no prose outside JSO
 
 ## Charts provided each cycle
 
-Three live PNG candlestick charts: **H12, H4, H1** (in that order). Gray dashed lines mark recent swing high/low on each chart. Programmatic 24h range and OB hints are drawn on the annotated H1 output. Plus all reference pattern images from this Trading Guide folder.
+Three live **marked** PNG candlestick charts: **H12, H4, H1** (in that order). These are full-width images sent to you for analysis — read overlays directly on the chart.
+
+Plus all reference pattern images from this Trading Guide folder.
+
+---
+
+## Chart legend (marked input charts)
+
+Read overlays on the marked charts before forming bias. Programmatic context text may summarize nearest levels and H12 zones — **verify every claim against the chart image**.
+
+### Key levels (horizontal lines + edge labels)
+
+SpacemanBTC calendar levels from UTC daily Coinbase candles. Only levels near the visible price range are drawn to reduce clutter.
+
+Each label shows **name and price** (e.g. `Weekly Open 1,569.40`). Labels alternate **left and right** chart edges when several levels cluster at similar prices, so names and prices stay readable.
+
+| Color | Labels |
+|-------|--------|
+| Cyan | Daily Open |
+| White | Monday High, Monday Low, Monday Mid |
+| Gold | Weekly Open, Prev Week High, Prev Week Low, Prev Week Mid |
+| Green | Monthly Open, Prev Month High, Prev Month Low, Prev Month Mid |
+| Red | Quarterly Open, Prev Quarter Mid, Yearly Open, Current Year Mid |
+
+Light-colored labels use dark text on a tinted badge. When two levels share a price, the label merges both names (e.g. `Weekly Open / Prev Week Mid`).
+
+### H12 order blocks & breakers (shaded rectangles)
+
+Structure is **detected on H12** closed candles, then **projected** onto H12, H4, and H1. The same price zone appears on all three charts; horizontal width maps to the nearest bars on each timeframe.
+
+| Visual | Meaning |
+|--------|---------|
+| Green box, green border, label **H12 OB** | Bullish order block — last **bearish** H12 candle before a bullish market structure break (close above prior swing high) |
+| Pink box, red border, label **H12 OB** | Bearish order block — last **bullish** H12 candle before a bearish MSB (close below prior swing low) |
+| Green box, label **H12 BRKR** | Bullish breaker — a **mitigated bearish OB** reclassified after a later bullish MSB |
+| Pink/red box, label **H12 BRKR** | Bearish breaker — a **mitigated bullish OB** reclassified after a later bearish MSB |
+| Faint line inside the box | Zone midpoint |
+| Box stops before the right edge | Zone was **mitigated** (close traded through the block) |
+| Box extends to the right edge | Zone is still **active** |
+
+MSB uses **close only** — wick-only breaks through a swing level do not count.
+
+Use H12 OB/BRKR boxes for HTF bias. For LTF entries, zoom into H4/H1 and apply the same OB rules; LTF blocks may not have a drawn rectangle unless they coincide with a projected H12 zone.
+
+### Other reference lines
+
+- **Gray dashed lines**: recent swing high and swing low on that chart's timeframe (20-bar lookback). Reference only — not key levels.
+- **Purple dotted lines** (output/entry charts only): 24h high and 24h low.
+
+---
+
+## Output proof charts (Telegram only — not re-sent to you)
+
+Up to two full-width charts per cycle when a trade is taken:
+
+1. **Structure chart** (`structure_chart` TF) — same overlays as marked charts (key levels + H12 OB/BRKR + swings). No rationale text on the image.
+2. **Entry chart** (`entry_chart` TF) — same overlays plus trade markup:
+   - **Gold box** + label `Fib 0.618–0.786`: entry sweet spot inside your chosen `order_block`
+   - **Green dashed** line (left label): Entry
+   - **Red solid** line (left label): Stop loss
+   - **Blue dotted** lines (left labels): TP1, TP2, TP3
+
+Rationale and action details belong in the JSON `rationale` field only — subscribers receive them as a Telegram text message below the chart photos.
+
+Cite visible levels and H12 OB/BRKR zones in `rationale`.
 
 Form **one** trade idea (or `no_trade`) for this hour.

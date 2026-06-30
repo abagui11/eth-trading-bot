@@ -12,24 +12,33 @@ import notify
 import paper
 import research
 from models import Suggestion
+from patterns.htf_structure import detect_htf_zones
+from patterns.key_levels import compute_key_levels
 from patterns.market_context import build_market_context
 
 logger = logging.getLogger(__name__)
 
 
-def run_cycle() -> tuple[Suggestion, str] | None:
-    """Run one full cycle. Returns (suggestion, annotated_path) on success."""
+def run_cycle() -> tuple[Suggestion, list[str]] | None:
+    """Run one full cycle. Returns (suggestion, output_chart_paths) on success."""
     cycle_id = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
     logger.info("Starting cycle %s", cycle_id)
 
     try:
         data = research.get_all_timeframes()
-        market_context = build_market_context(data["H12"], data["H4"], data["H1"])
-        chart_paths = charts.render_charts(data, cycle_id=cycle_id)
+        daily_bars = research.get_daily_bars_for_levels()
+        key_levels = compute_key_levels(daily_bars)
+        htf_zones = detect_htf_zones(data["H12"])
+        market_context = build_market_context(
+            data["H12"], data["H4"], data["H1"], daily_bars=daily_bars
+        )
+        marked_paths = charts.render_marked_charts(
+            data, key_levels, htf_zones, cycle_id=cycle_id
+        )
 
         guide = analyze.load_trading_guide()
         suggestion = analyze.propose_trade(
-            chart_paths,
+            marked_paths,
             trading_guide=guide,
             market_context=market_context,
         )
@@ -38,13 +47,15 @@ def run_cycle() -> tuple[Suggestion, str] | None:
             alert_block = "Signals: " + " | ".join(market_context.alerts)
             suggestion.rationale = f"{alert_block}\n\n{suggestion.rationale}".strip()
 
-        annotated = charts.annotate_chart(
-            chart_paths["H1"],
+        output_paths = charts.build_output_charts(
             suggestion,
+            data,
+            key_levels,
+            htf_zones,
             cycle_id,
-            h1_bars=data["H1"],
             market_context=market_context,
         )
+        chart_for_ledger = ",".join(output_paths)
 
         price = research.get_spot_price()
         setup_tags = ",".join(market_context.setup_tags) if market_context.setup_tags else None
@@ -52,7 +63,7 @@ def run_cycle() -> tuple[Suggestion, str] | None:
             suggestion,
             cycle_id,
             price,
-            annotated,
+            chart_for_ledger,
             setup_tags=setup_tags,
         )
         paper.update(suggestion, price, cycle_id=cycle_id)
@@ -60,19 +71,19 @@ def run_cycle() -> tuple[Suggestion, str] | None:
 
         # TODO: validate.py — Layer 2 risk caps, R/R enforcement, size recompute
         try:
-            notify.broadcast(suggestion, annotated, pnl_footer=pnl_footer)
+            notify.broadcast(suggestion, output_paths, pnl_footer=pnl_footer)
         except Exception:
             logger.exception("Broadcast failed for cycle %s", cycle_id)
 
         # TODO: execute.py — EXECUTION_MODE=shadow|live order path
         logger.info(
-            "Cycle %s complete: action=%s ledger_id=%s chart=%s",
+            "Cycle %s complete: action=%s ledger_id=%s charts=%s",
             cycle_id,
             suggestion.action,
             row_id,
-            annotated,
+            output_paths,
         )
-        return suggestion, annotated
+        return suggestion, output_paths
     except Exception:
         logger.exception("Cycle %s failed", cycle_id)
         return None

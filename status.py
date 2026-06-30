@@ -20,7 +20,10 @@ def main() -> None:
 
     rows = ledger.get_latest(5)
     charts = sorted(
-        config.CHARTS_DIR.glob("*_H1_annotated.png"),
+        list(config.CHARTS_DIR.glob("*_marked.png"))
+        + list(config.CHARTS_DIR.glob("*_entry.png"))
+        + list(config.CHARTS_DIR.glob("*_structure.png"))
+        + list(config.CHARTS_DIR.glob("*_notrade.png")),
         key=lambda p: p.stat().st_mtime,
     )
 
@@ -44,7 +47,7 @@ def main() -> None:
     print(f"Trading Guide:         {'OK' if guide_ok else 'MISSING Trading Guide/Trading Guide.md'}")
     print(f"Pattern images:        {'OK' if pattern_ok else 'MISSING in Trading Guide/'}")
     print(f"Ledger row count:      {len(ledger.get_latest(100))}")
-    print(f"Annotated charts:      {len(charts)}")
+    print(f"Output charts:         {len(charts)}")
     print(f"Paper PnL footer:      {paper.format_pnl_footer()}")
 
     subs = access.list_subscribers()

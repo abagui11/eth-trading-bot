@@ -8,6 +8,8 @@ from patterns.order_block import OrderBlock, find_order_blocks, price_in_ob
 from patterns.range_24h import Range24h, compute_range_24h, detect_range_break
 from patterns.signal_state import get_state, set_state
 from patterns.sfp import SFPEvent, detect_sfps
+from patterns.htf_structure import HTFZone, detect_htf_zones
+from patterns.key_levels import KeyLevel, compute_key_levels, nearest_levels
 
 RANGE_STATE_KEY = "range_24h_announced"
 
@@ -21,6 +23,8 @@ class MarketContext:
     h12_sfps: list[SFPEvent] = field(default_factory=list)
     h1_sfps: list[SFPEvent] = field(default_factory=list)
     order_blocks: list[OrderBlock] = field(default_factory=list)
+    htf_zones: list[HTFZone] = field(default_factory=list)
+    key_levels_near: list[KeyLevel] = field(default_factory=list)
     setup_tags: list[str] = field(default_factory=list)
     summary_text: str = ""
 
@@ -46,6 +50,7 @@ def build_market_context(
     h12_bars: list[dict],
     h4_bars: list[dict],
     h1_bars: list[dict],
+    daily_bars: list[dict] | None = None,
 ) -> MarketContext:
     """Compute ICT signals and range alerts from live OHLC."""
     alerts: list[str] = []
@@ -109,6 +114,12 @@ def build_market_context(
     order_blocks = find_order_blocks(h1_bars)
     h12_blocks = find_order_blocks(h12_bars, lookback=40)
     all_blocks = order_blocks + h12_blocks
+    htf_zones = detect_htf_zones(h12_bars)
+
+    key_levels_near: list[KeyLevel] = []
+    if daily_bars:
+        all_levels = compute_key_levels(daily_bars)
+        key_levels_near = nearest_levels(all_levels, spot, n=4)
 
     for ob in order_blocks:
         if price_in_ob(spot, ob):
@@ -147,8 +158,20 @@ def build_market_context(
         for ob in all_blocks[-4:]:
             lines.append(f"  - {_format_ob(ob)}")
 
+    if htf_zones:
+        lines.append("H12 OB/BRKR zones (also drawn on charts):")
+        for z in htf_zones[-4:]:
+            lines.append(
+                f"  - {z.zone_type} {z.direction} {z.low:,.2f}-{z.high:,.2f} @ {z.start_ts[:16]}"
+            )
+
+    if key_levels_near:
+        lines.append("Nearest key levels to spot:")
+        for lv in key_levels_near:
+            lines.append(f"  - {lv.label} @ {lv.price:,.2f}")
+
     lines.append(
-        "Use this context plus H12/H4/H1 charts. "
+        "Use marked charts (key levels + H12 OB/BRKR boxes) plus this context. "
         "Confirm ranging, OB location, and entry direction. "
         "Mention 24h range and any breaks in rationale."
     )
@@ -161,6 +184,8 @@ def build_market_context(
         h12_sfps=recent_h12,
         h1_sfps=recent_h1,
         order_blocks=all_blocks,
+        htf_zones=htf_zones,
+        key_levels_near=key_levels_near,
         setup_tags=list(dict.fromkeys(setup_tags)),
         summary_text="\n".join(lines),
     )
