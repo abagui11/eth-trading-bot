@@ -11,6 +11,7 @@ from telegram import Bot
 import access
 import config
 import paper
+from critic import AuditVerdict
 from models import Suggestion
 
 logger = logging.getLogger(__name__)
@@ -164,6 +165,61 @@ async def broadcast_to_subscribers(
                 logger.info("Sent suggestion to admin chat %s", admin_chat)
             except Exception:
                 logger.exception("Failed to send to admin chat %s", admin_chat)
+
+
+def format_audit_alert(verdict: AuditVerdict) -> str:
+    """Format monitor chat alert for deterministic + LLM findings."""
+    if verdict.source == "hourly":
+        header = f"AUDIT — cycle {verdict.cycle_id or 'n/a'}"
+        if verdict.action:
+            header += f" | {verdict.action}"
+    else:
+        header = f"CHAT AUDIT — user {verdict.user_id or 'n/a'}"
+        if verdict.cycle_id:
+            header += f" | snapshot {verdict.cycle_id}"
+
+    lines = [header, ""]
+    if verdict.deterministic:
+        lines.append("[DETERMINISTIC]")
+        for finding in verdict.deterministic:
+            mark = "!" if finding.severity == "critical" else "?"
+            lines.append(f"{mark} {finding.code}: {finding.message}")
+        lines.append("")
+
+    if verdict.llm_hallucinations:
+        lines.append("[LLM CRITIC]")
+        for finding in verdict.llm_hallucinations:
+            lines.append(f"! {finding.code}: {finding.message}")
+        lines.append("")
+
+    if verdict.text_excerpt:
+        lines.append(f'Excerpt: "{verdict.text_excerpt}"')
+
+    return "\n".join(lines)[:4096]
+
+
+async def send_monitor_alert_async(verdict: AuditVerdict) -> None:
+    """Post audit findings to MONITOR_CHAT_ID when issues are found."""
+    if not verdict.has_issues:
+        return
+    chat_id = config.MONITOR_CHAT_ID
+    if not chat_id:
+        logger.debug("MONITOR_CHAT_ID not set — skipping audit alert")
+        return
+
+    text = format_audit_alert(verdict)
+    bot = Bot(token=config.TELEGRAM_BOT_TOKEN)
+    await bot.send_message(chat_id=int(str(chat_id).strip()), text=text)
+
+
+def send_monitor_alert(verdict: AuditVerdict) -> None:
+    """Sync wrapper for agent cycle / chat executor."""
+    if not verdict.has_issues:
+        return
+    try:
+        asyncio.run(send_monitor_alert_async(verdict))
+    except Exception:
+        logger.exception("Failed to send monitor audit alert")
 
 
 def broadcast(

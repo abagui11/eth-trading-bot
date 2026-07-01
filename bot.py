@@ -13,6 +13,7 @@ import access
 import analytics
 import chat
 import config
+import critic
 import ledger
 import notify
 import paper
@@ -318,6 +319,23 @@ async def on_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     except Exception:
         logger.exception("Chat handler failed")
         reply = "Sorry, something went wrong processing your message."
+
+    try:
+        latest = ledger.get_latest_suggestion()
+        cycle_id = str(latest["cycle_id"]) if latest else None
+
+        def _audit_chat() -> None:
+            verdict = critic.audit_chat_reply(
+                user.id,
+                user_text,
+                reply,
+                cycle_id=cycle_id,
+            )
+            notify.send_monitor_alert(verdict)
+
+        await loop.run_in_executor(None, _audit_chat)
+    except Exception:
+        logger.exception("Chat monitor audit failed")
 
     spot = research.get_spot_price()
     pnl = paper.format_pnl_footer(spot)

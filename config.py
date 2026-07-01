@@ -68,6 +68,9 @@ if PAYWALL_ENABLED and not ALLOWED_TELEGRAM_IDS:
 TELEGRAM_CHAT_ID: str | None = _optional("TELEGRAM_CHAT_ID")
 TELEGRAM_ADMIN_CHAT_ID: str | None = _optional("TELEGRAM_ADMIN_CHAT_ID")
 
+# Audit / hallucination alerts (separate group or channel).
+MONITOR_CHAT_ID: str | None = _optional("MONITOR_CHAT_ID")
+
 ROOT_DIR: Path = Path(__file__).resolve().parent
 CHARTS_DIR: Path = ROOT_DIR / "charts"
 LEDGER_DB: Path = ROOT_DIR / "ledger.db"

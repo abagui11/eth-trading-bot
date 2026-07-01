@@ -7,10 +7,12 @@ from datetime import datetime, timezone
 
 import analyze
 import charts
+import critic
 import ledger
 import notify
 import paper
 import research
+import audit
 from models import Suggestion
 from patterns.htf_structure import detect_htf_zones
 from patterns.key_levels import compute_key_levels
@@ -69,6 +71,23 @@ def run_cycle() -> tuple[Suggestion, list[str]] | None:
         ledger.require_cycle_recorded(cycle_id)
         paper.update(suggestion, price, cycle_id=cycle_id)
         pnl_footer = paper.format_pnl_footer(price)
+
+        try:
+            audit.save_snapshot(
+                cycle_id,
+                market_context,
+                suggestion,
+                marked_paths,
+            )
+            verdict = critic.audit_hourly_cycle(
+                cycle_id,
+                suggestion,
+                market_context,
+                marked_paths,
+            )
+            notify.send_monitor_alert(verdict)
+        except Exception:
+            logger.exception("Monitor audit failed for cycle %s", cycle_id)
 
         # TODO: validate.py — Layer 2 risk caps, R/R enforcement, size recompute
         try:

@@ -37,6 +37,7 @@ class MarketContext:
     alerts: list[str] = field(default_factory=list)
     h12_sfps: list[SFPEvent] = field(default_factory=list)
     h1_sfps: list[SFPEvent] = field(default_factory=list)
+    live_invalidated_sfps: list[SFPEvent] = field(default_factory=list)
     order_blocks: list[OrderBlock] = field(default_factory=list)
     htf_zones: list[HTFZone] = field(default_factory=list)
     key_levels_near: list[KeyLevel] = field(default_factory=list)
@@ -467,6 +468,7 @@ def build_market_context(
         alerts=alerts,
         h12_sfps=recent_h12,
         h1_sfps=recent_h1,
+        live_invalidated_sfps=live_invalidated,
         order_blocks=order_blocks,
         htf_zones=htf_zones,
         key_levels_near=key_levels_near,
