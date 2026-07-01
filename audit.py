@@ -270,8 +270,13 @@ def live_invalidated_from_snapshot(data: dict[str, Any]) -> list[SFPEvent]:
     return [_sfp_from_dict(e) for e in data.get("live_invalidated_sfps", [])]
 
 
-def suggestion_to_dict(suggestion: Suggestion) -> dict[str, Any]:
-    return {
+def suggestion_to_dict(
+    suggestion: Suggestion,
+    *,
+    llm_rationale: str | None = None,
+    signals_block: str | None = None,
+) -> dict[str, Any]:
+    data = {
         "action": suggestion.action,
         "size": suggestion.size,
         "entry": suggestion.entry,
@@ -284,6 +289,11 @@ def suggestion_to_dict(suggestion: Suggestion) -> dict[str, Any]:
         "structure_chart": suggestion.structure_chart,
         "entry_chart": suggestion.entry_chart,
     }
+    if llm_rationale is not None:
+        data["llm_rationale"] = llm_rationale
+    if signals_block is not None:
+        data["signals_block"] = signals_block
+    return data
 
 
 def suggestion_from_dict(data: dict[str, Any]) -> Suggestion:
@@ -297,6 +307,8 @@ def save_snapshot(
     marked_chart_paths: dict[str, str],
     *,
     live_invalidated_sfps: list[SFPEvent] | None = None,
+    llm_rationale: str | None = None,
+    signals_block: str | None = None,
     ts: str | None = None,
 ) -> int:
     """Persist ground-truth snapshot for a cycle."""
@@ -326,7 +338,13 @@ def save_snapshot(
                 cycle_id,
                 market_context.spot,
                 json.dumps(snapshot),
-                json.dumps(suggestion_to_dict(suggestion)),
+                json.dumps(
+                    suggestion_to_dict(
+                        suggestion,
+                        llm_rationale=llm_rationale,
+                        signals_block=signals_block,
+                    )
+                ),
                 json.dumps(marked_chart_paths),
                 market_context.summary_text,
             ),

@@ -70,6 +70,18 @@ class AuditFinding:
         return {"code": self.code, "message": self.message, "severity": self.severity}
 
 
+CRITICAL_RETRY_CODES = frozenset({
+    "H1_OB_MISLABEL",
+    "H1_SFP_NOT_FOUND",
+    "H12_SFP_NOT_FOUND",
+    "INVALIDATED_SFP_CITED",
+    "JSON_H12_AS_H1_OB",
+    "RETEST_STATUS_CONFLICT",
+    "RANGE_BREAK_CONFLICT",
+    "KEY_LEVEL_MISMATCH",
+})
+
+
 @dataclass
 class AuditVerdict:
     source: Source
@@ -79,6 +91,8 @@ class AuditVerdict:
     text_excerpt: str = ""
     deterministic: list[AuditFinding] = field(default_factory=list)
     llm_hallucinations: list[AuditFinding] = field(default_factory=list)
+    llm_verified: list[str] = field(default_factory=list)
+    sanitized: bool = False
 
     @property
     def has_issues(self) -> bool:
@@ -89,6 +103,88 @@ class AuditVerdict:
 
     def llm_dicts(self) -> list[dict[str, str]]:
         return [f.to_dict() for f in self.llm_hallucinations]
+
+
+def build_signals_block(alerts: list[str]) -> str | None:
+    """Format programmatic alerts for prepending to broadcast rationale."""
+    if not alerts:
+        return None
+    return "Signals: " + " | ".join(alerts)
+
+
+def split_rationale(full: str) -> tuple[str, str | None]:
+    """Split composed rationale into LLM body and optional Signals block."""
+    text = full.strip()
+    if not text.startswith("Signals:"):
+        return text, None
+    parts = text.split("\n\n", 1)
+    if len(parts) == 1:
+        return "", parts[0]
+    return parts[1].strip(), parts[0].strip()
+
+
+def compose_rationale(llm_body: str, signals_block: str | None) -> str:
+    """Combine LLM rationale with programmatic Signals block."""
+    body = llm_body.strip()
+    if not signals_block:
+        return body
+    if not body:
+        return signals_block
+    return f"{signals_block}\n\n{body}"
+
+
+def findings_require_retry(findings: list[AuditFinding]) -> bool:
+    """True when deterministic findings warrant one Claude retry."""
+    return any(
+        f.code in CRITICAL_RETRY_CODES and f.severity == "critical"
+        for f in findings
+    )
+
+
+def format_retry_feedback(findings: list[AuditFinding]) -> str:
+    """Bullet list of fact-check failures for a Claude retry."""
+    critical = [f for f in findings if f.code in CRITICAL_RETRY_CODES]
+    if not critical:
+        critical = findings
+    lines = [f"- {f.code}: {f.message}" for f in critical]
+    return "\n".join(lines)
+
+
+def sanitize_rationale(ctx: MarketContext) -> str:
+    """Safe fallback prose built only from programmatic snapshot fields."""
+    parts: list[str] = [f"Spot ${ctx.spot:,.2f}."]
+    zone_snap = ctx.zone_snapshot
+    if zone_snap and zone_snap.primary_bearish:
+        z = zone_snap.primary_bearish
+        parts.append(
+            f"Primary H12 zone: bearish {z.low:,.2f}-{z.high:,.2f} (bias only)."
+        )
+    elif zone_snap and zone_snap.primary_bullish:
+        z = zone_snap.primary_bullish
+        parts.append(
+            f"Primary H12 zone: bullish {z.low:,.2f}-{z.high:,.2f} (bias only)."
+        )
+    if ctx.h12_sfps:
+        parts.append(
+            f"Recent valid H12 SFPs: {len(ctx.h12_sfps)} in snapshot window."
+        )
+    else:
+        parts.append("No valid H12 SFP in the recent window.")
+    if ctx.h1_sfps:
+        parts.append(
+            f"Recent valid H1 SFPs: {len(ctx.h1_sfps)} in snapshot window."
+        )
+    else:
+        parts.append("No valid H1 SFP in the recent window.")
+    if ctx.order_blocks:
+        ob = ctx.order_blocks[-1]
+        parts.append(
+            f"Nearest detected H1 OB: {ob.direction} {ob.low:,.2f}-{ob.high:,.2f}."
+        )
+    else:
+        parts.append("No detected H1 OB in lookback — wait for H1 fib retest.")
+    parts.append("No trade until LTF structure aligns with programmatic context.")
+    return " ".join(parts)
 
 
 def _parse_price(raw: str) -> float:
@@ -451,10 +547,10 @@ def verify_llm(
     text: str,
     ctx: MarketContext,
     chart_paths: dict[str, str] | None = None,
-) -> list[AuditFinding]:
+) -> tuple[list[AuditFinding], list[str]]:
     """Second-pass Claude review for structural / nuanced hallucinations."""
     if not text.strip():
-        return []
+        return [], []
 
     user_content: list[dict] = [
         {
@@ -490,7 +586,7 @@ def verify_llm(
                 message=f"LLM critic unavailable: {exc}",
                 severity="warning",
             )
-        ]
+        ], []
 
     raw = ""
     for block in response.content:
@@ -501,22 +597,25 @@ def verify_llm(
         data = _extract_llm_json(raw)
     except json.JSONDecodeError:
         logger.warning("LLM critic returned non-JSON: %s", raw[:300])
-        return []
+        return [], []
 
     findings: list[AuditFinding] = []
+    verified: list[str] = []
     for item in data.get("claims", []):
         verdict = str(item.get("verdict", "")).upper()
-        if verdict != "HALLUCINATION":
-            continue
         claim = str(item.get("claim", "")).strip()
         reason = str(item.get("reason", "")).strip()
-        findings.append(
-            AuditFinding(
-                code="LLM_HALLUCINATION",
-                message=f"{claim} — {reason}" if reason else claim,
+        if verdict == "HALLUCINATION":
+            findings.append(
+                AuditFinding(
+                    code="LLM_HALLUCINATION",
+                    message=f"{claim} — {reason}" if reason else claim,
+                )
             )
-        )
-    return findings
+        elif verdict == "VERIFIED" and claim:
+            verified.append(claim if not reason else f"{claim} ({reason})")
+
+    return findings, verified[:6]
 
 
 def _text_excerpt(text: str, limit: int = 280) -> str:
@@ -536,12 +635,14 @@ def audit_text(
     suggestion: Suggestion | None = None,
     chart_paths: dict[str, str] | None = None,
     run_llm: bool = True,
+    sanitized: bool = False,
 ) -> AuditVerdict:
     """Run deterministic checks and optional LLM critic; persist verdict."""
     deterministic = verify_deterministic(text, ctx, suggestion=suggestion)
     llm_hallucinations: list[AuditFinding] = []
+    llm_verified: list[str] = []
     if run_llm and (deterministic or text.strip()):
-        llm_hallucinations = verify_llm(text, ctx, chart_paths=chart_paths)
+        llm_hallucinations, llm_verified = verify_llm(text, ctx, chart_paths=chart_paths)
         llm_hallucinations = [f for f in llm_hallucinations if f.code == "LLM_HALLUCINATION"]
 
     verdict = AuditVerdict(
@@ -552,6 +653,8 @@ def audit_text(
         text_excerpt=_text_excerpt(text),
         deterministic=deterministic,
         llm_hallucinations=llm_hallucinations,
+        llm_verified=llm_verified,
+        sanitized=sanitized,
     )
 
     audit.save_verdict(
@@ -570,16 +673,22 @@ def audit_hourly_cycle(
     suggestion: Suggestion,
     market_context: MarketContext,
     marked_chart_paths: dict[str, str],
+    *,
+    llm_rationale: str | None = None,
+    run_llm: bool = True,
+    sanitized: bool = False,
 ) -> AuditVerdict:
     """Audit hourly suggestion rationale after snapshot is saved."""
+    text = llm_rationale if llm_rationale is not None else split_rationale(suggestion.rationale)[0]
     return audit_text(
-        suggestion.rationale,
+        text,
         market_context,
         source="hourly",
         cycle_id=cycle_id,
         suggestion=suggestion,
         chart_paths=marked_chart_paths,
-        run_llm=True,
+        run_llm=run_llm,
+        sanitized=sanitized,
     )
 
 

@@ -2,7 +2,15 @@
 
 from __future__ import annotations
 
-from critic import verify_deterministic
+from critic import (
+    AuditFinding,
+    build_signals_block,
+    compose_rationale,
+    findings_require_retry,
+    sanitize_rationale,
+    split_rationale,
+    verify_deterministic,
+)
 from models import Suggestion
 from patterns.htf_structure import HTFZone
 from patterns.key_levels import KeyLevel
@@ -130,3 +138,47 @@ def test_json_h12_as_h1_ob_via_suggestion():
     )
     findings = verify_deterministic("H12 bullish bias.", ctx, suggestion=suggestion)
     assert any(f.code == "JSON_H12_AS_H1_OB" for f in findings)
+
+
+def test_split_and_compose_rationale():
+    signals = "Signals: 24h range established: 1,550-1,630"
+    llm = "HTF bearish. No valid H1 SFP in window."
+    full = compose_rationale(llm, signals)
+    body, block = split_rationale(full)
+    assert block == signals
+    assert body == llm
+
+
+def test_alert_text_not_audited_when_split():
+    ctx = _base_context()
+    signals = build_signals_block(
+        ["Price in bearish H1 OB fib zone 1,580.00-1,590.00"]
+    )
+    llm = "HTF structure bearish on H12. Waiting for setup."
+    full = compose_rationale(llm, signals)
+    llm_body, _ = split_rationale(full)
+    findings = verify_deterministic(llm_body, ctx)
+    assert not any(f.code == "H1_OB_MISLABEL" for f in findings)
+
+
+def test_findings_require_retry_on_critical_codes():
+    findings = [
+        AuditFinding(code="H1_SFP_NOT_FOUND", message="test"),
+        AuditFinding(code="ENTRY_NOT_IN_RATIONALE", message="warn", severity="warning"),
+    ]
+    assert findings_require_retry(findings)
+
+
+def test_findings_require_retry_false_on_warnings_only():
+    findings = [
+        AuditFinding(code="H1_OB_NOT_FOUND", message="test", severity="warning"),
+    ]
+    assert not findings_require_retry(findings)
+
+
+def test_sanitize_rationale_uses_snapshot_only():
+    ctx = _base_context(h12_sfps=[], h1_sfps=[])
+    text = sanitize_rationale(ctx)
+    assert "No valid H1 SFP" in text
+    assert "H1 OB 1,569" not in text
+    assert "1,554.47" not in text or "Primary H12" in text

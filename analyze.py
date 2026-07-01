@@ -27,7 +27,7 @@ TRADING_GUIDE_PATH = config.TRADING_GUIDE_DIR / "Trading Guide.md"
 VALID_ACTIONS = {"spot_buy", "spot_sell", "deriv_buy", "deriv_sell", "no_trade"}
 CHART_ORDER = ("H12", "H4", "H1")
 
-# TODO: add critic.py second-pass review before broadcast.
+# TODO: add critic.py second-pass review before broadcast. (Post-broadcast monitor in critic.py)
 
 
 def load_trading_guide() -> str:
@@ -98,7 +98,7 @@ Detected once on **H12** closed candles, then **projected** onto H12, H4, and H1
 MSB uses **close only** — wick-only breaks through a swing do not count.
 
 ### H1 order blocks (LTF — entries only)
-Detected separately on **H1** candles (may appear as unlabeled green/pink rectangles on the H1 chart). These are **not** the same as H12 OB boxes unless price zones genuinely overlap.
+Detected separately on **H1** candles. On the **H1 marked chart**, valid blocks appear as labeled green/pink rectangles (**H1 OB**). These are **not** the same as H12 OB boxes unless price zones genuinely overlap.
 
 | Rule | Detail |
 |------|--------|
@@ -118,6 +118,7 @@ Cite specific visible level names and H12 OB/BRKR zones in your rationale (ICT-s
 def _build_user_content(
     chart_paths: dict[str, str],
     market_context: MarketContext | None = None,
+    audit_feedback: str | None = None,
 ) -> list[dict]:
     content: list[dict] = [
         {
@@ -134,6 +135,18 @@ def _build_user_content(
         },
         {"type": "text", "text": OVERLAY_LEGEND},
     ]
+    if audit_feedback:
+        content.append(
+            {
+                "type": "text",
+                "text": (
+                    "Your prior rationale failed fact-check. Fix these errors; cite ONLY "
+                    "structures listed in programmatic context. Do not invent H1 OB ranges "
+                    "or cite invalidated SFPs.\n\n"
+                    f"{audit_feedback}"
+                ),
+            }
+        )
     if market_context and market_context.summary_text:
         content.append(
             {
@@ -334,6 +347,7 @@ def propose_trade(
     chart_paths: dict[str, str],
     trading_guide: str | None = None,
     market_context: MarketContext | None = None,
+    audit_feedback: str | None = None,
 ) -> Suggestion:
     """Single Claude call: chart images + Trading Guide -> Suggestion (or no_trade on failure)."""
     guide_text = trading_guide if trading_guide is not None else load_trading_guide()
@@ -353,7 +367,11 @@ def propose_trade(
             messages=[
                 {
                     "role": "user",
-                    "content": _build_user_content(chart_paths, market_context),
+                    "content": _build_user_content(
+                        chart_paths,
+                        market_context,
+                        audit_feedback=audit_feedback,
+                    ),
                 }
             ],
         )
@@ -389,7 +407,9 @@ if __name__ == "__main__":
     daily = research.get_daily_bars_for_levels()
     key_levels = compute_key_levels(daily)
     htf_zones = detect_htf_zones(data["H12"])
-    paths = render_marked_charts(data, key_levels, htf_zones, cycle_id=cycle_id)
+    paths = render_marked_charts(
+        data, key_levels, htf_zones, cycle_id=cycle_id, market_context=ctx
+    )
     ctx = build_market_context(data["H12"], data["H4"], data["H1"], daily_bars=daily)
 
     print("Calling Claude...")

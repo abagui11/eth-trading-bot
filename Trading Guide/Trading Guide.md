@@ -311,4 +311,12 @@ Write `rationale` as **short paragraphs** separated by a blank line (`\n\n`). Do
 3. **LTF context** — **H1 OB** (with fib zone), 24h range, setup state, pending or confirmed SFPs
 4. **Decision** — why this trade or `no_trade`, and what would change the call
 
+### Rationale anti-patterns (do not do this)
+
+**Bad:** Citing multiple invented `H1 OB 1,569–1,572` ranges inside a wide H12 bearish zone when no matching H1 OB appears under *Detected H1 order blocks* in programmatic context. Sub-candles inside an H12 box are not separate H1 OBs unless detected programmatically.
+
+**Bad:** Citing `H1 SFP` when Recent H1 SFPs is empty or only Live-invalidated SFPs exist in programmatic context.
+
+**Good:** Cite the H12 bearish OB/BRKR for HTF bias; state clearly when no valid H1 SFP is in the window; wait for an H1 fib retest only on bounds listed in programmatic context.
+
 Form **one** trade idea (or `no_trade`) for this hour.

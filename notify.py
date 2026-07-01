@@ -168,7 +168,7 @@ async def broadcast_to_subscribers(
 
 
 def format_audit_alert(verdict: AuditVerdict) -> str:
-    """Format monitor chat alert for deterministic + LLM findings."""
+    """Format monitor chat alert for deterministic + LLM findings (chat audits)."""
     if verdict.source == "hourly":
         header = f"AUDIT — cycle {verdict.cycle_id or 'n/a'}"
         if verdict.action:
@@ -179,6 +179,9 @@ def format_audit_alert(verdict: AuditVerdict) -> str:
             header += f" | snapshot {verdict.cycle_id}"
 
     lines = [header, ""]
+    if verdict.sanitized:
+        lines.append("Note: LLM rationale was replaced with sanitized summary before broadcast.")
+        lines.append("")
     if verdict.deterministic:
         lines.append("[DETERMINISTIC]")
         for finding in verdict.deterministic:
@@ -196,6 +199,84 @@ def format_audit_alert(verdict: AuditVerdict) -> str:
         lines.append(f'Excerpt: "{verdict.text_excerpt}"')
 
     return "\n".join(lines)[:4096]
+
+
+def format_hourly_monitor_report(verdict: AuditVerdict, *, broadcast_sent: bool) -> str:
+    """Full hourly assessment for MONITOR_CHAT_ID — sent every cycle."""
+    action = (verdict.action or "unknown").upper()
+    header = f"HOURLY MONITOR — cycle {verdict.cycle_id or 'n/a'} | {action}"
+    lines = [header, ""]
+
+    if verdict.sanitized:
+        lines.append("Pre-broadcast: rationale was sanitized after audit failures.")
+        lines.append("")
+
+    if broadcast_sent:
+        lines.append("Subscriber broadcast: sent")
+    else:
+        reason = "no_trade" if action == "NO_TRADE" else "skipped"
+        lines.append(f"Subscriber broadcast: skipped ({reason})")
+    lines.append("")
+
+    critical = [f for f in verdict.deterministic if f.severity == "critical"]
+    warnings = [f for f in verdict.deterministic if f.severity == "warning"]
+
+    lines.append("[DETERMINISTIC — pass 1]")
+    if critical:
+        for finding in critical:
+            lines.append(f"! {finding.code}: {finding.message}")
+    elif warnings:
+        lines.append("✓ No critical deterministic issues.")
+    else:
+        lines.append("✓ All deterministic fact-checks passed.")
+    if warnings:
+        lines.append("")
+        lines.append("[WARNINGS]")
+        for finding in warnings:
+            lines.append(f"? {finding.code}: {finding.message}")
+    lines.append("")
+
+    lines.append("[LLM CRITIC — pass 2]")
+    if verdict.llm_hallucinations:
+        for finding in verdict.llm_hallucinations:
+            lines.append(f"! {finding.code}: {finding.message}")
+    else:
+        lines.append("✓ No hallucinations flagged.")
+    if verdict.llm_verified:
+        lines.append("")
+        lines.append("[VERIFIED CLAIMS]")
+        for claim in verdict.llm_verified:
+            lines.append(f"✓ {claim}")
+    lines.append("")
+
+    if verdict.text_excerpt:
+        lines.append(f'Rationale excerpt: "{verdict.text_excerpt}"')
+
+    return "\n".join(lines)[:4096]
+
+
+async def send_hourly_monitor_report_async(
+    verdict: AuditVerdict,
+    *,
+    broadcast_sent: bool,
+) -> None:
+    """Post full hourly assessment to MONITOR_CHAT_ID (every cycle)."""
+    chat_id = config.MONITOR_CHAT_ID
+    if not chat_id:
+        logger.debug("MONITOR_CHAT_ID not set — skipping hourly monitor report")
+        return
+
+    text = format_hourly_monitor_report(verdict, broadcast_sent=broadcast_sent)
+    bot = Bot(token=config.TELEGRAM_BOT_TOKEN)
+    await bot.send_message(chat_id=int(str(chat_id).strip()), text=text)
+
+
+def send_hourly_monitor_report(verdict: AuditVerdict, *, broadcast_sent: bool) -> None:
+    """Sync wrapper for agent cycle."""
+    try:
+        asyncio.run(send_hourly_monitor_report_async(verdict, broadcast_sent=broadcast_sent))
+    except Exception:
+        logger.exception("Failed to send hourly monitor report")
 
 
 async def send_monitor_alert_async(verdict: AuditVerdict) -> None:

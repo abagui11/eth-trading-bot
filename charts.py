@@ -362,6 +362,7 @@ def render_marked_charts(
   key_levels: list[KeyLevel],
   htf_zones: list[HTFZone],
   cycle_id: str | None = None,
+  market_context: MarketContext | None = None,
 ) -> dict[str, str]:
   """Render macro-marked candlestick PNGs per strategy timeframe."""
   out_dir = _ensure_charts_dir()
@@ -380,6 +381,8 @@ def render_marked_charts(
     _draw_htf_zones(ax, df, htf_zones)
     _draw_swing_hlines(ax, df)
     _draw_key_levels(ax, visible_levels_cache[tf], df)
+    if tf == "H1" and market_context is not None:
+      _draw_detected_overlays(ax, df, market_context)
     paths[tf] = _save_chart_figure(fig, path)
 
   return paths
