@@ -210,6 +210,12 @@ def format_hourly_monitor_report(verdict: AuditVerdict, *, broadcast_sent: bool)
     if verdict.sanitized:
         lines.append("Pre-broadcast: rationale was sanitized after audit failures.")
         lines.append("")
+    if verdict.downgraded:
+        lines.append("Pre-broadcast: trade action downgraded to no_trade after audit failures.")
+        lines.append("")
+    if verdict.passes_used:
+        lines.append(f"Refine passes used: {verdict.passes_used}")
+        lines.append("")
 
     if broadcast_sent:
         lines.append("Subscriber broadcast: sent")

@@ -4,9 +4,11 @@ from __future__ import annotations
 
 from critic import (
     AuditFinding,
+    RefineResult,
     build_signals_block,
     compose_rationale,
     findings_require_retry,
+    refine_suggestion,
     sanitize_rationale,
     split_rationale,
     verify_deterministic,
@@ -176,9 +178,66 @@ def test_findings_require_retry_false_on_warnings_only():
     assert not findings_require_retry(findings)
 
 
+def test_no_false_positive_on_fib_ratio_in_text():
+    ctx = _base_context()
+    text = "Entry requires fib 0.618-0.786 retest inside H1 OB."
+    findings = verify_deterministic(text, ctx)
+    assert not any(f.code == "H1_OB_NOT_FOUND" for f in findings)
+
+
+def test_no_false_positive_on_small_key_level_numbers():
+    ctx = _base_context()
+    text = "Width 6.0% from Monday High area near 1,635."
+    findings = verify_deterministic(text, ctx)
+    assert not any(f.code == "KEY_LEVEL_MISMATCH" for f in findings)
+
+
+def test_findings_require_retry_on_llm_hallucination():
+    findings = [
+        AuditFinding(code="LLM_HALLUCINATION", message="wrong spot"),
+    ]
+    assert findings_require_retry(findings)
+
+
 def test_sanitize_rationale_uses_snapshot_only():
     ctx = _base_context(h12_sfps=[], h1_sfps=[])
     text = sanitize_rationale(ctx)
     assert "No valid H1 SFP" in text
     assert "H1 OB 1,569" not in text
     assert "1,554.47" not in text or "Primary H12" in text
+
+
+def test_refine_suggestion_downgrades_failed_trade(monkeypatch):
+    ctx = _base_context()
+    trade = Suggestion.from_dict(
+        {
+            "action": "spot_buy",
+            "size": 0.5,
+            "entry": 1574.0,
+            "stop_loss": 1550.0,
+            "take_profits": [1600.0],
+            "risk_reward": 2.0,
+            "rationale": "Entry on H1 OB 1554.47-1586.51 fib retest.",
+            "order_block": {
+                "low": 1554.47,
+                "high": 1586.51,
+                "start_ts": "2026-06-28T10:00:00Z",
+                "end_ts": "2026-06-28T10:00:00Z",
+            },
+            "structure_chart": "H12",
+            "entry_chart": "H1",
+        }
+    )
+
+    def _fake_propose(*_args, **_kwargs):
+        return trade
+
+    monkeypatch.setattr("critic.analyze.propose_trade", _fake_propose)
+    monkeypatch.setattr("critic.verify_llm", lambda *_a, **_k: ([], []))
+    monkeypatch.setattr("critic.bot_config.MAX_REFINE_PASSES", 0)
+
+    result = refine_suggestion(trade, ctx, {}, "guide", run_llm_critic=False)
+    assert isinstance(result, RefineResult)
+    assert result.downgraded is True
+    assert result.suggestion.action == "no_trade"
+    assert result.suggestion.order_block is None

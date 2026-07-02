@@ -12,10 +12,17 @@ import anthropic
 
 import analyze
 import audit
+import bot_config
 import config
 from models import Suggestion
 from patterns.market_context import MarketContext
-from patterns.order_block import bounds_close, find_matching_h1_ob, zones_overlap
+from patterns.order_block import (
+    OrderBlock,
+    bounds_close,
+    find_matching_h1_ob,
+    format_ob_with_fib,
+    zones_overlap,
+)
 from patterns.htf_structure import HTFZone
 
 logger = logging.getLogger(__name__)
@@ -23,16 +30,18 @@ logger = logging.getLogger(__name__)
 Severity = Literal["critical", "warning"]
 Source = Literal["hourly", "chat"]
 
-_PRICE_RE = r"(\d{1,3}(?:,\d{3})+(?:\.\d+)?|\d+(?:\.\d+)?)"
+# Comma-formatted ETH prices or bare numbers with 3+ digits (excludes 0.618, 1.00, etc.)
+_ETH_PRICE_RE = r"(\d{1,3}(?:,\d{3})+(?:\.\d+)?|\d{3,}(?:\.\d+)?)"
+_TRADE_ACTIONS = frozenset({"spot_buy", "spot_sell", "deriv_buy", "deriv_sell"})
 _NEGATION_RE = re.compile(
     r"\b(?:no|not|without|none|lack|missing|absent|didn't|did not|hasn't|has not)\b",
     re.IGNORECASE,
 )
 _H1_OB_RE = re.compile(
-    rf"(?i)H1\s+OB[^0-9]*{_PRICE_RE}\s*[-–]\s*{_PRICE_RE}",
+    rf"(?i)H1\s+OB[^0-9]*{_ETH_PRICE_RE}\s*[-–]\s*{_ETH_PRICE_RE}",
 )
 _H12_ZONE_RE = re.compile(
-    rf"(?i)H12\s+(?:OB|BRKR|breaker|order\s+block)[^0-9]*{_PRICE_RE}\s*[-–]\s*{_PRICE_RE}",
+    rf"(?i)H12\s+(?:OB|BRKR|breaker|order\s+block)[^0-9]*{_ETH_PRICE_RE}\s*[-–]\s*{_ETH_PRICE_RE}",
 )
 _H12_SFP_RE = re.compile(r"(?i)\bH12\s+(?:\w+\s+)?SFP\b")
 _H1_SFP_RE = re.compile(r"(?i)\bH1\s+(?:\w+\s+)?SFP\b")
@@ -79,7 +88,18 @@ CRITICAL_RETRY_CODES = frozenset({
     "RETEST_STATUS_CONFLICT",
     "RANGE_BREAK_CONFLICT",
     "KEY_LEVEL_MISMATCH",
+    "LLM_HALLUCINATION",
 })
+
+
+@dataclass
+class RefineResult:
+    suggestion: Suggestion
+    llm_body: str
+    sanitized: bool = False
+    downgraded: bool = False
+    passes_used: int = 0
+    final_findings: list[AuditFinding] = field(default_factory=list)
 
 
 @dataclass
@@ -93,6 +113,8 @@ class AuditVerdict:
     llm_hallucinations: list[AuditFinding] = field(default_factory=list)
     llm_verified: list[str] = field(default_factory=list)
     sanitized: bool = False
+    downgraded: bool = False
+    passes_used: int = 0
 
     @property
     def has_issues(self) -> bool:
@@ -134,7 +156,7 @@ def compose_rationale(llm_body: str, signals_block: str | None) -> str:
 
 
 def findings_require_retry(findings: list[AuditFinding]) -> bool:
-    """True when deterministic findings warrant one Claude retry."""
+    """True when findings warrant a Claude retry."""
     return any(
         f.code in CRITICAL_RETRY_CODES and f.severity == "critical"
         for f in findings
@@ -143,16 +165,56 @@ def findings_require_retry(findings: list[AuditFinding]) -> bool:
 
 def format_retry_feedback(findings: list[AuditFinding]) -> str:
     """Bullet list of fact-check failures for a Claude retry."""
-    critical = [f for f in findings if f.code in CRITICAL_RETRY_CODES]
-    if not critical:
-        critical = findings
-    lines = [f"- {f.code}: {f.message}" for f in critical]
-    return "\n".join(lines)
+    return format_combined_feedback(findings, [])
 
 
-def sanitize_rationale(ctx: MarketContext) -> str:
+def _looks_like_fib_ratio(raw: str) -> bool:
+    try:
+        value = float(raw.replace(",", ""))
+        return 0 < value < 1
+    except ValueError:
+        return False
+
+
+def _nearest_h1_ob(spot: float, order_blocks: list[OrderBlock]) -> OrderBlock | None:
+    """Pick the most relevant H1 OB: containing spot first, else nearest by range distance."""
+    if not order_blocks:
+        return None
+    containing = [ob for ob in order_blocks if ob.low <= spot <= ob.high]
+    if containing:
+        return max(containing, key=lambda ob: ob.displacement_ts)
+
+    def _distance(ob: OrderBlock) -> float:
+        if spot < ob.low:
+            return ob.low - spot
+        if spot > ob.high:
+            return spot - ob.high
+        return 0.0
+
+    return min(order_blocks, key=_distance)
+
+
+def _retest_status_line(ctx: MarketContext) -> str | None:
+    zone_snap = ctx.zone_snapshot
+    if zone_snap is None or zone_snap.bearish_retest_low is None:
+        return None
+    low, high = zone_snap.bearish_retest_low, zone_snap.bearish_retest_high
+    if ctx.range_24h and ctx.range_24h.high >= low:
+        return f"Retest status (rolling 24h): FILLED ({ctx.range_24h.high:,.2f} reached supply {low:,.2f}-{high:,.2f})."
+    return f"Retest status (rolling 24h): NOT YET FILLED (supply {low:,.2f}-{high:,.2f})."
+
+
+def sanitize_rationale(
+    ctx: MarketContext,
+    *,
+    downgrade_reason: list[str] | None = None,
+) -> str:
     """Safe fallback prose built only from programmatic snapshot fields."""
-    parts: list[str] = [f"Spot ${ctx.spot:,.2f}."]
+    parts: list[str] = []
+    if downgrade_reason:
+        codes = ", ".join(downgrade_reason[:4])
+        parts.append(f"Audit downgrade ({codes}):")
+    parts.append(f"Spot ${ctx.spot:,.2f}.")
     zone_snap = ctx.zone_snapshot
     if zone_snap and zone_snap.primary_bearish:
         z = zone_snap.primary_bearish
@@ -164,6 +226,9 @@ def sanitize_rationale(ctx: MarketContext) -> str:
         parts.append(
             f"Primary H12 zone: bullish {z.low:,.2f}-{z.high:,.2f} (bias only)."
         )
+    retest_line = _retest_status_line(ctx)
+    if retest_line:
+        parts.append(retest_line)
     if ctx.h12_sfps:
         parts.append(
             f"Recent valid H12 SFPs: {len(ctx.h12_sfps)} in snapshot window."
@@ -176,15 +241,141 @@ def sanitize_rationale(ctx: MarketContext) -> str:
         )
     else:
         parts.append("No valid H1 SFP in the recent window.")
-    if ctx.order_blocks:
-        ob = ctx.order_blocks[-1]
-        parts.append(
-            f"Nearest detected H1 OB: {ob.direction} {ob.low:,.2f}-{ob.high:,.2f}."
-        )
+    nearest = _nearest_h1_ob(ctx.spot, ctx.order_blocks)
+    if nearest:
+        parts.append(f"Nearest detected H1 OB: {format_ob_with_fib(nearest)}.")
     else:
         parts.append("No detected H1 OB in lookback — wait for H1 fib retest.")
     parts.append("No trade until LTF structure aligns with programmatic context.")
     return " ".join(parts)
+
+
+def _collect_refine_findings(
+    deterministic: list[AuditFinding],
+    llm_hallucinations: list[AuditFinding],
+) -> list[AuditFinding]:
+    critical = [
+        f
+        for f in deterministic
+        if f.severity == "critical" and f.code in CRITICAL_RETRY_CODES
+    ]
+    critical.extend(f for f in llm_hallucinations if f.code == "LLM_HALLUCINATION")
+    return critical
+
+
+def findings_require_refine(
+    deterministic: list[AuditFinding],
+    llm_hallucinations: list[AuditFinding],
+) -> bool:
+    return bool(_collect_refine_findings(deterministic, llm_hallucinations))
+
+
+def format_combined_feedback(
+    deterministic: list[AuditFinding],
+    llm_hallucinations: list[AuditFinding],
+) -> str:
+    """Bullet list of fact-check failures for a full propose_trade retry."""
+    critical = _collect_refine_findings(deterministic, llm_hallucinations)
+    if not critical:
+        critical = deterministic + llm_hallucinations
+    lines = [
+        "Your prior suggestion failed fact-check. Fix factual errors; cite ONLY "
+        "structures listed in programmatic context. Return no_trade if a verified "
+        "entry cannot be formed.",
+        "",
+    ]
+    lines.extend(f"- {f.code}: {f.message}" for f in critical)
+    return "\n".join(lines)
+
+
+def refine_suggestion(
+    suggestion: Suggestion,
+    market_context: MarketContext,
+    marked_paths: dict[str, str],
+    guide: str,
+    *,
+    max_passes: int | None = None,
+    run_llm_critic: bool | None = None,
+) -> RefineResult:
+    """Pre-ledger audit loop: retry propose_trade; downgrade failed trades to no_trade."""
+    passes_limit = max_passes if max_passes is not None else bot_config.MAX_REFINE_PASSES
+    run_llm = (
+        run_llm_critic
+        if run_llm_critic is not None
+        else bot_config.RUN_LLM_CRITIC_PRE_BROADCAST
+    )
+
+    llm_body = suggestion.rationale.strip()
+    sanitized = False
+    downgraded = False
+    passes_used = 0
+    final_findings: list[AuditFinding] = []
+
+    for pass_num in range(passes_limit + 1):
+        deterministic = verify_deterministic(llm_body, market_context, suggestion)
+        llm_hallucinations: list[AuditFinding] = []
+        if run_llm and llm_body:
+            llm_hallucinations, _ = verify_llm(
+                llm_body, market_context, chart_paths=marked_paths
+            )
+            llm_hallucinations = [
+                f for f in llm_hallucinations if f.code == "LLM_HALLUCINATION"
+            ]
+
+        final_findings = deterministic + llm_hallucinations
+        if not findings_require_refine(deterministic, llm_hallucinations):
+            return RefineResult(
+                suggestion=suggestion,
+                llm_body=llm_body,
+                sanitized=sanitized,
+                downgraded=downgraded,
+                passes_used=passes_used,
+                final_findings=final_findings,
+            )
+
+        if pass_num >= passes_limit:
+            break
+
+        passes_used += 1
+        feedback = format_combined_feedback(deterministic, llm_hallucinations)
+        suggestion = analyze.propose_trade(
+            marked_paths,
+            trading_guide=guide,
+            market_context=market_context,
+            audit_feedback=feedback,
+        )
+        llm_body = suggestion.rationale.strip()
+
+    reason_codes = sorted({f.code for f in _collect_refine_findings(
+        [f for f in final_findings if f.code != "LLM_HALLUCINATION"],
+        [f for f in final_findings if f.code == "LLM_HALLUCINATION"],
+    )})
+
+    if suggestion.action in _TRADE_ACTIONS:
+        llm_body = sanitize_rationale(
+            market_context, downgrade_reason=reason_codes or None
+        )
+        suggestion = Suggestion.no_trade(llm_body)
+        suggestion.decision_charts = ["H12"]
+        downgraded = True
+        sanitized = True
+    elif findings_require_refine(
+        [f for f in final_findings if f.code != "LLM_HALLUCINATION"],
+        [f for f in final_findings if f.code == "LLM_HALLUCINATION"],
+    ):
+        llm_body = sanitize_rationale(market_context)
+        suggestion = Suggestion.no_trade(llm_body)
+        suggestion.decision_charts = ["H12"]
+        sanitized = True
+
+    return RefineResult(
+        suggestion=suggestion,
+        llm_body=llm_body,
+        sanitized=sanitized,
+        downgraded=downgraded,
+        passes_used=passes_used,
+        final_findings=final_findings,
+    )
 
 
 def _parse_price(raw: str) -> float:
@@ -280,8 +471,11 @@ def _mentions_invalidated_sfp(text: str, ctx: MarketContext) -> AuditFinding | N
 def _check_h1_ob_bounds(text: str, ctx: MarketContext) -> list[AuditFinding]:
     findings: list[AuditFinding] = []
     for match in _H1_OB_RE.finditer(text):
-        low = _parse_price(match.group(1))
-        high = _parse_price(match.group(2))
+        raw_low, raw_high = match.group(1), match.group(2)
+        if _looks_like_fib_ratio(raw_low) or _looks_like_fib_ratio(raw_high):
+            continue
+        low = _parse_price(raw_low)
+        high = _parse_price(raw_high)
         if _h1_ob_match(low, high, ctx):
             continue
         h12_match = _zone_match(
@@ -318,8 +512,11 @@ def _check_h1_ob_bounds(text: str, ctx: MarketContext) -> list[AuditFinding]:
 def _check_h12_zone_bounds(text: str, ctx: MarketContext) -> list[AuditFinding]:
     findings: list[AuditFinding] = []
     for match in _H12_ZONE_RE.finditer(text):
-        low = _parse_price(match.group(1))
-        high = _parse_price(match.group(2))
+        raw_low, raw_high = match.group(1), match.group(2)
+        if _looks_like_fib_ratio(raw_low) or _looks_like_fib_ratio(raw_high):
+            continue
+        low = _parse_price(raw_low)
+        high = _parse_price(raw_high)
         if _zone_match(low, high, ctx.htf_zones):
             continue
         findings.append(
@@ -360,10 +557,13 @@ def _check_key_levels(text: str, ctx: MarketContext) -> list[AuditFinding]:
         return findings
     for label in _KEY_LEVEL_NAMES:
         pattern = re.compile(
-            rf"(?i){re.escape(label)}[^0-9]*{_PRICE_RE}",
+            rf"(?i){re.escape(label)}[^0-9]*{_ETH_PRICE_RE}",
         )
         for match in pattern.finditer(text):
-            claimed = _parse_price(match.group(1))
+            raw = match.group(1)
+            if _looks_like_fib_ratio(raw):
+                continue
+            claimed = _parse_price(raw)
             actual = next((lv for lv in ctx.key_levels_near if lv.label == label), None)
             if actual is None:
                 actual = next(
@@ -399,7 +599,7 @@ def _check_retest_status(text: str, ctx: MarketContext) -> AuditFinding | None:
             code="RETEST_STATUS_CONFLICT",
             message=(
                 "Text implies retest not filled / waiting for rally, but snapshot "
-                "RETEST STATUS is FILLED (24h high reached supply)"
+                "retest status (rolling 24h) is FILLED (24h high reached supply)"
             ),
         )
     return None
@@ -636,6 +836,8 @@ def audit_text(
     chart_paths: dict[str, str] | None = None,
     run_llm: bool = True,
     sanitized: bool = False,
+    downgraded: bool = False,
+    passes_used: int = 0,
 ) -> AuditVerdict:
     """Run deterministic checks and optional LLM critic; persist verdict."""
     deterministic = verify_deterministic(text, ctx, suggestion=suggestion)
@@ -655,6 +857,8 @@ def audit_text(
         llm_hallucinations=llm_hallucinations,
         llm_verified=llm_verified,
         sanitized=sanitized,
+        downgraded=downgraded,
+        passes_used=passes_used,
     )
 
     audit.save_verdict(
@@ -677,6 +881,8 @@ def audit_hourly_cycle(
     llm_rationale: str | None = None,
     run_llm: bool = True,
     sanitized: bool = False,
+    downgraded: bool = False,
+    passes_used: int = 0,
 ) -> AuditVerdict:
     """Audit hourly suggestion rationale after snapshot is saved."""
     text = llm_rationale if llm_rationale is not None else split_rationale(suggestion.rationale)[0]
@@ -689,7 +895,71 @@ def audit_hourly_cycle(
         chart_paths=marked_chart_paths,
         run_llm=run_llm,
         sanitized=sanitized,
+        downgraded=downgraded,
+        passes_used=passes_used,
     )
+
+
+_CHAT_CRITICAL_CODES = frozenset({
+    "LLM_HALLUCINATION",
+    "KEY_LEVEL_MISMATCH",
+    "H1_OB_MISLABEL",
+    "JSON_H12_AS_H1_OB",
+})
+
+
+def refine_chat_reply(
+    user_id: int,
+    question: str,
+    reply: str,
+    *,
+    cycle_id: str | None = None,
+) -> tuple[str, AuditVerdict]:
+    """Audit chat reply; replace with grounded summary on critical factual failures."""
+    snapshot_row = audit.get_snapshot(cycle_id) if cycle_id else audit.get_latest_snapshot()
+    if snapshot_row is None:
+        logger.warning("No audit snapshot for chat refine (cycle_id=%s)", cycle_id)
+        verdict = AuditVerdict(source="chat", user_id=user_id, text_excerpt=_text_excerpt(reply))
+        return reply, verdict
+
+    ctx = audit.market_context_from_dict(snapshot_row["snapshot"])
+    suggestion = audit.suggestion_from_dict(snapshot_row["suggestion"])
+    chart_paths = snapshot_row.get("marked_chart_paths") or {}
+    resolved_cycle = cycle_id or snapshot_row.get("cycle_id")
+
+    verdict = audit_text(
+        reply,
+        ctx,
+        source="chat",
+        cycle_id=resolved_cycle,
+        user_id=user_id,
+        suggestion=suggestion,
+        chart_paths=chart_paths,
+        run_llm=True,
+    )
+
+    critical = [
+        f
+        for f in verdict.deterministic + verdict.llm_hallucinations
+        if f.severity == "critical" and f.code in _CHAT_CRITICAL_CODES
+    ]
+    if critical:
+        codes = sorted({f.code for f in critical})[:4]
+        replacement = (
+            sanitize_rationale(ctx, downgrade_reason=codes)
+            + " Unverified claims were removed from this reply."
+        )
+        verdict.sanitized = True
+        verdict.text_excerpt = _text_excerpt(replacement)
+        reply = replacement
+
+    audit.log_chat_audit(
+        user_id,
+        question,
+        reply,
+        cycle_id=resolved_cycle,
+    )
+    return reply, verdict
 
 
 def audit_chat_reply(

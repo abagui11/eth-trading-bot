@@ -26,6 +26,10 @@ logger = logging.getLogger(__name__)
 TRADING_GUIDE_PATH = config.TRADING_GUIDE_DIR / "Trading Guide.md"
 VALID_ACTIONS = {"spot_buy", "spot_sell", "deriv_buy", "deriv_sell", "no_trade"}
 CHART_ORDER = ("H12", "H4", "H1")
+MAX_SUGGESTION_TOKENS = 1536
+_JSON_RETRY_HINT = (
+    "Return valid JSON only. Keep rationale under 400 characters to avoid truncation."
+)
 
 # TODO: add critic.py second-pass review before broadcast. (Post-broadcast monitor in critic.py)
 
@@ -352,44 +356,56 @@ def propose_trade(
     """Single Claude call: chart images + Trading Guide -> Suggestion (or no_trade on failure)."""
     guide_text = trading_guide if trading_guide is not None else load_trading_guide()
     client = anthropic.Anthropic(api_key=config.ANTHROPIC_API_KEY)
+    feedback = audit_feedback
+    last_exc: Exception | None = None
 
-    try:
-        response = client.messages.create(
-            model=config.ANTHROPIC_MODEL,
-            max_tokens=1024,
-            system=[
-                {
-                    "type": "text",
-                    "text": guide_text,
-                    "cache_control": {"type": "ephemeral"},
-                }
-            ],
-            messages=[
-                {
-                    "role": "user",
-                    "content": _build_user_content(
-                        chart_paths,
-                        market_context,
-                        audit_feedback=audit_feedback,
-                    ),
-                }
-            ],
-        )
-    except Exception as exc:
-        logger.exception("Claude API call failed")
-        return Suggestion.no_trade(f"api_error: {exc}")
+    for attempt in range(2):
+        try:
+            response = client.messages.create(
+                model=config.ANTHROPIC_MODEL,
+                max_tokens=MAX_SUGGESTION_TOKENS,
+                system=[
+                    {
+                        "type": "text",
+                        "text": guide_text,
+                        "cache_control": {"type": "ephemeral"},
+                    }
+                ],
+                messages=[
+                    {
+                        "role": "user",
+                        "content": _build_user_content(
+                            chart_paths,
+                            market_context,
+                            audit_feedback=feedback,
+                        ),
+                    }
+                ],
+            )
+        except Exception as exc:
+            logger.exception("Claude API call failed")
+            return Suggestion.no_trade(f"api_error: {exc}")
 
-    raw_text = ""
-    for block in response.content:
-        if block.type == "text":
-            raw_text += block.text
+        raw_text = ""
+        for block in response.content:
+            if block.type == "text":
+                raw_text += block.text
 
-    try:
-        data = _extract_json(raw_text)
-        return _validate(data, market_context=market_context)
-    except (json.JSONDecodeError, ValueError, KeyError, TypeError) as exc:
-        logger.warning("Malformed suggestion: %s | raw=%s", exc, raw_text[:500])
-        return Suggestion.no_trade(f"parse_error: {exc}")
+        try:
+            data = _extract_json(raw_text)
+            return _validate(data, market_context=market_context)
+        except json.JSONDecodeError as exc:
+            last_exc = exc
+            logger.warning("Malformed JSON suggestion: %s | raw=%s", exc, raw_text[:500])
+            if attempt == 0:
+                feedback = f"{feedback}\n\n{_JSON_RETRY_HINT}" if feedback else _JSON_RETRY_HINT
+                continue
+            return Suggestion.no_trade(f"parse_error: {exc}")
+        except (ValueError, KeyError, TypeError) as exc:
+            logger.warning("Malformed suggestion: %s | raw=%s", exc, raw_text[:500])
+            return Suggestion.no_trade(f"parse_error: {exc}")
+
+    return Suggestion.no_trade(f"parse_error: {last_exc}")
 
 
 if __name__ == "__main__":

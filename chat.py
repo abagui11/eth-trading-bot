@@ -9,6 +9,7 @@ from pathlib import Path
 import anthropic
 
 import analyze
+import audit
 import bot_config
 import config
 import ledger
@@ -43,6 +44,10 @@ explain both: what is live in paper vs what the most recent hourly analysis reco
 
 Be concise and practical. For historical pattern research (e.g. weekly or H12 SFP stats over past years),
 tell the user to ask directly or use /research h12_sfp or /research weekly_sfp — separate analysis with charts.
+
+When an authoritative cycle snapshot is provided, spot, zones, SFPs, and key levels in your answer
+MUST match that snapshot. Do not invent prices or zones that contradict it.
+
 This is not financial advice.
 """
 
@@ -107,9 +112,19 @@ def _search_terms_from_message(message: str) -> list[str]:
     return unique[:4]
 
 
-def _build_context(spot: float, user_message: str) -> tuple[str, str | None]:
-    """Return (text context, optional chart path for vision)."""
+def _build_context(spot: float, user_message: str) -> tuple[str, str | None, dict[str, str]]:
+    """Return (text context, optional ledger chart path, snapshot marked chart paths)."""
     parts: list[str] = [f"Current ETH spot: ${spot:,.2f}"]
+    snapshot_charts: dict[str, str] = {}
+
+    snapshot_row = audit.get_latest_snapshot()
+    if snapshot_row:
+        cycle_id = snapshot_row.get("cycle_id", "unknown")
+        parts.append("")
+        parts.append(f"=== Authoritative cycle snapshot ({cycle_id}) ===")
+        ctx = audit.market_context_from_dict(snapshot_row["snapshot"])
+        parts.append(ctx.summary_text)
+        snapshot_charts = snapshot_row.get("marked_chart_paths") or {}
 
     position_detail = paper.format_positions_detail(spot)
     chart_path: str | None = None
@@ -181,7 +196,7 @@ def _build_context(spot: float, user_message: str) -> tuple[str, str | None]:
 
     parts.append("")
     parts.append(paper.format_pnl_footer(spot))
-    return "\n".join(parts), chart_path
+    return "\n".join(parts), chart_path, snapshot_charts
 
 
 def answer(user_message: str) -> str:
@@ -194,13 +209,23 @@ def answer(user_message: str) -> str:
             "No trade suggestions yet. The agent runs every hour — check back after the first cycle."
         )
 
-    text_context, chart_path = _build_context(spot, user_message)
+    text_context, chart_path, snapshot_charts = _build_context(spot, user_message)
     text_context = f"{text_context}\n\nUser question: {user_message}"
 
+    live_chart_paths: dict[str, str] = {}
+    for tf in ("H12", "H1"):
+        path = snapshot_charts.get(tf)
+        if path and Path(path).exists():
+            live_chart_paths[tf] = path
+
     vision_blocks = analyze.build_vision_content(
-        chart_paths=None,
-        annotated_h1_path=chart_path if chart_path and Path(chart_path).exists() else None,
-        include_live_charts=False,
+        chart_paths=live_chart_paths or None,
+        annotated_h1_path=(
+            chart_path
+            if not live_chart_paths and chart_path and Path(chart_path).exists()
+            else None
+        ),
+        include_live_charts=bool(live_chart_paths),
         include_patterns=True,
     )
 

@@ -121,6 +121,14 @@ def _htf_bearish_bias(h12_bars: list[dict], zone_snap: ZoneSnapshot) -> bool:
     )
 
 
+def _fib_position_label(spot: float, z_low: float, z_high: float) -> str:
+    if spot < z_low:
+        return "below"
+    if spot > z_high:
+        return "above"
+    return "inside"
+
+
 def _format_h12_zone_fib(zone: HTFZone) -> str:
     z_low, z_high = fib_zone_bounds(zone.direction, zone.low, zone.high)
     return f"fib 0.618-0.786 inside zone: {z_low:,.2f}-{z_high:,.2f}"
@@ -293,9 +301,10 @@ def build_market_context(
             )
             setup_tags.append(f"h1_ob_{ob.direction}_in_fib")
         elif in_full_ob:
+            fib_pos = _fib_position_label(spot, z_low, z_high)
             alerts.append(
                 f"Price inside {ob.direction} H1 OB ({ob.low:,.2f}-{ob.high:,.2f}) "
-                f"but BELOW fib sweet spot ({z_low:,.2f}-{z_high:,.2f}) — wait for fib retest"
+                f"but {fib_pos} fib sweet spot ({z_low:,.2f}-{z_high:,.2f}) — wait for fib retest"
             )
             setup_tags.append(f"h1_ob_{ob.direction}_no_fib")
 
@@ -339,20 +348,18 @@ def build_market_context(
         lines.append("24h range: insufficient H1 data")
 
     if setup_state and setup_state.phase != "idle":
-        lines.append(
-            f"Setup state: {setup_state.phase}"
-            + (
+        phase_line = f"Setup phase: {setup_state.phase} (latched)"
+        if setup_state.retest_low is not None:
+            phase_line += (
                 f" | retest zone {setup_state.retest_low:,.2f}-"
                 f"{setup_state.retest_high:,.2f}"
-                if setup_state.retest_low is not None
-                else ""
             )
-            + (
-                f" | tagged high {setup_state.tagged_high:,.2f}"
-                if setup_state.tagged_high is not None
-                else ""
-            )
-        )
+        if setup_state.tagged_high is not None:
+            tagged = f"{setup_state.tagged_high:,.2f}"
+            if setup_state.tagged_ts:
+                tagged += f" @ {setup_state.tagged_ts[:16]}"
+            phase_line += f" | tagged high {tagged}"
+        lines.append(phase_line)
 
     if zone_snap.zones_containing_price:
         lines.append("Canonical H12 zones at price (structure/bias — NOT the H1 entry OB):")
@@ -402,11 +409,11 @@ def build_market_context(
         )
         if range_24h and range_24h.high >= zone_snap.bearish_retest_low:
             lines.append(
-                "RETEST STATUS: FILLED (24h high reached supply) — "
+                "Retest status (rolling 24h): FILLED (24h high reached supply) — "
                 "do not describe this as a future rally"
             )
         else:
-            lines.append("RETEST STATUS: NOT YET FILLED")
+            lines.append("Retest status (rolling 24h): NOT YET FILLED")
 
     if alerts:
         lines.append("Alerts:")
@@ -448,7 +455,8 @@ def build_market_context(
             "- Entry must be inside the H1 OB fib 0.618-0.786 zone unless action is no_trade.",
             "- If H1 OB overlaps an H12 OB, say 'H1 OB coincides with H12 OB' — do not conflate.",
             "- If only inside H12 OB (no H1 OB fib), default no_trade or wait for H1 fib retest.",
-            "- If RETEST STATUS is FILLED, do NOT say price has not reached the retest zone.",
+            "- If retest status (rolling 24h) is FILLED, do NOT say price has not reached the retest zone.",
+            "- Setup phase name records workflow history; retest status (rolling 24h) is recomputed each cycle — do not treat them as the same.",
             "- If setup state is bearish_retest_rejected or short_trigger_retest, strongly favor SHORT.",
             "- If HTF zone conflict, default no_trade unless LTF+HTF align clearly.",
             "- Only cite SFPs listed under Recent H12/H1 SFPs; do not cite Live-invalidated SFPs.",

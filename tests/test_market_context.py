@@ -8,7 +8,7 @@ from datetime import datetime, timedelta, timezone
 from unittest.mock import patch
 
 import config
-from patterns.market_context import _filter_recent_sfps, build_market_context
+from patterns.market_context import _fib_position_label, _filter_recent_sfps, build_market_context
 from patterns.sfp import SFPEvent
 
 
@@ -107,6 +107,26 @@ class MarketContextTests(unittest.TestCase):
         ctx = build_market_context(h12, h1, h1)
         self.assertIn("Current spot:", ctx.summary_text)
         self.assertIn("do NOT say price has not reached the retest zone", ctx.summary_text)
+
+    def test_fib_position_label_above(self) -> None:
+        self.assertEqual(_fib_position_label(1630.0, 1620.0, 1625.0), "above")
+
+    def test_summary_uses_retest_vocabulary(self) -> None:
+        h1 = _h1_series(30)
+        h12 = []
+        base = datetime(2026, 6, 1, 0, 0, tzinfo=timezone.utc)
+        price = 1800.0
+        for i in range(60):
+            ts = (base + timedelta(hours=12 * i)).strftime("%Y-%m-%dT%H:%M:%SZ")
+            price = max(1500.0, price - 5)
+            h12.append(_bar(ts, price, price + 20, price - 20, price - 5))
+        ctx = build_market_context(h12, h1, h1)
+        if "Retest status (rolling 24h)" in ctx.summary_text:
+            self.assertIn("Retest status (rolling 24h)", ctx.summary_text)
+        self.assertIn(
+            "Setup phase name records workflow history",
+            ctx.summary_text,
+        )
 
 
 if __name__ == "__main__":

@@ -11,6 +11,7 @@ from telegram.ext import Application, CommandHandler, ContextTypes, MessageHandl
 
 import access
 import analytics
+import chart_view
 import chat
 import config
 import critic
@@ -30,7 +31,7 @@ WELCOME_MESSAGE = (
     "Welcome to the ETH Trading Agent.\n\n"
     "You will receive an hourly trade suggestion (chart + rationale) if a setup is found.\n"
     "Reply anytime to ask about the latest suggestion — e.g. \"Why this entry?\" or "
-    "\"What would invalidate the trade?\"\n\n"
+    "\"What would invalidate the trade?\" Use /chart to see the latest analysis chart.\n\n"
     "Research: ask about historical patterns, e.g. \"What % of H12 SFPs reversed "
     "in the past 4 years?\" or use /research h12_sfp\n\n"
     "Paper PnL assumes a ${start:,.0f} portfolio with 1% risk per trade. Not financial advice."
@@ -39,6 +40,19 @@ WELCOME_MESSAGE = (
 _RESEARCH_KEYWORDS = re.compile(
     r"(weekly\s+sfp|h12\s+sfp|sfp\s+reversal|%.*sfp|sfp.*%|sfp.*past|past.*sfp|"
     r"research\s+(weekly|h12)|how\s+many\s+sfp)",
+    re.IGNORECASE,
+)
+
+_CHART_QUERY = re.compile(
+    r"(?:"
+    r"show\s+(?:me\s+)?(?:the\s+)?(?:latest\s+)?charts?"
+    r"|send\s+(?:me\s+)?(?:the\s+)?charts?"
+    r"|(?:latest|current)\s+charts?"
+    r"|what(?:'s|\s+is)\s+(?:on\s+the\s+chart|the\s+bot\s+watching|are\s+you\s+watching)"
+    r"|what\s+are\s+you\s+watching"
+    r"|show\s+(?:me\s+)?what(?:'s|\s+you(?:'re|\s+are))\s+watching"
+    r"|what\s+(?:chart|charts)\s+(?:are\s+you|is\s+the\s+bot)\s+using"
+    r")",
     re.IGNORECASE,
 )
 
@@ -55,6 +69,13 @@ def _is_research_query(text: str) -> bool:
     if normalized.startswith("/research"):
         return True
     return bool(_RESEARCH_KEYWORDS.search(text))
+
+
+def _is_chart_query(text: str) -> bool:
+    normalized = text.strip().lower()
+    if normalized in ("/chart", "chart"):
+        return True
+    return bool(_CHART_QUERY.search(text))
 
 
 def _research_years(text: str) -> int:
@@ -75,6 +96,42 @@ def _research_timeframe(text: str) -> str:
     if "h12" in normalized or "12h" in normalized or "12-hour" in normalized:
         return "H12"
     return "W1"
+
+
+async def _handle_chart(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if update.message is None:
+        return
+
+    await update.message.chat.send_action("upload_photo")
+    loop = asyncio.get_running_loop()
+    try:
+        view = await loop.run_in_executor(None, chart_view.get_latest_chart_view)
+    except Exception:
+        logger.exception("Chart handler failed")
+        await _reply(update, "Sorry, I could not load the latest chart right now.")
+        return
+
+    if view is None:
+        await _reply(
+            update,
+            "No chart yet. The agent runs every hour — check back after the first cycle.",
+        )
+        return
+
+    bot = context.bot
+    chat_id = update.effective_chat.id if update.effective_chat else update.message.chat_id
+    try:
+        for i, chart_path in enumerate(view.chart_paths):
+            caption = view.caption if i == 0 else f"Chart {i + 1}/{len(view.chart_paths)}"
+            await notify.send_photo_with_caption(bot, chat_id, chart_path, caption)
+    except Exception:
+        logger.exception("Failed to send chart photo")
+        await _reply(update, "Sorry, I could not send the chart image right now.")
+        return
+
+    spot = research.get_spot_price()
+    pnl = paper.format_pnl_footer(spot)
+    await _reply(update, f"{view.watch_summary}\n\n{pnl}"[:4096])
 
 
 async def _handle_research(update: Update, context: ContextTypes.DEFAULT_TYPE, text: str) -> None:
@@ -165,13 +222,15 @@ async def cmd_help(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         "Commands:\n"
         "/start — welcome + latest status\n"
         "/status — current suggestion + paper PnL\n"
+        "/chart — latest analysis chart + what the bot is watching\n"
         "/research weekly_sfp — weekly SFP reversal study (4 years)\n"
         "/research h12_sfp — H12 SFP reversal study (4 years)\n"
         "/help — this message\n\n"
         "Ask about the latest hourly suggestion, e.g.:\n"
         "• Why this entry?\n"
         "• What invalidates the trade?\n"
-        "• How does this match the SFP example?\n\n"
+        "• How does this match the SFP example?\n"
+        "• /chart or \"show me the latest chart\"\n\n"
         "Research questions (returns chart + stats), e.g.:\n"
         "• What % of H12 SFPs resulted in a reversal in the past 4 years?\n"
         "• /research h12_sfp\n"
@@ -255,6 +314,20 @@ async def cmd_status(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
     await _reply(update, body[:4096])
 
 
+async def cmd_chart(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    user = update.effective_user
+    if user is None or update.message is None:
+        return
+
+    access.register_user(user.id, _username(update))
+
+    if not access.is_allowed(user.id):
+        await _reply(update, PAYWALL_MESSAGE)
+        return
+
+    await _handle_chart(update, context)
+
+
 async def cmd_research(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     user = update.effective_user
     if user is None or update.message is None:
@@ -311,6 +384,10 @@ async def on_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         await _handle_research(update, context, user_text)
         return
 
+    if _is_chart_query(user_text):
+        await _handle_chart(update, context)
+        return
+
     await update.message.chat.send_action("typing")
 
     loop = asyncio.get_running_loop()
@@ -324,16 +401,17 @@ async def on_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         latest = ledger.get_latest_suggestion()
         cycle_id = str(latest["cycle_id"]) if latest else None
 
-        def _audit_chat() -> None:
-            verdict = critic.audit_chat_reply(
+        def _refine_chat() -> tuple[str, object]:
+            return critic.refine_chat_reply(
                 user.id,
                 user_text,
                 reply,
                 cycle_id=cycle_id,
             )
-            notify.send_monitor_alert(verdict)
 
-        await loop.run_in_executor(None, _audit_chat)
+        reply, verdict = await loop.run_in_executor(None, _refine_chat)
+        if verdict.has_issues:
+            await loop.run_in_executor(None, notify.send_monitor_alert, verdict)
     except Exception:
         logger.exception("Chat monitor audit failed")
 
@@ -351,6 +429,7 @@ def build_application() -> Application:
     app.add_handler(CommandHandler("start", cmd_start))
     app.add_handler(CommandHandler("help", cmd_help))
     app.add_handler(CommandHandler("status", cmd_status))
+    app.add_handler(CommandHandler("chart", cmd_chart))
     app.add_handler(CommandHandler("research", cmd_research))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, on_text))
     return app

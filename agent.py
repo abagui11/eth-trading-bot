@@ -22,42 +22,6 @@ from patterns.market_context import MarketContext, build_market_context
 logger = logging.getLogger(__name__)
 
 
-def _refine_rationale(
-    suggestion: Suggestion,
-    market_context: MarketContext,
-    marked_paths: dict[str, str],
-    guide: str,
-) -> tuple[Suggestion, str, bool]:
-    """Pre-broadcast deterministic audit, optional Claude retry, and sanitize fallback."""
-    llm_body = suggestion.rationale
-    findings = critic.verify_deterministic(llm_body, market_context, suggestion)
-    sanitized = False
-
-    if critic.findings_require_retry(findings):
-        logger.info(
-            "Rationale audit failed (%d findings) — retrying Claude once",
-            len(findings),
-        )
-        suggestion = analyze.propose_trade(
-            marked_paths,
-            trading_guide=guide,
-            market_context=market_context,
-            audit_feedback=critic.format_retry_feedback(findings),
-        )
-        llm_body = suggestion.rationale
-        findings = critic.verify_deterministic(llm_body, market_context, suggestion)
-
-    if critic.findings_require_retry(findings):
-        logger.warning(
-            "Rationale still failing audit after retry (%d findings) — sanitizing",
-            len(findings),
-        )
-        llm_body = critic.sanitize_rationale(market_context)
-        sanitized = True
-
-    return suggestion, llm_body, sanitized
-
-
 def run_cycle() -> tuple[Suggestion, list[str]] | None:
     """Run one full cycle. Returns (suggestion, output_chart_paths) on success."""
     cycle_id = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
@@ -86,12 +50,14 @@ def run_cycle() -> tuple[Suggestion, list[str]] | None:
             market_context=market_context,
         )
 
-        suggestion, llm_body, sanitized = _refine_rationale(
+        refine = critic.refine_suggestion(
             suggestion,
             market_context,
             marked_paths,
             guide,
         )
+        suggestion = refine.suggestion
+        llm_body = refine.llm_body
         signals_block = critic.build_signals_block(market_context.alerts)
         suggestion.rationale = critic.compose_rationale(llm_body, signals_block)
 
@@ -138,8 +104,10 @@ def run_cycle() -> tuple[Suggestion, list[str]] | None:
                 market_context,
                 marked_paths,
                 llm_rationale=llm_body,
-                run_llm=True,
-                sanitized=sanitized,
+                run_llm=False,
+                sanitized=refine.sanitized,
+                downgraded=refine.downgraded,
+                passes_used=refine.passes_used,
             )
             notify.send_hourly_monitor_report(verdict, broadcast_sent=broadcast_sent)
         except Exception:
@@ -160,12 +128,14 @@ def run_cycle() -> tuple[Suggestion, list[str]] | None:
 
         # TODO: execute.py — EXECUTION_MODE=shadow|live order path
         logger.info(
-            "Cycle %s complete: action=%s ledger_id=%s charts=%s sanitized=%s",
+            "Cycle %s complete: action=%s ledger_id=%s charts=%s sanitized=%s downgraded=%s passes=%s",
             cycle_id,
             suggestion.action,
             row_id,
             output_paths,
-            sanitized,
+            refine.sanitized,
+            refine.downgraded,
+            refine.passes_used,
         )
         return suggestion, output_paths
     except Exception:

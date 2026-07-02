@@ -42,3 +42,20 @@ def test_hourly_monitor_report_trade_with_issues():
     assert "H1_OB_MISLABEL" in text
     assert "LLM_HALLUCINATION" in text
     assert "sanitized" in text.lower()
+
+
+def test_hourly_monitor_report_shows_refine_metadata():
+    verdict = AuditVerdict(
+        source="hourly",
+        cycle_id="20260701T140000Z",
+        action="no_trade",
+        text_excerpt="Audit downgrade.",
+        deterministic=[],
+        llm_hallucinations=[],
+        sanitized=True,
+        downgraded=True,
+        passes_used=2,
+    )
+    text = format_hourly_monitor_report(verdict, broadcast_sent=False)
+    assert "downgraded to no_trade" in text
+    assert "Refine passes used: 2" in text
