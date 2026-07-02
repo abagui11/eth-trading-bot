@@ -70,6 +70,11 @@ sed "s|/opt/eth-trading-agent|$APP_DIR|g; s|User=ethagent|User=$APP_USER|g; s|Gr
 systemctl daemon-reload
 systemctl enable eth-agent
 
+echo "==> Installing dashboard systemd service"
+sed "s|/opt/eth-trading-agent|$APP_DIR|g; s|User=ethagent|User=$APP_USER|g; s|Group=ethagent|Group=$APP_USER|g" \
+  "$APP_DIR/deploy/eth-dashboard.service" > /etc/systemd/system/eth-dashboard.service
+systemctl enable eth-dashboard
+
 echo ""
 echo "==> Setup complete"
 echo ""
@@ -80,5 +85,6 @@ echo "  3. sudo systemctl status eth-agent"
 echo "  4. sudo journalctl -u eth-agent -f   # live logs"
 echo "  5. sudo -u $APP_USER $APP_DIR/.venv/bin/python $APP_DIR/status.py"
 echo "  6. sudo -u $APP_USER $APP_DIR/.venv/bin/python $APP_DIR/subscribers.py  # pending users"
-echo "  7. See deploy/CLOUD.md for full ops + onboarding guide"
+echo "  7. sudo systemctl start eth-dashboard   # public dashboard on :8080"
+echo "  8. See deploy/CLOUD.md for full ops + onboarding guide"
 echo ""

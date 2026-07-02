@@ -37,8 +37,8 @@ git push origin main
 ### 3. Create a VPS
 
 - **Ubuntu 22.04+** (Hetzner, DigitalOcean, etc.) — ~$5–6/mo
-- Note the server **IP address**
-- SSH in as root: `ssh root@YOUR_SERVER_IP`
+- Note the server **45.33.97.27**
+- SSH in as root: `ssh root@45.33.97.27`
 
 ### 4. Install the app on the server
 
@@ -202,6 +202,77 @@ sudo systemctl stop eth-agent      # stop
 sudo systemctl start eth-agent     # start
 sudo systemctl restart eth-agent   # restart after .env change
 sudo systemctl status eth-agent    # health check
+```
+
+---
+
+## Part 4 — Public dashboard
+
+The read-only dashboard lives in `dashboard/` and runs as a separate systemd service. It reads the same `ledger.db` and `charts/` as the bot.
+
+### Start the dashboard (on server)
+
+```bash
+sudo systemctl start eth-dashboard
+sudo systemctl status eth-dashboard
+```
+
+Default URL on the VPS (internal test):
+
+```text
+http://YOUR_SERVER_IP:8080
+```
+
+From your PC, open that URL in a browser once port 8080 is open in the firewall (testing only).
+
+### Public HTTPS link (recommended)
+
+1. Buy a domain (optional ~$10/yr) or use a subdomain you already own.
+2. Add a DNS **A record** pointing to your VPS IP (e.g. `dashboard` → `45.33.97.27`).
+3. Install Caddy for automatic HTTPS:
+
+```bash
+sudo apt install -y caddy
+sudo nano /etc/caddy/Caddyfile
+```
+
+```text
+dashboard.yourdomain.com {
+    reverse_proxy localhost:8080
+}
+```
+
+```bash
+sudo systemctl reload caddy
+```
+
+Your public link: `https://dashboard.yourdomain.com` — open it from any device.
+
+### Deploy dashboard updates
+
+Same as the bot — push to GitHub, then on the server:
+
+```bash
+sudo bash /opt/eth-trading-agent/deploy/update.sh
+```
+
+This restarts both `eth-agent` and `eth-dashboard`.
+
+### Backfill chart-read scores (older cycles)
+
+After upgrading, run once to score historical hourly audits:
+
+```bash
+sudo -u ethagent bash /opt/eth-trading-agent/deploy/backfill_audit_scores.py
+```
+
+### Dashboard service commands
+
+```bash
+sudo systemctl stop eth-dashboard
+sudo systemctl start eth-dashboard
+sudo systemctl restart eth-dashboard
+sudo journalctl -u eth-dashboard -f
 ```
 
 ---

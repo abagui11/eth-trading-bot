@@ -13,4 +13,5 @@ APP_USER=$(stat -c '%U' "$APP_DIR")
 sudo -u "$APP_USER" git -C "$APP_DIR" pull --ff-only
 sudo -u "$APP_USER" "$APP_DIR/.venv/bin/pip" install -r "$APP_DIR/requirements.txt" -q
 systemctl restart eth-agent
+systemctl restart eth-dashboard 2>/dev/null || true
 echo "Updated and restarted. journalctl -u eth-agent -f"

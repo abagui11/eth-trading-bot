@@ -1,0 +1,22 @@
+[Unit]
+Description=ETH Trading Agent — public read-only dashboard
+After=network-online.target eth-agent.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=ethagent
+Group=ethagent
+WorkingDirectory=/opt/eth-trading-agent
+EnvironmentFile=/opt/eth-trading-agent/.env
+Environment=DASHBOARD_PORT=8080
+ExecStart=/opt/eth-trading-agent/.venv/bin/python -m dashboard
+Restart=always
+RestartSec=15
+
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=eth-dashboard
+
+[Install]
+WantedBy=multi-user.target

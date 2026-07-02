@@ -217,6 +217,16 @@ def format_hourly_monitor_report(verdict: AuditVerdict, *, broadcast_sent: bool)
         lines.append(f"Refine passes used: {verdict.passes_used}")
         lines.append("")
 
+    if verdict.score is not None:
+        bd = verdict.score_breakdown or {}
+        lines.append(
+            f"Chart-read score: {verdict.score}/100 "
+            f"(critical={bd.get('critical', 0)}, warnings={bd.get('warning', 0)}, "
+            f"hallucinations={bd.get('llm_hallucinations', 0)}, "
+            f"verified={bd.get('verified_claims', 0)})"
+        )
+        lines.append("")
+
     if broadcast_sent:
         lines.append("Subscriber broadcast: sent")
     else:

@@ -1,0 +1,196 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <title>ETH Trading Agent</title>
+  <link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+  <div class="wrap">
+    <header>
+      <h1>ETH Trading Agent</h1>
+      <p class="sub">Paper portfolio &amp; hourly analysis — public dashboard</p>
+    </header>
+
+    <section class="card" id="status-card">
+      <h2>Agent status</h2>
+      <p class="spot" id="spot">${{ "%.2f"|format(status.spot) }}</p>
+      <p class="sub" id="spot-label">ETH-USD live</p>
+      {% if status.score_badge != 'none' %}
+      <span class="badge badge-{{ status.score_badge }}" id="score-badge">
+        Chart-read {{ status.chart_read_score }}/100
+      </span>
+      {% endif %}
+      {% if status.phase and status.phase != 'idle' %}
+      <span class="badge badge-none">{{ status.phase }}</span>
+      {% endif %}
+      <p class="headline" id="headline">{{ status.headline }}</p>
+      {% if status.alerts %}
+      <ul class="plain">
+        {% for alert in status.alerts %}
+        <li>{{ alert }}</li>
+        {% endfor %}
+      </ul>
+      {% endif %}
+      {% if status.watching %}
+      <p class="sub" style="margin-top:10px">Watching</p>
+      <ul class="plain">
+        {% for item in status.watching %}
+        <li>{{ item }}</li>
+        {% endfor %}
+      </ul>
+      {% endif %}
+      {% if status.ts %}
+      <p class="sub" style="margin-top:8px">Last cycle: {{ status.ts }}</p>
+      {% endif %}
+    </section>
+
+    {% if status.h12_chart_url %}
+    <section class="card">
+      <h2>H12 structure (marked)</h2>
+      <img class="chart-img" id="h12-chart" src="{{ status.h12_chart_url }}" alt="H12 marked chart" loading="lazy">
+    </section>
+    {% endif %}
+
+    <section class="card">
+      <h2>Paper P&amp;L</h2>
+      <div class="metrics">
+        <div class="metric">
+          <div class="label">Equity</div>
+          <div class="value">${{ "%.2f"|format(performance.equity_usd) }}</div>
+        </div>
+        <div class="metric">
+          <div class="label">Total P&amp;L</div>
+          <div class="value {{ 'pos' if performance.total_pnl_usd >= 0 else 'neg' }}">
+            {{ "%+.2f"|format(performance.total_pnl_usd) }} ({{ "%+.1f"|format(performance.total_pnl_pct) }}%)
+          </div>
+        </div>
+        <div class="metric">
+          <div class="label">Win rate</div>
+          <div class="value">{{ performance.win_rate_pct }}%</div>
+        </div>
+        <div class="metric">
+          <div class="label">Avg chart-read (30d)</div>
+          <div class="value">
+            {% if performance.chart_read.avg_score_30d is not none %}
+            {{ performance.chart_read.avg_score_30d }}/100
+            {% else %}—{% endif %}
+          </div>
+        </div>
+      </div>
+      <p class="sub" style="margin-top:10px">
+        {{ performance.closed_trade_count }} closed · {{ performance.open_count }} open ·
+        issue rate {{ performance.chart_read.issue_rate_pct }}%
+      </p>
+    </section>
+
+    {% if positions %}
+    <section class="card">
+      <h2>Open positions</h2>
+      <div class="table-scroll">
+        <table>
+          <thead>
+            <tr>
+              <th>Side</th>
+              <th>Entry</th>
+              <th>SL</th>
+              <th>Unrealized</th>
+            </tr>
+          </thead>
+          <tbody>
+            {% for pos in positions %}
+            <tr>
+              <td>{{ pos.side }}</td>
+              <td>${{ "%.2f"|format(pos.avg_entry) }}</td>
+              <td>${{ "%.2f"|format(pos.stop_loss) }}</td>
+              <td class="{{ 'pos-row' if pos.unrealized_pnl_usd >= 0 else 'neg-row' }}">
+                {{ "%+.2f"|format(pos.unrealized_pnl_usd) }}
+              </td>
+            </tr>
+            {% endfor %}
+          </tbody>
+        </table>
+      </div>
+    </section>
+    {% endif %}
+
+    {% if closed_trades %}
+    <section class="card">
+      <h2>Closed paper trades</h2>
+      <div class="table-scroll">
+        <table>
+          <thead>
+            <tr>
+              <th>Entry → Exit</th>
+              <th>P&amp;L</th>
+              <th>Cycle</th>
+            </tr>
+          </thead>
+          <tbody>
+            {% for t in closed_trades %}
+            <tr>
+              <td>${{ "%.0f"|format(t.entry) }} → ${{ "%.0f"|format(t.exit) }}</td>
+              <td class="{{ 'pos-row' if t.realized_pnl_usd >= 0 else 'neg-row' }}">
+                {{ "%+.2f"|format(t.realized_pnl_usd) }}
+              </td>
+              <td>{{ t.open_cycle_id or '—' }}</td>
+            </tr>
+            {% endfor %}
+          </tbody>
+        </table>
+      </div>
+    </section>
+    {% endif %}
+
+    <section class="card">
+      <h2>Hourly cycles</h2>
+      <div class="table-scroll">
+        <table>
+          <thead>
+            <tr>
+              <th>Time</th>
+              <th>Action</th>
+              <th>Score</th>
+            </tr>
+          </thead>
+          <tbody id="cycles-body">
+            {% for c in cycles %}
+            <tr>
+              <td>{{ c.ts[:16] if c.ts else '—' }}</td>
+              <td>{{ c.action }}</td>
+              <td>
+                {% if c.chart_read_score is not none %}
+                <span class="badge badge-{{ c.score_badge }}">{{ c.chart_read_score }}</span>
+                {% else %}—{% endif %}
+              </td>
+            </tr>
+            {% endfor %}
+          </tbody>
+        </table>
+      </div>
+    </section>
+
+    <footer>
+      Paper trading only — not financial advice. Data refreshes every 60s.
+    </footer>
+  </div>
+
+  <script>
+    async function refresh() {
+      try {
+        const [spotRes, statusRes] = await Promise.all([
+          fetch('/api/spot'),
+          fetch('/api/status'),
+        ]);
+        const spot = await spotRes.json();
+        const status = await statusRes.json();
+        document.getElementById('spot').textContent =
+          '$' + spot.spot.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+        document.getElementById('headline').textContent = status.headline;
+      } catch (e) { /* offline */ }
+    }
+    setInterval(refresh, 60000);
+  </script>
+</body>
+</html>

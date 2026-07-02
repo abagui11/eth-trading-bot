@@ -115,6 +115,8 @@ class AuditVerdict:
     sanitized: bool = False
     downgraded: bool = False
     passes_used: int = 0
+    _score: int | None = field(default=None, repr=False)
+    _score_breakdown: dict[str, Any] | None = field(default=None, repr=False)
 
     @property
     def has_issues(self) -> bool:
@@ -125,6 +127,34 @@ class AuditVerdict:
 
     def llm_dicts(self) -> list[dict[str, str]]:
         return [f.to_dict() for f in self.llm_hallucinations]
+
+    @property
+    def score(self) -> int | None:
+        return self._score
+
+    @property
+    def score_breakdown(self) -> dict[str, Any] | None:
+        return self._score_breakdown
+
+
+def compute_chart_read_score(verdict: AuditVerdict) -> tuple[int, dict[str, Any]]:
+    """0–100 score for how accurately the agent read charts / context."""
+    critical = sum(1 for f in verdict.deterministic if f.severity == "critical")
+    warning = sum(1 for f in verdict.deterministic if f.severity == "warning")
+    llm_hall = len(verdict.llm_hallucinations)
+    score = 100 - critical * 15 - warning * 5 - llm_hall * 20
+    if verdict.sanitized:
+        score -= 30
+    score = max(0, score)
+    breakdown = {
+        "critical": critical,
+        "warning": warning,
+        "llm_hallucinations": llm_hall,
+        "sanitized": verdict.sanitized,
+        "downgraded": verdict.downgraded,
+        "verified_claims": len(verdict.llm_verified),
+    }
+    return score, breakdown
 
 
 def build_signals_block(alerts: list[str]) -> str | None:
@@ -860,6 +890,9 @@ def audit_text(
         downgraded=downgraded,
         passes_used=passes_used,
     )
+    chart_score, breakdown = compute_chart_read_score(verdict)
+    verdict._score = chart_score
+    verdict._score_breakdown = breakdown
 
     audit.save_verdict(
         source=source,
@@ -867,6 +900,9 @@ def audit_text(
         user_id=user_id,
         deterministic_findings=verdict.deterministic_dicts(),
         llm_findings=verdict.llm_dicts(),
+        llm_verified=llm_verified,
+        score=chart_score,
+        score_breakdown=breakdown,
         has_issues=verdict.has_issues,
     )
     return verdict

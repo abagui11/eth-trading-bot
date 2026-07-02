@@ -5,7 +5,7 @@ from __future__ import annotations
 import json
 import sqlite3
 from dataclasses import asdict
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Any
 
 import config
@@ -60,9 +60,20 @@ def _connect() -> sqlite3.Connection:
     return conn
 
 
+def _ensure_verdict_columns(conn: sqlite3.Connection) -> None:
+    cols = {row[1] for row in conn.execute("PRAGMA table_info(audit_verdicts)").fetchall()}
+    if "llm_verified_json" not in cols:
+        conn.execute("ALTER TABLE audit_verdicts ADD COLUMN llm_verified_json TEXT")
+    if "score" not in cols:
+        conn.execute("ALTER TABLE audit_verdicts ADD COLUMN score INTEGER")
+    if "score_breakdown_json" not in cols:
+        conn.execute("ALTER TABLE audit_verdicts ADD COLUMN score_breakdown_json TEXT")
+
+
 def init_db() -> None:
     with _connect() as conn:
         conn.executescript(_SCHEMA)
+        _ensure_verdict_columns(conn)
         conn.commit()
 
 
@@ -384,11 +395,25 @@ def get_latest_snapshot() -> dict[str, Any] | None:
     return record
 
 
+def _parse_verdict_row(row: sqlite3.Row | dict) -> dict[str, Any]:
+    record = dict(row)
+    record["deterministic"] = json.loads(record.get("deterministic_json") or "[]")
+    record["llm_hallucinations"] = json.loads(record.get("llm_json") or "[]")
+    record["llm_verified"] = json.loads(record.get("llm_verified_json") or "[]")
+    breakdown_raw = record.get("score_breakdown_json")
+    record["score_breakdown"] = json.loads(breakdown_raw) if breakdown_raw else None
+    record["has_issues"] = bool(record.get("has_issues"))
+    return record
+
+
 def save_verdict(
     *,
     source: str,
     deterministic_findings: list[dict[str, Any]],
     llm_findings: list[dict[str, Any]] | None = None,
+    llm_verified: list[str] | None = None,
+    score: int | None = None,
+    score_breakdown: dict[str, Any] | None = None,
     cycle_id: str | None = None,
     user_id: int | None = None,
     has_issues: bool = False,
@@ -400,8 +425,9 @@ def save_verdict(
         cursor = conn.execute(
             """
             INSERT INTO audit_verdicts (
-                ts, cycle_id, source, user_id, deterministic_json, llm_json, has_issues
-            ) VALUES (?, ?, ?, ?, ?, ?, ?)
+                ts, cycle_id, source, user_id, deterministic_json, llm_json,
+                has_issues, llm_verified_json, score, score_breakdown_json
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 row_ts,
@@ -411,10 +437,98 @@ def save_verdict(
                 json.dumps(deterministic_findings),
                 json.dumps(llm_findings or []),
                 1 if has_issues else 0,
+                json.dumps(llm_verified or []),
+                score,
+                json.dumps(score_breakdown) if score_breakdown else None,
             ),
         )
         conn.commit()
         return int(cursor.lastrowid)
+
+
+def get_verdict_by_cycle_id(cycle_id: str, *, source: str = "hourly") -> dict[str, Any] | None:
+    init_db()
+    with _connect() as conn:
+        row = conn.execute(
+            """
+            SELECT * FROM audit_verdicts
+            WHERE cycle_id = ? AND source = ?
+            ORDER BY id DESC LIMIT 1
+            """,
+            (cycle_id, source),
+        ).fetchone()
+    if row is None:
+        return None
+    return _parse_verdict_row(row)
+
+
+def get_hourly_verdicts(limit: int = 50, offset: int = 0) -> list[dict[str, Any]]:
+    init_db()
+    with _connect() as conn:
+        rows = conn.execute(
+            """
+            SELECT * FROM audit_verdicts
+            WHERE source = 'hourly'
+            ORDER BY id DESC
+            LIMIT ? OFFSET ?
+            """,
+            (limit, offset),
+        ).fetchall()
+    return [_parse_verdict_row(row) for row in rows]
+
+
+def get_score_aggregates() -> dict[str, Any]:
+    """Rolling chart-read score stats for hourly verdicts."""
+    init_db()
+    now = datetime.now(timezone.utc)
+
+    def _avg_since(days: int | None) -> float | None:
+        with _connect() as conn:
+            if days is None:
+                row = conn.execute(
+                    """
+                    SELECT AVG(score) AS avg_score, COUNT(*) AS n
+                    FROM audit_verdicts
+                    WHERE source = 'hourly' AND score IS NOT NULL
+                    """
+                ).fetchone()
+            else:
+                cutoff = (now - timedelta(days=days)).strftime("%Y-%m-%dT%H:%M:%SZ")
+                row = conn.execute(
+                    """
+                    SELECT AVG(score) AS avg_score, COUNT(*) AS n
+                    FROM audit_verdicts
+                    WHERE source = 'hourly' AND score IS NOT NULL AND ts >= ?
+                    """,
+                    (cutoff,),
+                ).fetchone()
+        if row is None or row["n"] == 0:
+            return None
+        return round(float(row["avg_score"]), 1)
+
+    with _connect() as conn:
+        totals = conn.execute(
+            """
+            SELECT
+                COUNT(*) AS total,
+                SUM(CASE WHEN has_issues = 1 THEN 1 ELSE 0 END) AS with_issues,
+                SUM(CASE WHEN score_breakdown_json LIKE '%"sanitized": true%' THEN 1 ELSE 0 END) AS sanitized
+            FROM audit_verdicts
+            WHERE source = 'hourly'
+            """
+        ).fetchone()
+
+    total = int(totals["total"] or 0)
+    with_issues = int(totals["with_issues"] or 0)
+    sanitized = int(totals["sanitized"] or 0)
+    return {
+        "avg_score_all": _avg_since(None),
+        "avg_score_7d": _avg_since(7),
+        "avg_score_30d": _avg_since(30),
+        "total_hourly_cycles": total,
+        "issue_rate_pct": round(with_issues / total * 100, 1) if total else 0.0,
+        "sanitized_count": sanitized,
+    }
 
 
 def log_chat_audit(
