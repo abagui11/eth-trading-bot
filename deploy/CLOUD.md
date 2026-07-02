@@ -275,6 +275,14 @@ sudo systemctl restart eth-dashboard
 sudo journalctl -u eth-dashboard -f
 ```
 
+If `eth-dashboard.service` is missing on an older VPS (only ran `update.sh`, not full `setup.sh`):
+
+```bash
+sudo bash /opt/eth-trading-agent/deploy/install_dashboard.sh
+```
+
+Then open `http://YOUR_SERVER_IP:8080` (allow port 8080 in the cloud firewall if needed).
+
 ---
 
 ## Checklist

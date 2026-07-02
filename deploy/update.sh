@@ -10,23 +10,25 @@ if [[ $EUID -ne 0 ]]; then
 fi
 
 APP_USER=$(stat -c '%U' "$APP_DIR")
+PY="$APP_DIR/.venv/bin/python"
+
 sudo -u "$APP_USER" git -C "$APP_DIR" pull --ff-only
 sudo -u "$APP_USER" "$APP_DIR/.venv/bin/pip" install -r "$APP_DIR/requirements.txt" -q
 
-# Migrate ledger.db (e.g. audit_verdicts.score columns) before services restart.
-sudo -u "$APP_USER" "$APP_DIR/.venv/bin/python" -c "import audit, ledger, paper; audit.init_db(); ledger.init_db(); paper.init_db()"
-
-# Install dashboard unit on existing VPS installs that pre-date eth-dashboard.service.
+# Install dashboard unit first (existing VPS may never have had setup.sh re-run).
 if [[ ! -f /etc/systemd/system/eth-dashboard.service ]]; then
   echo "==> Installing eth-dashboard.service"
-  sed "s|/opt/eth-trading-agent|$APP_DIR|g; s|User=ethagent|User=$APP_USER|g; s|Group=ethagent|Group=$APP_USER|g" \
-    "$APP_DIR/deploy/eth-dashboard.service" > /etc/systemd/system/eth-dashboard.service
+  bash "$APP_DIR/deploy/install_dashboard.sh"
+else
   systemctl daemon-reload
-  systemctl enable eth-dashboard
 fi
+
+# Must run from APP_DIR so `import audit` resolves.
+sudo -u "$APP_USER" bash -c "cd '$APP_DIR' && '$PY' -c \"import audit, ledger, paper; audit.init_db(); ledger.init_db(); paper.init_db()\""
 
 systemctl restart eth-agent
 systemctl restart eth-dashboard
 echo "Updated and restarted eth-agent + eth-dashboard."
 echo "  journalctl -u eth-agent -f"
 echo "  journalctl -u eth-dashboard -f"
+echo "  Dashboard: http://$(hostname -I | awk '{print $1}'):8080"
