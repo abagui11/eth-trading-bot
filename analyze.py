@@ -13,6 +13,7 @@ import anthropic
 
 import config
 from models import Suggestion
+import validate
 from patterns.market_context import MarketContext
 from patterns.order_block import (
     bounds_close,
@@ -331,9 +332,6 @@ def _validate(data: dict, market_context: MarketContext | None = None) -> Sugges
     if not suggestion.take_profits:
         raise ValueError("take_profits required for trade actions")
 
-    if suggestion.risk_reward is not None and suggestion.risk_reward < 1.5:
-        raise ValueError(f"R/R {suggestion.risk_reward} below 1.5 gate")
-
     if suggestion.order_block is None:
         raise ValueError("order_block required for chart markup")
 
@@ -343,6 +341,7 @@ def _validate(data: dict, market_context: MarketContext | None = None) -> Sugges
             raise ValueError(f"order_block missing {key}")
 
     _validate_order_block_entry(suggestion, market_context)
+    validate.validate_trade_risk(suggestion)
 
     return suggestion
 

@@ -48,6 +48,7 @@ def test_validate_trade_requires_structure_and_entry_chart():
     s = _validate(data)
     assert s.structure_chart == "H12"
     assert s.entry_chart == "H1"
+    assert s.risk_reward == pytest.approx(92 / 58, rel=1e-3)
 
 
 def test_validate_trade_defaults_missing_entry_chart_to_h1():

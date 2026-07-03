@@ -113,7 +113,6 @@ def run_cycle() -> tuple[Suggestion, list[str]] | None:
         except Exception:
             logger.exception("Monitor audit failed for cycle %s", cycle_id)
 
-        # TODO: validate.py — Layer 2 risk caps, R/R enforcement, size recompute
         try:
             if broadcast_sent:
                 notify.broadcast(suggestion, output_paths, pnl_footer=pnl_footer)
