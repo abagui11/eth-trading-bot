@@ -77,4 +77,5 @@ def build_performance(spot: float) -> dict[str, Any]:
         "win_rate_pct": win_rate,
         "chart_read": score_stats,
         "recent_trade_scores": trade_scores,
+        "epoch": paper.get_epoch_info(),
     }

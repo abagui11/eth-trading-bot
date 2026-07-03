@@ -20,7 +20,7 @@ class PaperPositionTests(unittest.TestCase):
         self._db_path = Path(self._tmpdir.name) / "test_ledger.db"
         self._config_patch = patch.object(config, "LEDGER_DB", self._db_path)
         self._config_patch.start()
-        self._portfolio_patch = patch.object(config, "PAPER_PORTFOLIO_VALUE", 1000.0)
+        self._portfolio_patch = patch.object(config, "PAPER_PORTFOLIO_VALUE", 5000.0)
         self._portfolio_patch.start()
         self._max_patch = patch.object(bot_config, "MAX_OPEN_TRADES", 4)
         self._max_patch.start()
@@ -306,6 +306,47 @@ class PaperPositionTests(unittest.TestCase):
         cycles = {p["open_cycle_id"] for p in positions}
         self.assertIn("cycle_new", cycles)
         self.assertNotIn("cycle_0", cycles)
+
+    def test_compute_eth_qty_caps_at_max(self) -> None:
+        with patch.object(config, "PAPER_PORTFOLIO_VALUE", 5000.0):
+            qty = paper._compute_eth_qty(1700.0, 1717.0, cash=5000.0)
+        self.assertAlmostEqual(qty, bot_config.MAX_ETH_QTY, places=4)
+
+    def test_compute_eth_qty_raises_to_min_when_affordable(self) -> None:
+        with patch.object(config, "PAPER_PORTFOLIO_VALUE", 5000.0):
+            # Wide stop → small risk-based size; should bump to MIN_ETH_QTY.
+            qty = paper._compute_eth_qty(1700.0, 1200.0, cash=5000.0)
+        self.assertAlmostEqual(qty, bot_config.MIN_ETH_QTY, places=4)
+
+    def test_archive_epoch_and_reset(self) -> None:
+        paper.update(
+            Suggestion(
+                action="deriv_sell",
+                size=0.5,
+                entry=1576.0,
+                stop_loss=1592.0,
+                take_profits=[1545.0],
+                risk_reward=2.0,
+                rationale="pre-archive",
+            ),
+            spot_price=1576.0,
+            cycle_id="pre_archive",
+        )
+        summary = paper.archive_epoch_and_reset(
+            starting_usd=5000.0,
+            epoch_label="test_5k",
+            prior_epoch_label="legacy_test",
+        )
+        self.assertGreater(summary["archived_trade_rows"], 0)
+        state = paper.get_state()
+        self.assertEqual(float(state["starting_usd"]), 5000.0)
+        self.assertEqual(float(state["cash_usd"]), 5000.0)
+        self.assertFalse(paper.is_open())
+        archived = paper.get_archived_closed_trades(limit=5)
+        self.assertEqual(len(archived), 0)  # position still open at archive time
+        epoch = paper.get_epoch_info()
+        self.assertEqual(epoch["epoch_label"], "test_5k")
+        self.assertEqual(epoch["prior_epoch_count"], 1)
 
 
 if __name__ == "__main__":

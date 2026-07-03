@@ -80,8 +80,13 @@
         </div>
       </div>
       <p class="sub" style="margin-top:10px">
-        {{ performance.closed_trade_count }} closed · {{ performance.open_count }} open ·
+        ${{ "%.0f"|format(performance.starting_usd) }} paper book
+        {% if performance.epoch.epoch_label %}({{ performance.epoch.epoch_label }}){% endif %}
+        · {{ performance.closed_trade_count }} closed · {{ performance.open_count }} open ·
         issue rate {{ performance.chart_read.issue_rate_pct }}%
+        {% if performance.epoch.epoch_started_at %}
+        · epoch since {{ performance.epoch.epoch_started_at }}
+        {% endif %}
       </p>
     </section>
 
@@ -129,6 +134,35 @@
           </thead>
           <tbody>
             {% for t in closed_trades %}
+            <tr>
+              <td>${{ "%.0f"|format(t.entry) }} → ${{ "%.0f"|format(t.exit) }}</td>
+              <td class="{{ 'pos-row' if t.realized_pnl_usd >= 0 else 'neg-row' }}">
+                {{ "%+.2f"|format(t.realized_pnl_usd) }}
+              </td>
+              <td>{{ t.open_cycle_id or '—' }}</td>
+            </tr>
+            {% endfor %}
+          </tbody>
+        </table>
+      </div>
+    </section>
+    {% endif %}
+
+    {% if archived_trades %}
+    <section class="card">
+      <h2>Archived paper trades (prior epoch)</h2>
+      <p class="sub">$1k legacy book — preserved for reference; not included in P&amp;L above.</p>
+      <div class="table-scroll">
+        <table>
+          <thead>
+            <tr>
+              <th>Entry → Exit</th>
+              <th>P&amp;L</th>
+              <th>Cycle</th>
+            </tr>
+          </thead>
+          <tbody>
+            {% for t in archived_trades %}
             <tr>
               <td>${{ "%.0f"|format(t.entry) }} → ${{ "%.0f"|format(t.exit) }}</td>
               <td class="{{ 'pos-row' if t.realized_pnl_usd >= 0 else 'neg-row' }}">

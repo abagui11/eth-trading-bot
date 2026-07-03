@@ -12,3 +12,10 @@ BROADCAST_ONLY_TRADES = True
 # Pre-broadcast audit refine loop (propose_trade retries after fact-check failures).
 MAX_REFINE_PASSES = 3
 RUN_LLM_CRITIC_PRE_BROADCAST = True
+
+# Paper position size bounds (ETH) after 1% risk sizing.
+MIN_ETH_QTY = 0.25
+MAX_ETH_QTY = 1.0
+
+# Label for the current paper epoch (shown on dashboard after reset).
+PAPER_EPOCH_LABEL = "5k_usd"

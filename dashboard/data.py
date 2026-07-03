@@ -106,6 +106,10 @@ def get_closed_trades_payload(limit: int = 50) -> list[dict[str, Any]]:
     return paper.get_closed_trades(limit=limit)
 
 
+def get_archived_trades_payload(limit: int = 50) -> list[dict[str, Any]]:
+    return paper.get_archived_closed_trades(limit=limit)
+
+
 def get_performance_payload() -> dict[str, Any]:
     spot = get_live_spot()["spot"]
     return build_performance(spot)

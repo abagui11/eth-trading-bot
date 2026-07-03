@@ -41,6 +41,7 @@ def create_app() -> FastAPI:
                 "positions": data.get_open_positions_payload(),
                 "cycles": data.get_cycles(limit=25),
                 "closed_trades": data.get_closed_trades_payload(limit=15),
+                "archived_trades": data.get_archived_trades_payload(limit=15),
             },
         )
 

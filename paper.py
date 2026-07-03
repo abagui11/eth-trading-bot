@@ -1,4 +1,4 @@
-"""Paper portfolio tracker — $1000 start, 1% risk sizing per Trading Guide."""
+"""Paper portfolio tracker — 1% risk sizing with min/max ETH bounds per Trading Guide."""
 
 from __future__ import annotations
 
@@ -57,6 +57,56 @@ CREATE TABLE IF NOT EXISTS paper_trades (
 );
 """
 
+_TRADES_ARCHIVE_SCHEMA = """
+CREATE TABLE IF NOT EXISTS paper_trades_archive (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    source_id INTEGER,
+    ts TEXT NOT NULL,
+    cycle_id TEXT,
+    event TEXT NOT NULL,
+    side TEXT,
+    eth_qty REAL,
+    price REAL,
+    cash_usd REAL,
+    equity_usd REAL,
+    position_id INTEGER,
+    close_reason TEXT,
+    archived_at TEXT NOT NULL,
+    epoch_label TEXT NOT NULL
+);
+"""
+
+_POSITIONS_ARCHIVE_SCHEMA = """
+CREATE TABLE IF NOT EXISTS paper_positions_archive (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    source_id INTEGER,
+    open_cycle_id TEXT NOT NULL,
+    opened_at TEXT NOT NULL,
+    side TEXT NOT NULL,
+    action TEXT NOT NULL,
+    eth_qty REAL NOT NULL,
+    avg_entry REAL NOT NULL,
+    stop_loss REAL NOT NULL,
+    take_profits TEXT NOT NULL,
+    risk_reward REAL,
+    suggested_size REAL,
+    status TEXT NOT NULL,
+    archived_at TEXT NOT NULL,
+    epoch_label TEXT NOT NULL
+);
+"""
+
+_EPOCHS_SCHEMA = """
+CREATE TABLE IF NOT EXISTS paper_epochs (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    label TEXT NOT NULL,
+    starting_usd REAL NOT NULL,
+    ended_at TEXT NOT NULL,
+    archived_trade_rows INTEGER NOT NULL DEFAULT 0,
+    archived_position_rows INTEGER NOT NULL DEFAULT 0
+);
+"""
+
 # Legacy single-position columns on paper_state (migrated to paper_positions).
 _LEGACY_POSITION_COLUMNS: tuple[tuple[str, str], ...] = (
     ("side", "TEXT"),
@@ -69,6 +119,8 @@ _LEGACY_POSITION_COLUMNS: tuple[tuple[str, str], ...] = (
     ("suggested_size", "REAL"),
     ("opened_at", "TEXT"),
     ("open_cycle_id", "TEXT"),
+    ("epoch_started_at", "TEXT"),
+    ("epoch_label", "TEXT"),
 )
 
 
@@ -91,6 +143,14 @@ def _ensure_trade_columns(conn: sqlite3.Connection) -> None:
         conn.execute("ALTER TABLE paper_trades ADD COLUMN position_id INTEGER")
     if "close_reason" not in cols:
         conn.execute("ALTER TABLE paper_trades ADD COLUMN close_reason TEXT")
+
+
+def _ensure_state_epoch_columns(conn: sqlite3.Connection) -> None:
+    cols = {row[1] for row in conn.execute("PRAGMA table_info(paper_state)").fetchall()}
+    if "epoch_started_at" not in cols:
+        conn.execute("ALTER TABLE paper_state ADD COLUMN epoch_started_at TEXT")
+    if "epoch_label" not in cols:
+        conn.execute("ALTER TABLE paper_state ADD COLUMN epoch_label TEXT")
 
 
 def _migrate_legacy_position(conn: sqlite3.Connection) -> None:
@@ -150,16 +210,28 @@ def init_db() -> None:
         conn.execute(_STATE_SCHEMA)
         conn.execute(_POSITIONS_SCHEMA)
         conn.execute(_TRADES_SCHEMA)
+        conn.execute(_TRADES_ARCHIVE_SCHEMA)
+        conn.execute(_POSITIONS_ARCHIVE_SCHEMA)
+        conn.execute(_EPOCHS_SCHEMA)
         _ensure_legacy_columns(conn)
         _ensure_trade_columns(conn)
+        _ensure_state_epoch_columns(conn)
         row = conn.execute("SELECT id FROM paper_state WHERE id = 1").fetchone()
         if row is None:
+            now = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
             conn.execute(
                 """
-                INSERT INTO paper_state (id, starting_usd, cash_usd)
-                VALUES (1, ?, ?)
+                INSERT INTO paper_state (
+                    id, starting_usd, cash_usd, epoch_started_at, epoch_label
+                )
+                VALUES (1, ?, ?, ?, ?)
                 """,
-                (config.PAPER_PORTFOLIO_VALUE, config.PAPER_PORTFOLIO_VALUE),
+                (
+                    config.PAPER_PORTFOLIO_VALUE,
+                    config.PAPER_PORTFOLIO_VALUE,
+                    now,
+                    bot_config.PAPER_EPOCH_LABEL,
+                ),
             )
         _migrate_legacy_position(conn)
         conn.commit()
@@ -196,6 +268,23 @@ def _position_usd(entry: float, stop_loss: float) -> float:
     if sl_pct <= 0:
         return 0.0
     return risk_usd / sl_pct
+
+
+def _compute_eth_qty(entry: float, stop_loss: float, cash: float) -> float:
+    """1% risk sizing, capped by cash and bot_config MIN/MAX ETH bounds."""
+    if entry <= 0 or cash <= 0:
+        return 0.0
+    notional = min(_position_usd(entry, stop_loss), cash)
+    if notional <= 0:
+        return 0.0
+    eth_qty = notional / entry
+    eth_qty = min(eth_qty, bot_config.MAX_ETH_QTY)
+    if eth_qty < bot_config.MIN_ETH_QTY:
+        min_notional = bot_config.MIN_ETH_QTY * entry
+        if min_notional > cash:
+            return 0.0
+        eth_qty = bot_config.MIN_ETH_QTY
+    return eth_qty
 
 
 def _parse_take_profits(raw: str | list | None) -> list[float]:
@@ -411,17 +500,8 @@ def format_position_detail(spot_price: float | None = None) -> str | None:
     return format_positions_detail(spot_price)
 
 
-def get_closed_trades(limit: int = 10) -> list[dict]:
-    """Pair open/close rows from paper_trades; return most recent closed trades first."""
-    init_db()
-    with _connect() as conn:
-        rows = [
-            dict(row)
-            for row in conn.execute(
-                "SELECT * FROM paper_trades ORDER BY id ASC"
-            ).fetchall()
-        ]
-
+def _pair_closed_trades(rows: list[dict]) -> list[dict]:
+    """Pair open/close ledger rows into closed trade summaries (oldest-first input)."""
     pending_opens: dict[int | None, list[dict]] = {}
     closed: list[dict] = []
 
@@ -470,9 +550,61 @@ def get_closed_trades(limit: int = 10) -> list[dict]:
                 "close_reason": row.get("close_reason"),
                 "realized_pnl_usd": realized_pnl,
                 "realized_pnl_pct": (realized_pnl / notional * 100) if notional else 0.0,
+                "epoch_label": row.get("epoch_label"),
             }
         )
 
+    return closed
+
+
+def get_epoch_info() -> dict:
+    """Current paper epoch metadata for dashboard / status."""
+    init_db()
+    with _connect() as conn:
+        row = conn.execute("SELECT * FROM paper_state WHERE id = 1").fetchone()
+        archive_count = conn.execute(
+            "SELECT COUNT(*) FROM paper_epochs"
+        ).fetchone()[0]
+    state = dict(row) if row else {}
+    return {
+        "starting_usd": float(state.get("starting_usd") or 0),
+        "epoch_started_at": state.get("epoch_started_at"),
+        "epoch_label": state.get("epoch_label") or bot_config.PAPER_EPOCH_LABEL,
+        "prior_epoch_count": int(archive_count),
+    }
+
+
+def get_closed_trades(limit: int = 10) -> list[dict]:
+    """Pair open/close rows from paper_trades; return most recent closed trades first."""
+    init_db()
+    with _connect() as conn:
+        rows = [
+            dict(row)
+            for row in conn.execute(
+                "SELECT * FROM paper_trades ORDER BY id ASC"
+            ).fetchall()
+        ]
+
+    closed = _pair_closed_trades(rows)
+    closed.reverse()
+    return closed[:limit]
+
+
+def get_archived_closed_trades(limit: int = 50) -> list[dict]:
+    """Closed trades from archived epochs (most recent archive epoch first)."""
+    init_db()
+    with _connect() as conn:
+        rows = [
+            dict(row)
+            for row in conn.execute(
+                """
+                SELECT * FROM paper_trades_archive
+                ORDER BY epoch_label DESC, id ASC
+                """
+            ).fetchall()
+        ]
+
+    closed = _pair_closed_trades(rows)
     closed.reverse()
     return closed[:limit]
 
@@ -612,12 +744,11 @@ def _open_position(
 ) -> float:
     entry = float(suggestion.entry)  # type: ignore[arg-type]
     stop = float(suggestion.stop_loss)  # type: ignore[arg-type]
-    notional = _position_usd(entry, stop)
-    notional = min(notional, cash)
-    if notional <= 0:
+    eth_qty = _compute_eth_qty(entry, stop, cash)
+    if eth_qty <= 0:
         return cash
 
-    eth_qty = notional / entry
+    notional = eth_qty * entry
     cash -= notional
     side = "long" if suggestion.action in LONG_ACTIONS else "short"
     opened_at = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
@@ -681,6 +812,127 @@ def update(suggestion: Suggestion, spot_price: float, cycle_id: str | None = Non
     return get_state()
 
 
+def archive_epoch_and_reset(
+    *,
+    starting_usd: float | None = None,
+    epoch_label: str | None = None,
+    prior_epoch_label: str | None = None,
+) -> dict:
+    """Archive current paper trades/positions and start a fresh epoch.
+
+    Returns a summary dict with counts and new starting balance.
+    """
+    init_db()
+    starting = float(
+        starting_usd if starting_usd is not None else config.PAPER_PORTFOLIO_VALUE
+    )
+    new_label = epoch_label or bot_config.PAPER_EPOCH_LABEL
+    archived_at = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+    with _connect() as conn:
+        state = dict(conn.execute("SELECT * FROM paper_state WHERE id = 1").fetchone())
+        old_label = prior_epoch_label or state.get("epoch_label") or "legacy_1k"
+        old_starting = float(state.get("starting_usd") or 0)
+
+        trade_rows = conn.execute("SELECT * FROM paper_trades ORDER BY id ASC").fetchall()
+        position_rows = conn.execute("SELECT * FROM paper_positions ORDER BY id ASC").fetchall()
+
+        for row in trade_rows:
+            data = dict(row)
+            conn.execute(
+                """
+                INSERT INTO paper_trades_archive (
+                    source_id, ts, cycle_id, event, side, eth_qty, price,
+                    cash_usd, equity_usd, position_id, close_reason,
+                    archived_at, epoch_label
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    data["id"],
+                    data["ts"],
+                    data.get("cycle_id"),
+                    data["event"],
+                    data.get("side"),
+                    data.get("eth_qty"),
+                    data.get("price"),
+                    data.get("cash_usd"),
+                    data.get("equity_usd"),
+                    data.get("position_id"),
+                    data.get("close_reason"),
+                    archived_at,
+                    old_label,
+                ),
+            )
+
+        for row in position_rows:
+            data = dict(row)
+            conn.execute(
+                """
+                INSERT INTO paper_positions_archive (
+                    source_id, open_cycle_id, opened_at, side, action, eth_qty,
+                    avg_entry, stop_loss, take_profits, risk_reward, suggested_size,
+                    status, archived_at, epoch_label
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    data["id"],
+                    data["open_cycle_id"],
+                    data["opened_at"],
+                    data["side"],
+                    data["action"],
+                    data["eth_qty"],
+                    data["avg_entry"],
+                    data["stop_loss"],
+                    data["take_profits"],
+                    data.get("risk_reward"),
+                    data.get("suggested_size"),
+                    data["status"],
+                    archived_at,
+                    old_label,
+                ),
+            )
+
+        if trade_rows or position_rows:
+            conn.execute(
+                """
+                INSERT INTO paper_epochs (
+                    label, starting_usd, ended_at,
+                    archived_trade_rows, archived_position_rows
+                ) VALUES (?, ?, ?, ?, ?)
+                """,
+                (
+                    old_label,
+                    old_starting,
+                    archived_at,
+                    len(trade_rows),
+                    len(position_rows),
+                ),
+            )
+
+        conn.execute("DELETE FROM paper_trades")
+        conn.execute("DELETE FROM paper_positions")
+        conn.execute(
+            """
+            UPDATE paper_state
+            SET starting_usd = ?, cash_usd = ?, last_cycle_id = NULL, last_spot = NULL,
+                epoch_started_at = ?, epoch_label = ?
+            WHERE id = 1
+            """,
+            (starting, starting, archived_at, new_label),
+        )
+        conn.commit()
+
+    return {
+        "archived_at": archived_at,
+        "prior_epoch_label": old_label,
+        "prior_starting_usd": old_starting,
+        "archived_trade_rows": len(trade_rows),
+        "archived_position_rows": len(position_rows),
+        "new_epoch_label": new_label,
+        "new_starting_usd": starting,
+    }
+
+
 class OpenPositionConflictError(ValueError):
     """Raised when restore_open_position would overwrite an existing open position."""
 
@@ -718,6 +970,7 @@ def restore_open_position(
         state = dict(conn.execute("SELECT * FROM paper_state WHERE id = 1").fetchone())
         cash = float(state["cash_usd"])
         side = "long" if action in LONG_ACTIONS else "short"
+        eth_qty = max(bot_config.MIN_ETH_QTY, min(bot_config.MAX_ETH_QTY, eth_qty))
         notional = eth_qty * entry
 
         if force and positions:

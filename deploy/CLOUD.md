@@ -68,8 +68,8 @@ ANTHROPIC_MODEL=claude-sonnet-4-6
 TELEGRAM_BOT_TOKEN=...
 ALLOWED_TELEGRAM_IDS=YOUR_TELEGRAM_ID
 MARKET_DATA_API=https://api.coinbase.com/api/v3/brokerage/market
-PORTFOLIO_VALUE=1000
-PAPER_PORTFOLIO_VALUE=1000
+PORTFOLIO_VALUE=5000
+PAPER_PORTFOLIO_VALUE=5000
 ```
 
 **Important:** Leave `TELEGRAM_CHAT_ID` **empty** unless it is a *different* chat from your user ID (avoids duplicate hourly messages).
@@ -173,7 +173,34 @@ On the server:
 sudo bash /opt/eth-trading-agent/deploy/update.sh
 ```
 
-(Pulls latest git, reinstalls deps, restarts `eth-agent`.)
+(Pulls latest git, reinstalls deps, restarts `eth-agent` and `eth-dashboard`.)
+
+### One-time: reset paper book to $5k epoch (Jul 2026)
+
+After pulling code that bumps `PORTFOLIO_VALUE` / `PAPER_PORTFOLIO_VALUE` to **5000**, update `.env` on the server, then archive the old $1k paper trades and start fresh:
+
+```bash
+sudo nano /opt/eth-trading-agent/.env
+# Set:
+#   PORTFOLIO_VALUE=5000
+#   PAPER_PORTFOLIO_VALUE=5000
+
+sudo -u ethagent /opt/eth-trading-agent/.venv/bin/python \
+  /opt/eth-trading-agent/deploy/reset_paper_epoch.py --yes
+
+sudo systemctl restart eth-agent eth-dashboard
+```
+
+This moves all `paper_trades` / `paper_positions` into archive tables (label `legacy_1k`), resets cash to $5,000, and applies **0.25–1.0 ETH** size bounds on new trades. The dashboard shows archived trades in a separate section.
+
+Dry-run first (no writes):
+
+```bash
+sudo -u ethagent /opt/eth-trading-agent/.venv/bin/python \
+  /opt/eth-trading-agent/deploy/reset_paper_epoch.py --dry-run
+```
+
+**Back up first:** `cp /opt/eth-trading-agent/ledger.db ~/ledger-backup-$(date +%Y%m%d).db`
 
 ### View logs
 
