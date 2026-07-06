@@ -207,6 +207,9 @@ def detect_htf_zones(
     seen: set[str] = set()
     unique: list[HTFZone] = []
     for block in all_blocks:
+        # Once promoted, the breaker replaces the OB — do not export both.
+        if block.zone_type == "order_block" and block.promoted_to_breaker:
+            continue
         key = f"{block.zone_type}:{block.direction}:{block.low}:{block.high}:{block.start_ts}"
         if key in seen:
             continue

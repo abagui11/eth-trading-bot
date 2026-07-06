@@ -53,7 +53,7 @@ This is a high level framework for trading and can be used to trade on any timef
    1. Trade matches LTF and HTF structure
    2. Trade is within a OB, Breaker, or FVG
       1. Bonus if shortly after a SFP
-   3. R/R is above 1.5
+   3. R/R is at least 1.0
 
 **Risk Management:**
 
@@ -121,7 +121,7 @@ When the H1 chart shows structure similar to this reference screenshot, the agen
 1. **Identify the 24h range** (example: 58.5–60.4 in the reference). State that the range exists in `rationale`, and flag again if price breaks above or below the range.
 2. **Identify ranging conditions** when price oscillates inside the 24h range without a clean trend.
 3. **Identify the potential order block** — use **H12 OB/BRKR boxes** on the marked charts when present; they are detected programmatically from H12 structure and cited for **HTF bias only**. For **entries**, use **H1 OBs** from programmatic context (`Detected H1 order blocks`) or infer on H1 using the same displacement rules.
-4. **Alert a potential short inside the H1 OB fib zone** when HTF/LTF structure aligns (e.g., bearish H1 OB retest in the 0.618–0.786 zone with R/R ≥ 1.5). Being inside an H12 OB alone is not sufficient for entry.
+4. **Alert a potential short inside the H1 OB fib zone** when HTF/LTF structure aligns (e.g., bearish H1 OB retest in the 0.618–0.786 zone with R/R ≥ 1.0). Being inside an H12 OB alone is not sufficient for entry.
 
 **Deviations / Adjustments:**
 

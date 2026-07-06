@@ -71,5 +71,22 @@ def test_breaker_after_opposite_msb():
     assert any(z.zone_type == "breaker" and z.direction == "bullish" for z in zones)
 
 
+def test_promoted_ob_excluded_when_breaker_exists():
+    """Mitigated OB that became a breaker must not appear alongside it."""
+    zones = detect_htf_zones(_breaker_series(), lookback=35)
+    breakers = [z for z in zones if z.zone_type == "breaker" and z.direction == "bullish"]
+    assert breakers
+    for breaker in breakers:
+        superseded = [
+            z
+            for z in zones
+            if z.zone_type == "order_block"
+            and z.start_ts == breaker.start_ts
+            and z.low == breaker.low
+            and z.high == breaker.high
+        ]
+        assert superseded == []
+
+
 def test_empty_bars_returns_empty():
     assert detect_htf_zones([]) == []

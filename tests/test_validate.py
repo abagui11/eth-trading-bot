@@ -32,6 +32,26 @@ class ValidateTradeRiskTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "stop distance"):
             validate.validate_trade_risk(s, portfolio_value=1000.0)
 
+    def test_accepts_one_to_one_risk_reward(self) -> None:
+        s = self._short(
+            entry=1600.0,
+            stop_loss=1616.0,
+            take_profits=[1584.0],
+            risk_reward=2.0,
+        )
+        validate.validate_trade_risk(s, portfolio_value=1000.0)
+        self.assertAlmostEqual(s.risk_reward, 1.0, places=3)
+
+    def test_rejects_below_one_to_one_risk_reward(self) -> None:
+        s = self._short(
+            entry=1600.0,
+            stop_loss=1616.0,
+            take_profits=[1585.0],
+            risk_reward=2.0,
+        )
+        with self.assertRaisesRegex(ValueError, "recomputed R/R"):
+            validate.validate_trade_risk(s, portfolio_value=1000.0)
+
     def test_rejects_inflated_llm_risk_reward(self) -> None:
         s = self._short(
             entry=1576.0,

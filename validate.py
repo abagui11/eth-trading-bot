@@ -11,7 +11,7 @@ TRADE_ACTIONS = LONG_ACTIONS | SHORT_ACTIONS
 
 # Trading Guide: SL placed ~0.25% from HTF swing (blocks $1 micro-stops on ~$1600 ETH).
 MIN_STOP_DISTANCE_PCT = 0.0025
-MIN_RISK_REWARD = 1.5
+MIN_RISK_REWARD = 1.0
 TARGET_RISK_PCT = 0.01
 # Reject when unleveraged paper cash cannot fund enough size to risk this fraction of target.
 MIN_ACHIEVABLE_RISK_FRACTION = 0.80
