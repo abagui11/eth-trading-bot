@@ -48,8 +48,11 @@ def build_caption(suggestion: Suggestion) -> str:
 
     tps = ", ".join(f"{tp:,.2f}" for tp in suggestion.take_profits[:3]) or "n/a"
     rr = f"{suggestion.risk_reward:.2f}" if suggestion.risk_reward is not None else "n/a"
+    prefix = ""
+    if suggestion.rationale.strip().startswith("[Watchdog"):
+        prefix = "WATCHDOG — "
     return (
-        f"{suggestion.action.upper()}\n"
+        f"{prefix}{suggestion.action.upper()}\n"
         f"Entry: {suggestion.entry:,.2f}\n"
         f"SL: {suggestion.stop_loss:,.2f}\n"
         f"TP: {tps}\n"

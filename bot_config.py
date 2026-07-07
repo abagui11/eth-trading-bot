@@ -20,7 +20,7 @@ MAX_ETH_QTY = 1.0
 # Label for the current paper epoch (shown on dashboard after reset).
 PAPER_EPOCH_LABEL = "5k_usd"
 
-# Sub-hourly programmatic entry scanner (no charts / no LLM).
+# Sub-hourly programmatic entry scanner (charts + no LLM).
 WATCHDOG_ENABLED = True
 WATCHDOG_INTERVAL_SEC = 180  # 3 minutes (valid range: 60–300)
 WATCHDOG_COOLDOWN_SEC = 6 * 3600  # suppress repeat trigger on same H1 OB

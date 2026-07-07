@@ -15,6 +15,7 @@ from patterns.order_block import OrderBlock, fib_zone_bounds
 from patterns.zone_resolver import ZoneSnapshot
 from watchdog import (
     WatchdogTrigger,
+    _build_rationale,
     _is_on_cooldown,
     _record_fire,
     build_suggestion,
@@ -151,6 +152,25 @@ class WatchdogTriggerTests(unittest.TestCase):
         self.assertEqual(suggestion.action, "spot_buy")
         self.assertIsNotNone(suggestion.risk_reward)
         self.assertGreaterEqual(suggestion.risk_reward or 0, 1.0)
+        self.assertIn("[Watchdog — h1_ob_fib_long]", suggestion.rationale)
+        self.assertIn("H12 bullish zone", suggestion.rationale)
+        self.assertIn("H1 OB coincides with H12 OB", suggestion.rationale)
+
+    def test_build_rationale_includes_signals_block(self) -> None:
+        spot = 2408.0
+        ctx = _bullish_ctx(spot)
+        ctx.alerts.append("Price in bullish H1 OB fib zone")
+        trigger = WatchdogTrigger(
+            name="h1_ob_fib_long",
+            direction="bullish",
+            ob=_bullish_ob(),
+            reason="Aligned long setup",
+            priority=70,
+        )
+        rationale = _build_rationale(trigger, ctx, _bullish_ob(), spot)
+        self.assertIn("Signals:", rationale)
+        self.assertIn("HTF context:", rationale)
+        self.assertIn("Aligned long setup", rationale)
 
     def test_htf_conflict_blocks_long(self) -> None:
         spot = 2408.0
@@ -187,6 +207,21 @@ class WatchdogCooldownTests(unittest.TestCase):
 
 
 class WatchdogNotifyTests(unittest.TestCase):
+    def test_watchdog_caption_prefix(self) -> None:
+        from notify import build_caption
+
+        suggestion = Suggestion(
+            action="spot_buy",
+            size=0.5,
+            entry=2400.0,
+            stop_loss=2350.0,
+            take_profits=[2500.0],
+            risk_reward=2.0,
+            rationale="[Watchdog — h1_ob_fib_long]\n\nSetup.",
+        )
+        caption = build_caption(suggestion)
+        self.assertTrue(caption.startswith("WATCHDOG — SPOT_BUY"))
+
     def test_send_suggestion_handles_empty_paths(self) -> None:
         import asyncio
         from unittest.mock import AsyncMock, MagicMock

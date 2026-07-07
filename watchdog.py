@@ -1,8 +1,8 @@
-"""Sub-hourly programmatic entry scanner — no charts or LLM.
+"""Sub-hourly programmatic entry scanner.
 
 Runs between hourly vision cycles. When deterministic triggers fire (H1 OB fib,
-bearish retest rejection, H1 SFP on close), builds and validates a trade, then
-records it in the ledger / paper book.
+bearish retest rejection, H1 SFP on close), builds and validates a trade,
+renders structure/entry charts, then records and broadcasts.
 """
 
 from __future__ import annotations
@@ -14,18 +14,24 @@ from typing import Literal
 
 import analyze
 import bot_config
+import charts
 import config
+import critic
 import ledger
 import notify
 import paper
 import research
 import validate
 from models import Suggestion
+from patterns.htf_structure import HTFZone, detect_htf_zones
+from patterns.key_levels import compute_key_levels
 from patterns.market_context import MarketContext, build_market_context
 from patterns.order_block import (
     OrderBlock,
     fib_level,
+    fib_zone_bounds,
     price_in_ob,
+    zones_overlap,
 )
 from patterns.signal_state import get_state, set_state
 from patterns.swing import Pivot, find_pivots
@@ -310,6 +316,98 @@ def _order_block_dict(ob: OrderBlock) -> dict:
     }
 
 
+def _h1_ob_overlaps_h12(ob: OrderBlock, htf_zones: list[HTFZone]) -> HTFZone | None:
+    for zone in htf_zones:
+        if zone.mitigated or zone.zone_type != "order_block":
+            continue
+        if zone.direction != ob.direction:
+            continue
+        if zones_overlap(ob.low, ob.high, zone.low, zone.high):
+            return zone
+    return None
+
+
+def _htf_context_lines(ctx: MarketContext, ob: OrderBlock) -> list[str]:
+    lines: list[str] = []
+    snap = ctx.zone_snapshot
+    if snap and snap.primary_bullish:
+        z = snap.primary_bullish
+        lines.append(f"H12 bullish zone: {z.low:,.2f}-{z.high:,.2f}")
+    if snap and snap.primary_bearish:
+        z = snap.primary_bearish
+        lines.append(f"H12 bearish zone: {z.low:,.2f}-{z.high:,.2f}")
+    overlap = _h1_ob_overlaps_h12(ob, ctx.htf_zones)
+    if overlap is not None:
+        lines.append(
+            f"H1 OB coincides with H12 OB {overlap.low:,.2f}-{overlap.high:,.2f}"
+        )
+    if ctx.range_24h:
+        lines.append(
+            f"24h range: {ctx.range_24h.low:,.2f}-{ctx.range_24h.high:,.2f} "
+            f"(width {ctx.range_24h.width_pct:.1f}%)"
+        )
+    if ctx.setup_state and ctx.setup_state.phase != "idle":
+        phase = ctx.setup_state.phase
+        lines.append(f"Setup phase: {phase}")
+    if ctx.key_levels_near:
+        nearest = ", ".join(f"{lv.label} @ {lv.price:,.2f}" for lv in ctx.key_levels_near[:3])
+        lines.append(f"Nearest key levels: {nearest}")
+    return lines
+
+
+def _build_rationale(
+    trigger: WatchdogTrigger,
+    ctx: MarketContext,
+    ob: OrderBlock,
+    entry: float,
+) -> str:
+    z_low, z_high = fib_zone_bounds(ob.direction, ob.low, ob.high)
+    htf_lines = _htf_context_lines(ctx, ob)
+    body_parts = [
+        f"[Watchdog — {trigger.name}]",
+        "",
+        f"{trigger.reason}.",
+        "",
+        (
+            f"Entry {entry:,.2f} inside H1 OB fib zone ({z_low:,.2f}-{z_high:,.2f}); "
+            f"block bounds {ob.low:,.2f}-{ob.high:,.2f}."
+        ),
+    ]
+    if htf_lines:
+        body_parts.append("")
+        body_parts.append("HTF context:")
+        body_parts.extend(f"• {line}" for line in htf_lines)
+    body_parts.extend(
+        [
+            "",
+            "Programmatic intrabar scan — structure overlays on attached charts; "
+            "no LLM chart review this cycle.",
+        ]
+    )
+    body = "\n".join(body_parts)
+    signals = critic.build_signals_block(ctx.alerts)
+    return critic.compose_rationale(body, signals)
+
+
+def _render_output_charts(
+    suggestion: Suggestion,
+    data: dict[str, list[dict]],
+    ctx: MarketContext,
+    cycle_id: str,
+    daily_bars: list[dict],
+) -> list[str]:
+    key_levels = compute_key_levels(daily_bars)
+    htf_zones = detect_htf_zones(data["H12"])
+    return charts.build_output_charts(
+        suggestion,
+        data,
+        key_levels,
+        htf_zones,
+        cycle_id,
+        market_context=ctx,
+    )
+
+
 def build_suggestion(
     trigger: WatchdogTrigger,
     ctx: MarketContext,
@@ -331,12 +429,7 @@ def build_suggestion(
     action = "spot_buy" if trigger.direction == "bullish" else "spot_sell"
     size = _suggested_size_eth(entry, stop_loss)
 
-    rationale = (
-        f"[Watchdog — {trigger.name}]\n\n"
-        f"{trigger.reason}.\n\n"
-        f"Entry at live spot {entry:,.2f} inside H1 OB {ob.low:,.2f}-{ob.high:,.2f}. "
-        f"HTF bias from H12 structure; programmatic scan (no chart review this cycle)."
-    )
+    rationale = _build_rationale(trigger, ctx, ob, entry)
 
     payload = {
         "action": action,
@@ -375,7 +468,7 @@ def _record_fire(trigger_key: str, cycle_id: str) -> None:
     )
 
 
-def _prepare_context() -> tuple[MarketContext, dict[str, list[dict]], float]:
+def _prepare_context() -> tuple[MarketContext, dict[str, list[dict]], float, list[dict]]:
     data = research.get_all_timeframes()
     live_spot = research.get_live_spot_price()
     h1_live = research.apply_live_spot_to_h1(data["H1"], live_spot)
@@ -388,7 +481,7 @@ def _prepare_context() -> tuple[MarketContext, dict[str, list[dict]], float]:
         spot_override=live_spot,
     )
     data["H1"] = h1_live
-    return ctx, data, live_spot
+    return ctx, data, live_spot, daily_bars
 
 
 def run_watchdog() -> Suggestion | None:
@@ -397,7 +490,7 @@ def run_watchdog() -> Suggestion | None:
         return None
 
     try:
-        ctx, data, live_spot = _prepare_context()
+        ctx, data, live_spot, daily_bars = _prepare_context()
     except Exception:
         logger.exception("Watchdog failed to load market data")
         return None
@@ -425,18 +518,31 @@ def run_watchdog() -> Suggestion | None:
 
         cycle_id = _cycle_id()
         setup_tags = ",".join(ctx.setup_tags) if ctx.setup_tags else None
+
+        output_paths: list[str] = []
+        try:
+            output_paths = _render_output_charts(
+                suggestion, data, ctx, cycle_id, daily_bars
+            )
+        except Exception:
+            logger.exception("Watchdog chart render failed for %s", cycle_id)
+
+        chart_for_ledger = ",".join(output_paths) if output_paths else "watchdog"
         ledger.append(
             suggestion,
             cycle_id,
             live_spot,
-            chart_path="watchdog",
+            chart_path=chart_for_ledger,
             setup_tags=setup_tags,
         )
         paper.update(suggestion, live_spot, cycle_id=cycle_id)
         pnl_footer = paper.format_pnl_footer(live_spot)
 
         try:
-            notify.broadcast_text(suggestion, pnl_footer=pnl_footer)
+            if output_paths:
+                notify.broadcast(suggestion, output_paths, pnl_footer=pnl_footer)
+            else:
+                notify.broadcast_text(suggestion, pnl_footer=pnl_footer)
         except Exception:
             logger.exception("Watchdog broadcast failed for %s", cycle_id)
 
@@ -447,11 +553,12 @@ def run_watchdog() -> Suggestion | None:
 
         _record_fire(key, cycle_id)
         logger.info(
-            "Watchdog trade fired: cycle=%s trigger=%s action=%s entry=%s",
+            "Watchdog trade fired: cycle=%s trigger=%s action=%s entry=%s charts=%s",
             cycle_id,
             trigger.name,
             suggestion.action,
             suggestion.entry,
+            output_paths or "none",
         )
         return suggestion
 
