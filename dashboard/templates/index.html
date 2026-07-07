@@ -46,6 +46,62 @@
       {% endif %}
     </section>
 
+    <section class="card" id="macro-card">
+      <h2>Macro news monitor</h2>
+      {% if macro.enabled %}
+      <p class="sub" id="macro-posture">
+        Posture:
+        <strong>{{ macro.posture.eth_bias }}</strong>
+        · max severity {{ macro.posture.max_severity }}
+        {% if macro.posture.gate_long %} · <span class="macro-gate">gate longs</span>{% endif %}
+        {% if macro.posture.gate_short %} · <span class="macro-gate">gate shorts</span>{% endif %}
+      </p>
+      <p class="sub" style="margin-bottom:10px">
+        Sources: {{ macro.monitored_sources | join(', ') }}
+      </p>
+      {% if macro.active %}
+      <p class="sub" style="margin-bottom:6px">Active (injected into agent)</p>
+      <ul class="macro-list" id="macro-active">
+        {% for item in macro.active %}
+        <li class="macro-item macro-active-item">
+          <span class="badge badge-macro-sev-{{ item.severity }}">SEV {{ item.severity }}</span>
+          <span class="badge badge-none">{{ item.eth_bias or 'neutral' }}</span>
+          {% if item.url %}
+          <a href="{{ item.url }}" target="_blank" rel="noopener">{{ item.title }}</a>
+          {% else %}
+          {{ item.title }}
+          {% endif %}
+          {% if item.eth_impact_summary %}
+          <p class="macro-impact">{{ item.eth_impact_summary }}</p>
+          {% endif %}
+        </li>
+        {% endfor %}
+      </ul>
+      {% else %}
+      <p class="sub" id="macro-active-empty">No active macro events (severity ≥ 3).</p>
+      {% endif %}
+      {% if macro.recent %}
+      <p class="sub" style="margin:12px 0 6px">Recent ingested</p>
+      <ul class="macro-list" id="macro-recent">
+        {% for item in macro.recent[:15] %}
+        <li class="macro-item {% if item.status == 'ignored' %}macro-ignored{% endif %}">
+          <span class="badge badge-none">kw {{ item.keyword_score }}</span>
+          {% if item.severity %}<span class="badge badge-macro-sev-{{ item.severity }}">SEV {{ item.severity }}</span>{% endif %}
+          <span class="macro-status">{{ item.status }}</span>
+          {% if item.url %}
+          <a href="{{ item.url }}" target="_blank" rel="noopener">{{ item.title }}</a>
+          {% else %}
+          {{ item.title }}
+          {% endif %}
+        </li>
+        {% endfor %}
+      </ul>
+      {% endif %}
+      {% else %}
+      <p class="sub">Macro context disabled.</p>
+      {% endif %}
+    </section>
+
     {% if status.h12_chart_url %}
     <section class="card">
       <h2>H12 structure (marked)</h2>
@@ -213,15 +269,26 @@
   <script>
     async function refresh() {
       try {
-        const [spotRes, statusRes] = await Promise.all([
+        const [spotRes, statusRes, macroRes] = await Promise.all([
           fetch('/api/spot'),
           fetch('/api/status'),
+          fetch('/api/macro'),
         ]);
         const spot = await spotRes.json();
         const status = await statusRes.json();
+        const macro = await macroRes.json();
         document.getElementById('spot').textContent =
           '$' + spot.spot.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 });
         document.getElementById('headline').textContent = status.headline;
+        const postureEl = document.getElementById('macro-posture');
+        if (postureEl && macro.posture) {
+          let gates = '';
+          if (macro.posture.gate_long) gates += ' · gate longs';
+          if (macro.posture.gate_short) gates += ' · gate shorts';
+          postureEl.innerHTML =
+            'Posture: <strong>' + macro.posture.eth_bias + '</strong>' +
+            ' · max severity ' + macro.posture.max_severity + gates;
+        }
       } catch (e) { /* offline */ }
     }
     setInterval(refresh, 60000);

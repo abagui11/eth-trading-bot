@@ -23,6 +23,7 @@ import paper
 import research
 import validate
 from models import Suggestion
+from macro.context import active_posture
 from patterns.htf_structure import HTFZone, detect_htf_zones
 from patterns.key_levels import compute_key_levels
 from patterns.market_context import MarketContext, build_market_context
@@ -491,7 +492,28 @@ def run_watchdog() -> Suggestion | None:
         logger.debug("Watchdog scan: no triggers (spot=%.2f)", live_spot)
         return None
 
+    posture = active_posture()
+
     for trigger in triggers:
+        if posture.get("gate_long") and trigger.direction == "bullish":
+            logger.info(
+                "Watchdog: macro gate blocked long trigger %s (bias=%s sev=%s)",
+                trigger.name,
+                posture.get("eth_bias"),
+                posture.get("max_severity"),
+            )
+            ctx.setup_tags.append("macro_gate_long")
+            continue
+        if posture.get("gate_short") and trigger.direction == "bearish":
+            logger.info(
+                "Watchdog: macro gate blocked short trigger %s (bias=%s sev=%s)",
+                trigger.name,
+                posture.get("eth_bias"),
+                posture.get("max_severity"),
+            )
+            ctx.setup_tags.append("macro_gate_short")
+            continue
+
         key = _trigger_key(trigger)
         if _is_on_cooldown(key):
             logger.info("Watchdog: cooldown active for %s", key)

@@ -24,3 +24,12 @@ PAPER_EPOCH_LABEL = "5k_usd"
 WATCHDOG_ENABLED = True
 WATCHDOG_INTERVAL_SEC = 180  # 3 minutes (valid range: 60–300)
 WATCHDOG_COOLDOWN_SEC = 6 * 3600  # suppress repeat trigger on same H1 OB
+
+# Macro headline context (RSS + webhook advisory layer).
+MACRO_CONTEXT_ENABLED = True
+MACRO_POLL_INTERVAL_SEC = 300  # 5 minutes
+MACRO_MIN_SEVERITY_INJECT = 3
+MACRO_PULSE_MIN_SEVERITY = 4
+MACRO_WATCHDOG_GATE_MIN_SEVERITY = 4
+MACRO_DEFAULT_TTL_HOURS = 24
+MACRO_LLM_PROMOTE_THRESHOLD = 40  # keyword_score 0-100 before Haiku classify

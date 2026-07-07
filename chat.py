@@ -126,6 +126,16 @@ def _build_context(spot: float, user_message: str) -> tuple[str, str | None, dic
         parts.append(ctx.summary_text)
         snapshot_charts = snapshot_row.get("marked_chart_paths") or {}
 
+    try:
+        from macro.context import build_macro_block
+
+        macro_block = build_macro_block()
+        if macro_block:
+            parts.append("")
+            parts.append(macro_block)
+    except Exception:
+        pass
+
     position_detail = paper.format_positions_detail(spot)
     chart_path: str | None = None
     open_positions = paper.get_open_positions(spot)

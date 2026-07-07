@@ -177,6 +177,42 @@ footer {
 
 a { color: var(--accent); }
 
+.macro-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+}
+
+.macro-item {
+  padding: 8px 0;
+  border-bottom: 1px solid var(--border);
+  font-size: 0.875rem;
+}
+
+.macro-item:last-child { border-bottom: none; }
+
+.macro-ignored { opacity: 0.65; }
+
+.macro-impact {
+  margin: 4px 0 0;
+  color: var(--muted);
+  font-size: 0.8rem;
+}
+
+.macro-status {
+  font-size: 0.7rem;
+  color: var(--muted);
+  margin-right: 4px;
+}
+
+.macro-gate { color: var(--warn); font-weight: 600; }
+
+.badge-macro-sev-5 { background: rgba(248, 81, 73, 0.25); color: var(--bad); }
+.badge-macro-sev-4 { background: rgba(210, 153, 34, 0.25); color: var(--warn); }
+.badge-macro-sev-3 { background: rgba(88, 166, 255, 0.2); color: var(--accent); }
+.badge-macro-sev-2 { background: rgba(139, 148, 158, 0.2); color: var(--muted); }
+.badge-macro-sev-1 { background: rgba(139, 148, 158, 0.15); color: var(--muted); }
+
 @media (min-width: 600px) {
   .metrics { grid-template-columns: repeat(4, 1fr); }
   h1 { font-size: 1.5rem; }

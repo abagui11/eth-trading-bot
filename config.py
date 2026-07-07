@@ -76,3 +76,17 @@ CHARTS_DIR: Path = ROOT_DIR / "charts"
 LEDGER_DB: Path = ROOT_DIR / "ledger.db"
 OHLC_DB: Path = ROOT_DIR / "ohlc.db"
 TRADING_GUIDE_DIR: Path = ROOT_DIR / "Trading Guide"
+
+_DEFAULT_MACRO_FEEDS = ",".join(
+    [
+        "https://search.cnbc.com/rs/search/combinedcms/view.xml?partnerId=wrss01&id=100003114",
+        "https://www.coindesk.com/arc/outboundfeeds/rss/",
+    ]
+)
+_macro_feeds_raw = os.getenv("MACRO_FEED_URLS", _DEFAULT_MACRO_FEEDS)
+MACRO_FEED_URLS: list[str] = [u.strip() for u in _macro_feeds_raw.split(",") if u.strip()]
+
+_macro_extra_raw = os.getenv("MACRO_KEYWORD_EXTRA", "")
+MACRO_KEYWORD_EXTRA: list[str] = [k.strip().lower() for k in _macro_extra_raw.split(",") if k.strip()]
+
+MACRO_WEBHOOK_SECRET: str | None = _optional("MACRO_WEBHOOK_SECRET")

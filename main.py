@@ -10,6 +10,7 @@ from bot import build_application
 from agent import run_cycle
 from watchdog import run_watchdog
 import bot_config
+from macro.ingest import poll_feeds
 
 logger = logging.getLogger(__name__)
 
@@ -26,6 +27,17 @@ async def watchdog_job(context) -> None:
         await loop.run_in_executor(None, run_watchdog)
     except Exception:
         logger.exception("Watchdog job failed")
+
+
+async def macro_feed_job(context) -> None:
+    """Poll RSS feeds for macro headlines."""
+    if not bot_config.MACRO_CONTEXT_ENABLED:
+        return
+    loop = asyncio.get_running_loop()
+    try:
+        await loop.run_in_executor(None, poll_feeds)
+    except Exception:
+        logger.exception("Macro feed job failed")
 
 
 async def hourly_job(context) -> None:
@@ -71,6 +83,16 @@ def main() -> None:
             name="watchdog_scan",
         )
         logger.info("Watchdog enabled — scanning every %ss", interval)
+
+    if bot_config.MACRO_CONTEXT_ENABLED:
+        macro_interval = max(60, bot_config.MACRO_POLL_INTERVAL_SEC)
+        app.job_queue.run_repeating(
+            macro_feed_job,
+            interval=macro_interval,
+            first=60,
+            name="macro_feed_poll",
+        )
+        logger.info("Macro feed poll enabled — every %ss", macro_interval)
 
     logger.info(
         "Starting ETH trading agent (polling + hourly cycle every %ss, first in %ss)",

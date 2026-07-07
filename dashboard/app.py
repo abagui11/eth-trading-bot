@@ -4,18 +4,32 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from fastapi import FastAPI, HTTPException, Request
+from fastapi import FastAPI, HTTPException, Request, Header
 from fastapi.responses import FileResponse, HTMLResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
+from pydantic import BaseModel, Field
 
 import audit
+import config
 import ledger
 import paper
 from dashboard import data
 from dashboard.charts import h12_marked_path, resolve_chart_path
+from macro import store as macro_store
+from macro.context import macro_payload_for_dashboard
+from macro.ingest import ingest_headline
 
 _PKG_DIR = Path(__file__).resolve().parent
+
+
+class MacroIngestBody(BaseModel):
+    title: str = Field(min_length=1)
+    url: str | None = None
+    summary: str | None = None
+    source: str | None = None
+    published_at: str | None = None
+    force_classify: bool = False
 
 
 def create_app() -> FastAPI:
@@ -24,6 +38,7 @@ def create_app() -> FastAPI:
     ledger.init_db()
     paper.init_db()
     audit.init_db()
+    macro_store.init_db()
 
     templates = Jinja2Templates(directory=str(_PKG_DIR / "templates"))
     static_dir = _PKG_DIR / "static"
@@ -42,6 +57,7 @@ def create_app() -> FastAPI:
                 "cycles": data.get_cycles(limit=25),
                 "closed_trades": data.get_closed_trades_payload(limit=15),
                 "archived_trades": data.get_archived_trades_payload(limit=15),
+                "macro": data.get_macro_payload(),
             },
         )
 
@@ -75,6 +91,34 @@ def create_app() -> FastAPI:
     @app.get("/api/performance")
     async def api_performance() -> dict:
         return data.get_performance_payload()
+
+    @app.get("/api/macro")
+    async def api_macro() -> dict:
+        return data.get_macro_payload()
+
+    @app.post("/api/macro/ingest")
+    async def api_macro_ingest(
+        body: MacroIngestBody,
+        authorization: str | None = Header(default=None),
+    ) -> dict:
+        secret = config.MACRO_WEBHOOK_SECRET
+        if not secret:
+            raise HTTPException(status_code=503, detail="MACRO_WEBHOOK_SECRET not configured")
+        expected = f"Bearer {secret}"
+        if authorization != expected:
+            raise HTTPException(status_code=401, detail="Unauthorized")
+
+        event = ingest_headline(
+            title=body.title,
+            url=body.url,
+            summary=body.summary,
+            source=body.source or "webhook",
+            published_at=body.published_at,
+            force_classify=body.force_classify,
+        )
+        if event is None:
+            return {"ok": True, "duplicate": True, "event": None}
+        return {"ok": True, "duplicate": False, "event": event}
 
     @app.get("/api/chart/latest")
     async def api_chart_latest() -> FileResponse:

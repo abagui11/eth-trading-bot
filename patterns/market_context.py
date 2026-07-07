@@ -21,6 +21,17 @@ from patterns.sfp import SFPEvent, detect_sfps
 from patterns.signal_state import get_state, set_state
 from patterns.zone_resolver import ZoneSnapshot, format_zone, resolve_zones
 
+try:
+    import paper
+except ImportError:  # pragma: no cover
+    paper = None  # type: ignore[assignment]
+
+try:
+    from macro.context import append_macro_to_lines
+except ImportError:  # pragma: no cover
+    def append_macro_to_lines(lines: list[str]) -> None:  # type: ignore[misc]
+        return
+
 RANGE_STATE_KEY = "range_24h_announced"
 SFP_MAX_AGE_HOURS = 18
 H1_SFP_MAX_BARS = 18
@@ -449,6 +460,18 @@ def build_market_context(
         lines.append("Nearest key levels to spot:")
         for lv in key_levels_near:
             lines.append(f"  - {lv.label} @ {lv.price:,.2f}")
+
+    if paper is not None:
+        try:
+            position_detail = paper.format_positions_detail(spot)
+            if position_detail:
+                lines.append("")
+                lines.append("=== Open paper positions ===")
+                lines.append(position_detail)
+        except Exception:
+            pass
+
+    append_macro_to_lines(lines)
 
     lines.extend(
         [

@@ -384,6 +384,36 @@ def send_watchdog_monitor_alert(
         logger.exception("Failed to send watchdog monitor alert")
 
 
+def send_macro_pulse_alert(
+    event: dict,
+    advisory: dict,
+    text_summary: str,
+) -> None:
+    """Notify MONITOR_CHAT_ID of a high-severity macro pulse advisory."""
+    chat_id = config.MONITOR_CHAT_ID
+    if not chat_id:
+        return
+    rec = advisory.get("recommendation", "hold")
+    text = (
+        f"MACRO PULSE — severity {event.get('severity')} ({event.get('eth_bias')})\n"
+        f"{event.get('title', '')}\n\n"
+        f"Recommendation: {rec}\n"
+        f"{text_summary}\n\n"
+        f"(advisory only — no auto-trade)"
+    )
+    if event.get("url"):
+        text += f"\n{event['url']}"
+
+    async def _run() -> None:
+        bot = Bot(token=config.TELEGRAM_BOT_TOKEN)
+        await bot.send_message(chat_id=int(str(chat_id).strip()), text=text[:4096])
+
+    try:
+        asyncio.run(_run())
+    except Exception:
+        logger.exception("Failed to send macro pulse alert")
+
+
 def _latest_output_chart() -> Path:
     for pattern in ("*_entry.png", "*_structure.png", "*_notrade.png", "*_H1_annotated.png"):
         charts_found = sorted(config.CHARTS_DIR.glob(pattern), key=lambda p: p.stat().st_mtime)

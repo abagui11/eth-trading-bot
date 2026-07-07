@@ -13,6 +13,7 @@ import research
 from dashboard.charts import h12_marked_path
 from dashboard.performance import build_performance, _score_badge
 from dashboard.status import format_agent_status
+from macro.context import macro_payload_for_dashboard
 
 _spot_cache: tuple[float, float] = (0.0, 0.0)
 _SPOT_TTL_SEC = 30.0
@@ -113,6 +114,10 @@ def get_archived_trades_payload(limit: int = 50) -> list[dict[str, Any]]:
 def get_performance_payload() -> dict[str, Any]:
     spot = get_live_spot()["spot"]
     return build_performance(spot)
+
+
+def get_macro_payload() -> dict[str, Any]:
+    return macro_payload_for_dashboard()
 
 
 def _excerpt(text: str, limit: int) -> str:

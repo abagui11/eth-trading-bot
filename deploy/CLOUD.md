@@ -2,13 +2,15 @@
 
 Run the bot on a VPS so it sends trade suggestions every hour without your PC on.
 
+> **Architecture & status:** see [`PROJECT_STATE.md`](PROJECT_STATE.md). When you change runtime behaviour, config, or deploy steps, update that file and/or this one in the same commit.
+
 ---
 
 ## Overview
 
 | Component | What it does |
 |-----------|----------------|
-| `main.py` | Telegram bot (chat + `/start`) + hourly trade cycle |
+| `main.py` | Telegram bot (chat + `/start`) + hourly trade cycle + watchdog scanner |
 | `systemd` (`eth-agent.service`) | Keeps `main.py` running 24/7, restarts on crash |
 | `ledger.db` → `subscribers` | Records everyone who messaged the bot |
 | `ALLOWED_TELEGRAM_IDS` in `.env` | Manual paywall — only these IDs get suggestions + chat |
@@ -70,6 +72,10 @@ ALLOWED_TELEGRAM_IDS=YOUR_TELEGRAM_ID
 MARKET_DATA_API=https://api.coinbase.com/api/v3/brokerage/market
 PORTFOLIO_VALUE=5000
 PAPER_PORTFOLIO_VALUE=5000
+# Optional macro headline feeds (defaults to CNBC + CoinDesk if unset)
+# MACRO_FEED_URLS=https://search.cnbc.com/rs/search/combinedcms/view.xml?partnerId=wrss01&id=100003114,https://www.coindesk.com/arc/outboundfeeds/rss/
+# MACRO_KEYWORD_EXTRA=fusaka
+# MACRO_WEBHOOK_SECRET=your-random-secret
 ```
 
 **Important:** Leave `TELEGRAM_CHAT_ID` **empty** unless it is a *different* chat from your user ID (avoids duplicate hourly messages).
@@ -274,6 +280,28 @@ sudo systemctl reload caddy
 ```
 
 Your public link: `https://dashboard.yourdomain.com` — open it from any device.
+
+The dashboard includes a **Macro news monitor** section (active classified headlines, recent ingested items, posture gates).
+
+### Macro headline webhook (optional push ingest)
+
+Push headlines into the same pipeline as RSS (keyword score → Haiku classify → pulse if severity ≥ 4).
+
+1. Set `MACRO_WEBHOOK_SECRET` in `/opt/eth-trading-agent/.env`
+2. POST to the dashboard (HTTPS via Caddy recommended):
+
+```bash
+curl -X POST "https://dashboard.yourdomain.com/api/macro/ingest" \
+  -H "Authorization: Bearer YOUR_MACRO_WEBHOOK_SECRET" \
+  -H "Content-Type: application/json" \
+  -d '{"title":"U.S. revokes Iran oil authorization after tanker attacks","url":"https://...","force_classify":true}'
+```
+
+Fields: `title` (required), `url`, `summary`, `source`, `published_at`, `force_classify` (bypass keyword promote threshold).
+
+**Telegram manual ingest:** send `/macro <headline>` from `MONITOR_CHAT_ID` or `TELEGRAM_ADMIN_CHAT_ID` (always force-classifies).
+
+**Read API:** `GET /api/macro` — JSON for dashboard refresh (posture, active events, recent ingested).
 
 ### Deploy dashboard updates
 

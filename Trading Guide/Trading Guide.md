@@ -133,6 +133,10 @@ When the H1 chart shows structure similar to this reference screenshot, the agen
 4. Key Macro Events - Do not trade without specific plan
    1. FOMC
    2. Clarity July 17th
+   3. **Automated macro feed (advisory)** — headlines from RSS/webhook are scored and classified; injected as supplementary context only. Chart structure (H12/H1 OB, SFP, fib) remains primary.
+   4. Macro may **confirm** structure (size up conviction) or **conflict** (prefer no_trade, tighten SL, avoid adds) — never flip bias on news alone.
+   5. Open positions: prefer tighten stop / partial logic over panic flat unless H1 structure also breaks.
+   6. High-severity macro may block new watchdog entries that conflict with macro bias (soft gate).
 5. HTF levels (yearly / quarterly / monthly / weekly opens & closes)
    1. Top/Bottom of ranges
    2. Look for entries even if no obvious OB

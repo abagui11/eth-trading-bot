@@ -420,6 +420,70 @@ async def on_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     await _reply(update, f"{reply}\n\n{pnl}"[:4096])
 
 
+def _is_macro_admin(user_id: int) -> bool:
+    admin = config.TELEGRAM_ADMIN_CHAT_ID or config.MONITOR_CHAT_ID
+    if admin and str(user_id) == str(admin).strip():
+        return True
+    return False
+
+
+async def cmd_macro(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Manually ingest a headline for macro classification (admin/monitor only)."""
+    user = update.effective_user
+    if user is None or update.message is None:
+        return
+
+    if not _is_macro_admin(user.id):
+        await _reply(update, "Macro ingest is restricted to the monitor/admin account.")
+        return
+
+    args = context.args or []
+    if not args:
+        await _reply(
+            update,
+            "Usage: /macro <headline text>\n"
+            "Or: /macro <url>\n\n"
+            "Forces LLM classification (bypasses keyword promote threshold).",
+        )
+        return
+
+    text = " ".join(args).strip()
+    url = text if text.startswith("http") else None
+    title = text
+
+    loop = asyncio.get_running_loop()
+    try:
+        from macro.ingest import ingest_headline
+
+        event = await loop.run_in_executor(
+            None,
+            lambda: ingest_headline(
+                title=title,
+                url=url,
+                source="telegram",
+                force_classify=True,
+            ),
+        )
+    except Exception:
+        logger.exception("Macro command failed")
+        await _reply(update, "Macro ingest failed.")
+        return
+
+    if event is None:
+        await _reply(update, "Duplicate or disabled — no new event stored.")
+        return
+
+    sev = event.get("severity", 0)
+    bias = event.get("eth_bias") or "n/a"
+    kscore = event.get("keyword_score", 0)
+    await _reply(
+        update,
+        f"Macro ingested (id={event.get('id')})\n"
+        f"keyword_score={kscore} | severity={sev} | bias={bias}\n"
+        f"status={event.get('status')}",
+    )
+
+
 def build_application() -> Application:
     app = (
         Application.builder()
@@ -431,5 +495,6 @@ def build_application() -> Application:
     app.add_handler(CommandHandler("status", cmd_status))
     app.add_handler(CommandHandler("chart", cmd_chart))
     app.add_handler(CommandHandler("research", cmd_research))
+    app.add_handler(CommandHandler("macro", cmd_macro))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, on_text))
     return app
