@@ -351,7 +351,8 @@ def _validate(data: dict, market_context: MarketContext | None = None) -> Sugges
             raise ValueError(f"order_block missing {key}")
 
     _validate_order_block_entry(suggestion, market_context)
-    validate.validate_trade_risk(suggestion)
+    spot = market_context.spot if market_context is not None else None
+    validate.validate_trade_risk(suggestion, spot_price=spot)
 
     return suggestion
 

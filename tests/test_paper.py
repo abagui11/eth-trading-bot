@@ -298,11 +298,11 @@ class PaperPositionTests(unittest.TestCase):
         paper.restore_open_position(
             action="spot_buy",
             entry=1800.0,
-            eth_qty=0.5,
+            eth_qty=0.25,
             stop_loss=1700.0,
             take_profits=[1900.0],
             risk_reward=1.0,
-            suggested_size=0.5,
+            suggested_size=0.25,
             opened_at="2026-07-07T12:00:00Z",
             open_cycle_id="cycle_long",
             spot_price=1800.0,
@@ -321,7 +321,7 @@ class PaperPositionTests(unittest.TestCase):
 
         state = paper.get_state()
         self.assertEqual(state["side"], "short")
-        self.assertAlmostEqual(state["eth_qty"], short.size - 0.5, places=4)
+        self.assertAlmostEqual(state["eth_qty"], short.size - 0.25, places=4)
         self.assertEqual(state["stop_loss"], 1900.0)
         self.assertEqual(state["open_cycle_id"], "cycle_short")
 
@@ -437,14 +437,31 @@ class PaperPositionTests(unittest.TestCase):
         self.assertEqual(positions[0]["side"], "short")
         self.assertAlmostEqual(positions[0]["eth_qty"], 1.0 - long.size, places=4)
 
+    def test_get_sizing_basis_uses_live_equity(self) -> None:
+        paper.restore_open_position(
+            action="spot_buy",
+            entry=1800.0,
+            eth_qty=1.0,
+            stop_loss=1700.0,
+            take_profits=[1900.0],
+            risk_reward=1.0,
+            suggested_size=1.0,
+            opened_at="2026-07-07T12:00:00Z",
+            open_cycle_id="cycle_long",
+            spot_price=1800.0,
+        )
+        equity, cash = paper.get_sizing_basis(1900.0)
+        self.assertAlmostEqual(cash, 3200.0, places=2)
+        self.assertAlmostEqual(equity, 5100.0, places=2)
+
     def test_compute_eth_qty_caps_at_max(self) -> None:
-        with patch.object(config, "PAPER_PORTFOLIO_VALUE", 5000.0):
-            qty = validate.compute_eth_qty(1700.0, 1717.0, cash=5000.0)
+        with patch.object(config, "PAPER_PORTFOLIO_VALUE", 1_000_000.0):
+            qty = validate.compute_eth_qty(1700.0, 1717.0, cash=1_000_000.0)
         self.assertAlmostEqual(qty, bot_config.MAX_ETH_QTY, places=4)
 
     def test_compute_eth_qty_raises_to_min_when_affordable(self) -> None:
-        with patch.object(config, "PAPER_PORTFOLIO_VALUE", 5000.0):
-            # Wide stop → small risk-based size; should bump to MIN_ETH_QTY.
+        with patch.object(config, "PAPER_PORTFOLIO_VALUE", 1000.0):
+            # 25% of a small portfolio is below MIN_ETH_QTY; bumps up when affordable.
             qty = validate.compute_eth_qty(1700.0, 1200.0, cash=5000.0)
         self.assertAlmostEqual(qty, bot_config.MIN_ETH_QTY, places=4)
 

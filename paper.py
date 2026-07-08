@@ -1,4 +1,4 @@
-"""Paper portfolio tracker — 1% risk sizing with min/max ETH bounds per Trading Guide."""
+"""Paper portfolio tracker — fixed-fraction (TRADE_DEPLOY_PCT) sizing with min/max ETH bounds."""
 
 from __future__ import annotations
 
@@ -235,6 +235,35 @@ def init_db() -> None:
             )
         _migrate_legacy_position(conn)
         conn.commit()
+
+
+def get_sizing_basis(spot_price: float | None = None) -> tuple[float, float]:
+    """Return ``(equity_usd, cash_usd)`` for fixed-fraction trade sizing."""
+    init_db()
+    with _connect() as conn:
+        row = conn.execute("SELECT cash_usd FROM paper_state WHERE id = 1").fetchone()
+        cash = float(row["cash_usd"]) if row else config.PAPER_PORTFOLIO_VALUE
+        positions = _fetch_open_positions(conn)
+
+    spot = spot_price
+    if spot is None or float(spot) <= 0:
+        try:
+            import research
+
+            spot = research.get_spot_price()
+        except Exception:
+            spot = 0.0
+
+    spot_f = float(spot)
+    if spot_f <= 0 and positions:
+        spot_f = float(positions[0]["avg_entry"])
+
+    if spot_f <= 0:
+        equity = cash
+    else:
+        equity = _equity(cash, positions, spot_f)
+
+    return max(equity, 0.0), max(cash, 0.0)
 
 
 def _equity(

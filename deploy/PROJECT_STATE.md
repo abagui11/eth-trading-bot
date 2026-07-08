@@ -221,7 +221,7 @@ Legend: ✅ done · 🟡 in progress · 🔧 needs work · ⬜ planned · ⚠️
 | Chat Q&A | `bot.py`, `chat.py` | ✅ | snapshot-grounded + chat audit |
 | Persistence | `ledger.py`, `audit.py`, `paper.py` | ✅ | SQLite |
 | Dashboard | `dashboard/` | 🟡 | FastAPI read-only + macro news monitor |
-| Paper trading | `paper.py` | ✅ | 1% risk, FIFO cap, epoch archives |
+| Paper trading | `paper.py` | ✅ | fixed 25% deploy sizing, FIFO cap, epoch archives |
 | Live execution | `execute.py` | ⬜ | shadow/live path not built |
 | OHLC history cache | `ohlc_cache.py` | ✅ | research/backfill only, not hot path |
 | Legacy scheduler | `scheduler.py` | ⚠️ | deprecated; use `main.py` |
@@ -241,7 +241,8 @@ Defaults from `bot_config.py` (non-secret tunables). Secrets and portfolio size 
 | `RUN_LLM_CRITIC_PRE_BROADCAST` | `True` | run LLM critic in refine loop |
 | `MAX_REFINE_PASSES` | `3` | audit retry budget before downgrade |
 | `MAX_OPEN_TRADES` | `20` | paper FIFO cap |
-| `MIN_ETH_QTY` / `MAX_ETH_QTY` | `0.25` / `1.0` | paper size bounds |
+| `TRADE_DEPLOY_PCT` | `0.25` | fixed fraction of **live paper equity** deployed as notional per trade (R/R unaffected) |
+| `MIN_ETH_QTY` / `MAX_ETH_QTY` | `0.25` / `2.0` | paper size guardrails after fixed-fraction sizing |
 | `OB_MIN_WIDTH_PCT` | `1.25` | minimum OB zone width (% of mid price; H1 rule, all TFs) |
 | `PAPER_EPOCH_LABEL` | `"5k_usd"` | dashboard epoch label |
 | `MACRO_CONTEXT_ENABLED` | `True` | RSS poll + macro advisory injection |
@@ -267,6 +268,7 @@ Defaults from `bot_config.py` (non-secret tunables). Secrets and portfolio size 
 
 | Date | Change |
 |---|---|
+| 2026-07-08 | Position sizing switched from 1% risk-based to fixed-fraction deployment (`TRADE_DEPLOY_PCT=0.25` of live paper equity); removed risk-capacity feasibility gate; `MAX_ETH_QTY` raised to `2.0`. R/R, stop, and TP logic unchanged. |
 | 2026-07-07 | OB minimum width filter (`OB_MIN_WIDTH_PCT=1.25`): H1 + H12 detection and analyze validation |
 | 2026-07-07 | Macro headline layer: RSS poll, webhook ingest, keyword→Haiku classify, pulse advisories, watchdog soft gates, dashboard macro monitor |
 | 2026-07-07 | Added documentation maintenance section; filled config defaults; aligned diagrams with audit loops, watchdog, and chat path |

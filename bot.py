@@ -34,7 +34,7 @@ WELCOME_MESSAGE = (
     "\"What would invalidate the trade?\" Use /chart to see the latest analysis chart.\n\n"
     "Research: ask about historical patterns, e.g. \"What % of H12 SFPs reversed "
     "in the past 4 years?\" or use /research h12_sfp\n\n"
-    "Paper PnL assumes a ${start:,.0f} portfolio with 1% risk per trade. Not financial advice."
+    "Paper PnL assumes a ${start:,.0f} starting portfolio with 25% of live equity deployed per trade. Not financial advice."
 )
 
 _RESEARCH_KEYWORDS = re.compile(

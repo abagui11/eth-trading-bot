@@ -197,7 +197,7 @@ sudo -u ethagent /opt/eth-trading-agent/.venv/bin/python \
 sudo systemctl restart eth-agent eth-dashboard
 ```
 
-This moves all `paper_trades` / `paper_positions` into archive tables (label `legacy_1k`), resets cash to $5,000, and applies **0.25–1.0 ETH** size bounds on new trades. The dashboard shows archived trades in a separate section.
+This moves all `paper_trades` / `paper_positions` into archive tables (label `legacy_1k`), resets cash to $5,000, and sizes new trades at a fixed **25% of portfolio** (`TRADE_DEPLOY_PCT`) with **0.25–2.0 ETH** guardrails. The dashboard shows archived trades in a separate section.
 
 Dry-run first (no writes):
 

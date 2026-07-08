@@ -2,7 +2,7 @@
 
 **MVP mode: suggestions only. Do not assume orders are placed.**
 
-Portfolio value for sizing: use **PORTFOLIO_VALUE** USD from config. Default risk per trade: **1%** (may increase to 2–3% in future strategies; start at 1%).
+Portfolio value for sizing: use **live paper equity** (cash + open positions marked to spot). Sizing is **fixed-fraction**: each trade deploys **25% of current equity** as notional (independent of stop distance). The engine recomputes and enforces `size` regardless of the value returned here.
 
 When analyzing live charts, compare price action to the **reference pattern images** included in the same request (all PNGs from this Trading Guide folder).
 
@@ -57,17 +57,16 @@ This is a high level framework for trading and can be used to trade on any timef
 
 **Risk Management:**
 
-Risk management is likely the most important part of trading and may shift depending on the deployed strategy. A general rule of thumb is to never risk more than 1% of portfolio on a single trade. Depending on our strategy this may increase to 2-3% but we can start at 1%.
-
-To calculate trade size, start with the acceptable loss and work backwards.
+Position sizing is **fixed-fraction**: every trade deploys the same fraction of **live paper equity** as notional, regardless of stop distance. Equity = cash + open positions marked to current spot, so winners compound and losers shrink position size. R/R still governs whether a setup is worth taking (first TP must be at least 1.0× the stop distance away).
 
 ```
-Position Size = (Portfolio Value * Risk %) / Stop Loss %
+Notional = Live Equity * Deploy %
+Position Size (ETH) = Notional / Entry
 ```
 
-Where Portfolio Value = **PORTFOLIO_VALUE**, Risk % = **0.01**, Stop Loss % = |entry − stop_loss| / entry.
+Where Deploy % = **0.25** (25%). Live equity is read from the paper portfolio at validation time.
 
-Return `size` as ETH units consistent with this formula.
+Return `size` as ETH units consistent with this formula. The engine recomputes and clamps `size` (with min/max ETH guardrails), so an approximate value here is fine.
 
 **Trade Management:**
 

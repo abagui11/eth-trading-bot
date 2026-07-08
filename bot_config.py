@@ -13,9 +13,14 @@ BROADCAST_ONLY_TRADES = True
 MAX_REFINE_PASSES = 3
 RUN_LLM_CRITIC_PRE_BROADCAST = True
 
-# Paper position size bounds (ETH) after 1% risk sizing.
+# Fixed-fraction position sizing: each trade deploys this fraction of live paper
+# equity as notional (cash + open positions marked to spot). R/R, stop, and
+# take-profit logic are unaffected — this only sets trade size.
+TRADE_DEPLOY_PCT = 0.25
+
+# Paper position size guardrails (ETH), applied after fixed-fraction sizing.
 MIN_ETH_QTY = 0.25
-MAX_ETH_QTY = 1.0
+MAX_ETH_QTY = 2.0
 
 # Minimum OB zone width as % of mid price (H1 rule; applied to all timeframes).
 OB_MIN_WIDTH_PCT = 1.25

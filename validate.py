@@ -1,4 +1,4 @@
-"""Layer 2 trade risk validation — stop distance, recomputed R/R, sizing feasibility."""
+"""Layer 2 trade risk validation — stop distance, recomputed R/R, fixed-fraction sizing."""
 
 from __future__ import annotations
 
@@ -13,9 +13,6 @@ TRADE_ACTIONS = LONG_ACTIONS | SHORT_ACTIONS
 # Trading Guide: SL placed ~0.25% from HTF swing (blocks $1 micro-stops on ~$1600 ETH).
 MIN_STOP_DISTANCE_PCT = 0.0025
 MIN_RISK_REWARD = 1.0
-TARGET_RISK_PCT = 0.01
-# Reject when unleveraged paper cash cannot fund enough size to risk this fraction of target.
-MIN_ACHIEVABLE_RISK_FRACTION = 0.80
 
 
 def trade_side(action: str) -> str:
@@ -59,42 +56,30 @@ def compute_risk_reward(
     return reward / risk
 
 
-def achievable_risk_usd(
-    entry: float,
-    stop_loss: float,
-    portfolio_value: float,
-) -> float:
-    """USD loss at stop when sized for 1% risk, capped by available unleveraged cash."""
-    sl_pct = stop_distance_pct(entry, stop_loss)
-    if sl_pct <= 0:
-        return 0.0
-    target_risk = portfolio_value * TARGET_RISK_PCT
-    required_notional = target_risk / sl_pct
-    deployable = min(required_notional, portfolio_value)
-    return deployable * sl_pct
-
-
 def compute_eth_qty(
     entry: float,
     stop_loss: float,
     *,
     cash: float | None = None,
     portfolio_value: float | None = None,
+    equity_usd: float | None = None,
 ) -> float:
-    """1% risk sizing, capped by cash and bot_config MIN/MAX ETH bounds."""
+    """Fixed-fraction sizing: deploy ``TRADE_DEPLOY_PCT`` of live equity as notional.
+
+    Stop distance does not affect size (R/R is validated separately). The result
+    is capped by available cash and clamped to the MIN/MAX ETH guardrails.
+    ``stop_loss`` is accepted for signature stability but is intentionally unused.
+    """
     if entry <= 0:
         return 0.0
-    portfolio = portfolio_value if portfolio_value is not None else config.PAPER_PORTFOLIO_VALUE
-    available = cash if cash is not None else portfolio
-    if available <= 0:
+    equity = equity_usd if equity_usd is not None else portfolio_value
+    if equity is None:
+        equity = config.PAPER_PORTFOLIO_VALUE
+    available = cash if cash is not None else equity
+    if equity <= 0 or available <= 0:
         return 0.0
 
-    sl_pct = stop_distance_pct(entry, stop_loss)
-    if sl_pct <= 0:
-        return 0.0
-
-    risk_usd = portfolio * TARGET_RISK_PCT
-    notional = min(risk_usd / sl_pct, available)
+    notional = min(equity * bot_config.TRADE_DEPLOY_PCT, available)
     if notional <= 0:
         return 0.0
 
@@ -111,8 +96,15 @@ def compute_eth_qty(
 def validate_trade_risk(
     suggestion: Suggestion,
     portfolio_value: float | None = None,
+    *,
+    cash: float | None = None,
+    spot_price: float | None = None,
 ) -> None:
-    """Validate stop width, direction, R/R (recomputed), and 1% sizing feasibility.
+    """Validate stop width, direction, R/R (recomputed), and fixed-fraction sizing.
+
+    Sizing uses live paper equity (``portfolio_value`` / ``equity_usd``) when not
+    supplied explicitly. Pass ``spot_price`` so open-position mark-to-market is
+    included in the equity calculation.
 
     Overwrites ``suggestion.risk_reward`` and ``suggestion.size`` on success.
     """
@@ -124,7 +116,17 @@ def validate_trade_risk(
     take_profits = list(suggestion.take_profits)
     action = suggestion.action
     side = trade_side(action)
-    portfolio = portfolio_value if portfolio_value is not None else config.PAPER_PORTFOLIO_VALUE
+
+    equity = portfolio_value
+    available_cash = cash
+    if equity is None or available_cash is None:
+        import paper
+
+        resolved_equity, resolved_cash = paper.get_sizing_basis(spot_price)
+        if equity is None:
+            equity = resolved_equity
+        if available_cash is None:
+            available_cash = resolved_cash
 
     if side == "long":
         if stop_loss >= entry:
@@ -159,27 +161,17 @@ def validate_trade_risk(
             f"(entry {entry:,.2f}, stop {stop_loss:,.2f}, first TP {tp:,.2f})"
         )
 
-    target_risk = portfolio * TARGET_RISK_PCT
-    achievable = achievable_risk_usd(entry, stop_loss, portfolio)
-    min_required = target_risk * MIN_ACHIEVABLE_RISK_FRACTION
-    if achievable < min_required:
-        raise ValueError(
-            f"stop too tight for 1% risk on ${portfolio:,.0f} unleveraged paper "
-            f"(achievable risk ${achievable:.2f} < ${min_required:.2f} at "
-            f"{sl_pct * 100:.3f}% stop distance)"
-        )
-
     suggestion.risk_reward = round(rr, 4)
 
     qty = compute_eth_qty(
         entry,
         stop_loss,
-        cash=portfolio,
-        portfolio_value=portfolio,
+        cash=available_cash,
+        equity_usd=equity,
     )
     if qty <= 0:
         raise ValueError(
-            f"cannot size trade for 1% risk on ${portfolio:,.0f} "
-            f"(entry {entry:,.2f}, stop {stop_loss:,.2f})"
+            f"cannot size trade for {bot_config.TRADE_DEPLOY_PCT:.0%} deployment on "
+            f"${equity:,.0f} equity (entry {entry:,.2f}, stop {stop_loss:,.2f})"
         )
     suggestion.size = round(qty, 4)

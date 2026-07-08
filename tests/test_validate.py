@@ -29,21 +29,45 @@ class ValidateTradeRiskTests(unittest.TestCase):
         self.assertAlmostEqual(s.risk_reward, 1.9375, places=3)
         self.assertGreater(s.size, 0)
 
+    def test_validate_sizes_from_live_equity(self) -> None:
+        s = self._short()
+        validate.validate_trade_risk(s, portfolio_value=4500.0, cash=4500.0)
+        expected = 4500.0 * bot_config.TRADE_DEPLOY_PCT / float(s.entry)
+        self.assertAlmostEqual(s.size, round(expected, 4), places=4)
+
     def test_overwrites_inflated_llm_size(self) -> None:
         s = self._short(size=0.99)
-        validate.validate_trade_risk(s, portfolio_value=5000.0)
+        validate.validate_trade_risk(s, portfolio_value=5000.0, cash=5000.0)
         expected = validate.compute_eth_qty(
-            float(s.entry), float(s.stop_loss), cash=5000.0, portfolio_value=5000.0
+            float(s.entry), float(s.stop_loss), cash=5000.0, equity_usd=5000.0
         )
         self.assertAlmostEqual(s.size, round(expected, 4), places=4)
         self.assertNotEqual(s.size, 0.99)
 
+    def test_compute_eth_qty_deploys_fixed_fraction(self) -> None:
+        qty = validate.compute_eth_qty(1700.0, 1717.0, cash=5000.0, equity_usd=5000.0)
+        expected = 5000.0 * bot_config.TRADE_DEPLOY_PCT / 1700.0
+        self.assertAlmostEqual(qty, expected, places=4)
+
+    def test_compute_eth_qty_caps_by_available_cash(self) -> None:
+        qty = validate.compute_eth_qty(1700.0, 1717.0, cash=1000.0, equity_usd=5000.0)
+        self.assertAlmostEqual(qty, 1000.0 / 1700.0, places=4)
+
+    def test_compute_eth_qty_ignores_stop_distance(self) -> None:
+        # Same portfolio/entry → same size regardless of stop width (sizing is deployment-based).
+        tight = validate.compute_eth_qty(1700.0, 1704.0, cash=5000.0, portfolio_value=5000.0)
+        wide = validate.compute_eth_qty(1700.0, 1200.0, cash=5000.0, portfolio_value=5000.0)
+        self.assertAlmostEqual(tight, wide, places=6)
+
     def test_compute_eth_qty_caps_at_max(self) -> None:
-        qty = validate.compute_eth_qty(1700.0, 1717.0, cash=5000.0, portfolio_value=5000.0)
+        qty = validate.compute_eth_qty(
+            1700.0, 1717.0, cash=1_000_000.0, portfolio_value=1_000_000.0
+        )
         self.assertAlmostEqual(qty, bot_config.MAX_ETH_QTY, places=4)
 
     def test_compute_eth_qty_raises_to_min_when_affordable(self) -> None:
-        qty = validate.compute_eth_qty(1700.0, 1200.0, cash=5000.0, portfolio_value=5000.0)
+        # 25% of a small portfolio is below MIN_ETH_QTY; bumps up when cash allows.
+        qty = validate.compute_eth_qty(1700.0, 1200.0, cash=5000.0, portfolio_value=1000.0)
         self.assertAlmostEqual(qty, bot_config.MIN_ETH_QTY, places=4)
 
     def test_rejects_micro_stop(self) -> None:
@@ -86,15 +110,16 @@ class ValidateTradeRiskTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "must be above entry"):
             validate.validate_trade_risk(s, portfolio_value=1000.0)
 
-    def test_rejects_insufficient_risk_capacity(self) -> None:
-        # 0.25% stop is guide minimum but needs 4x notional on $1k unleveraged paper.
+    def test_accepts_tight_stop_with_fixed_sizing(self) -> None:
+        # Guide-minimum 0.25% stop is fine now: sizing is deployment-based, not risk-based,
+        # so a tight stop no longer needs unaffordable notional to hit a risk target.
         s = self._short(
             entry=1600.0,
             stop_loss=1604.0,
             take_profits=[1580.0],
         )
-        with self.assertRaisesRegex(ValueError, "stop too tight for 1% risk"):
-            validate.validate_trade_risk(s, portfolio_value=1000.0)
+        validate.validate_trade_risk(s, portfolio_value=1000.0)
+        self.assertGreater(s.size, 0)
 
     def test_long_recomputes_risk_reward(self) -> None:
         s = Suggestion(
