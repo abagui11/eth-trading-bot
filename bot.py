@@ -130,7 +130,7 @@ async def _handle_research(update: Update, context: ContextTypes.DEFAULT_TYPE, t
     try:
         report = await loop.run_in_executor(
             None,
-            lambda: research_router.build_report(topic_id, years=years),
+            lambda: research_router.build_report(topic_id, years=years, text=text),
         )
     except Exception:
         logger.exception("Research handler failed for topic %s", topic_id)

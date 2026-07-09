@@ -172,12 +172,15 @@ Requires `python backfill.py --all` on the server (`ohlc.db`).
 
 1. `weekly_sfp` — weekly SFP reversal stats (4 years, W-FRI bars)
 2. `h12_sfp` — H12 SFP reversal stats (4 years, resampled from H1)
+3. `h12_invalidations` — last 10 H12 SFP invalidations + post-invalidation outcomes (chart + stats)
 
 SFP scoring: Outcome A = reversal vs invalidation within N bars; B = ≥5% move; C = structure break.
 
+Post-invalidation: **continuation** = move extends in invalidation direction; **mean reversion** = fade back toward original SFP thesis.
+
 ## Coming soon
 
-- `h12_invalidations` — last 10 H12 SFP invalidations + forward outcomes
+- Funding-rate bottoms historical study (needs funding time-series cache)
 
 ---
 

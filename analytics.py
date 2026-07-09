@@ -6,6 +6,12 @@ from datetime import datetime, timezone
 
 import charts
 import ohlc_cache
+import research
+from patterns.invalidation_followup import (
+    InvalidationFollowUp,
+    compute_invalidation_stats,
+    score_post_invalidation,
+)
 from patterns.sfp import SFPEvent, compute_stats, detect_sfps
 from research_reports.format import ResearchReport
 
@@ -142,6 +148,133 @@ def weekly_sfp_report(years: int = 4) -> ResearchReport:
 def h12_sfp_report(years: int = 4) -> ResearchReport:
     """Run H12 SFP study: cache -> detect -> chart -> summary."""
     return sfp_report("H12", years=years)
+
+
+_INVALIDATION_METHODOLOGY = (
+    "Methodology: Coinbase ETH-USD H12 bars. "
+    "Select SFPs where Outcome A = invalidation (close past swept level within N bars). "
+    "Post-invalidation: continuation = >=1.5% move in invalidation direction from inv close; "
+    "mean_reversion = >=1.5% fade back toward original SFP thesis (same N-bar window)."
+)
+
+
+def _format_followup_line(fu: InvalidationFollowUp) -> str:
+    e = fu.event
+    move = f", {fu.move_pct:.1f}% move" if fu.move_pct is not None else ""
+    return (
+        f"  {e.ts[:10]} {e.direction} @ {e.swept_level:,.0f} "
+        f"-> post-inv: {fu.outcome}{move}"
+    )
+
+
+def h12_invalidations_report(years: int = 4, limit: int = 10) -> ResearchReport:
+    """Last N H12 SFP invalidations with forward post-invalidation outcomes."""
+    bars = ohlc_cache.get_h12_bars(years=years)
+    if not bars:
+        raise RuntimeError("No H12 bars available — run backfill.py first.")
+
+    all_events = detect_sfps(bars, timeframe="H12")
+    invalidated = [e for e in all_events if e.outcome_a == "invalidation"]
+    invalidated.sort(key=lambda e: e.ts)
+    selected = invalidated[-limit:]
+
+    if not selected:
+        return ResearchReport(
+            topic="h12_invalidations",
+            title="H12 Invalidation Study",
+            headline=f"No scored H12 SFP invalidations in the past {years} years.",
+            sections=[
+                ("Metrics", [
+                    f"• Total H12 SFPs detected: {len(all_events)}",
+                    f"• Invalidations: 0",
+                ]),
+                ("Methodology", [_INVALIDATION_METHODOLOGY]),
+            ],
+            interpretation=[
+                "Try a longer lookback or run backfill.py --all for more H1 history.",
+            ],
+            sources=["Coinbase OHLC (ohlc.db)", "patterns/sfp.py"],
+        )
+
+    df = research.to_dataframe(bars)
+    followups = [score_post_invalidation(df, event) for event in selected]
+    stats = compute_invalidation_stats(followups)
+
+    # Chart uses SFP stats shape for marker colors; events are all invalidations (red).
+    chart_stats = {
+        "reversal_pct": 0,
+        "total_sfps": len(selected),
+        "reversals": 0,
+        "invalidations": len(selected),
+        "neutral": 0,
+        "pending": 0,
+        "outcome_b_pct": 0,
+        "outcome_c_pct": 0,
+    }
+    cycle_id = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+    date_start = df.index[0].strftime("%Y-%m")
+    date_end = df.index[-1].strftime("%Y-%m")
+    panel = (
+        f"H12 Invalidation Follow-up\n\n"
+        f"Period: {date_start} to {date_end}\n"
+        f"Last {len(selected)} invalidated SFPs\n\n"
+        f"Post-invalidation (N={len(selected)}):\n"
+        f"  {stats['continuation_pct']}% continuation\n"
+        f"  {stats['continuation']} cont / {stats['mean_reversion']} fade\n"
+        f"  {stats['neutral']} neutral, {stats['pending']} pending\n\n"
+        f"Red markers = invalidated SFPs"
+    )
+    chart_path = charts.render_research_chart(
+        bars,
+        selected,
+        chart_stats,
+        timeframe="H12",
+        cycle_id=f"{cycle_id}_inv",
+        years=years,
+        title_override=f"ETH-USD H12 — Invalidation Study (last {len(selected)})",
+        panel_text=panel,
+    )
+
+    headline = (
+        f"Last {len(selected)} H12 SFP invalidations ({years}y): "
+        f"{stats['continuation_pct']}% continued in invalidation direction"
+    )
+    metrics = [
+        f"• Total H12 SFPs in window: {len(all_events)}",
+        f"• Invalidations in window: {len(invalidated)}",
+        f"• Studied (most recent): {len(selected)}",
+        f"• Post-invalidation continuation: {stats['continuation']} ({stats['continuation_pct']}%)",
+        f"• Post-invalidation mean reversion: {stats['mean_reversion']}",
+        f"• Neutral / pending: {stats['neutral']} / {stats['pending']}",
+    ]
+    event_lines = [_format_followup_line(fu) for fu in followups] or ["• None in window"]
+
+    interpretation = [
+        "Continuation = price extended in the invalidation direction after the failed SFP.",
+        "Mean reversion = price faded back toward the original SFP thesis.",
+        "Use as context for failed SFP follow-through — not a standalone signal.",
+    ]
+
+    caption = (
+        f"H12 Invalidations — last {len(selected)}\n"
+        f"{stats['continuation_pct']}% post-inv continuation\n"
+        f"{stats['mean_reversion']} mean reversion"
+    )[:1024]
+
+    return ResearchReport(
+        topic="h12_invalidations",
+        title="H12 Invalidation Study",
+        headline=headline,
+        sections=[
+            ("Metrics", metrics),
+            ("Events (oldest → newest)", event_lines),
+            ("Methodology", [_INVALIDATION_METHODOLOGY]),
+        ],
+        interpretation=interpretation,
+        sources=["Coinbase OHLC (ohlc.db)", "patterns/sfp.py", "patterns/invalidation_followup.py"],
+        chart_path=chart_path,
+        caption=caption,
+    )
 
 
 if __name__ == "__main__":

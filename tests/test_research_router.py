@@ -2,7 +2,10 @@
 
 from __future__ import annotations
 
+from unittest.mock import patch
+
 from research_reports import catalog, router
+from research_reports.format import ResearchReport
 
 
 def test_bare_research_command_returns_no_topic():
@@ -29,9 +32,27 @@ def test_catalog_lists_snapshot_and_study_topics():
     assert "/research digest" in text
     assert "/research funding" in text
     assert "/research h12_sfp" in text
-    assert "Coming soon" in text
+    assert "/research h12_invalidations" in text
 
 
-def test_coming_soon_topic_builds_placeholder_report():
-    report = router.build_report("h12_invalidations")
-    assert "not available yet" in report.headline.lower()
+def test_resolve_h12_invalidations_topic():
+    assert router.resolve_topic("/research h12_invalidations") == "h12_invalidations"
+    assert router.resolve_topic("last 10 times an H12 SFP was invalidated") == "h12_invalidations"
+
+
+def test_catalog_lists_h12_invalidations_study():
+    text = router.build_catalog()
+    assert "/research h12_invalidations" in text
+    assert "Coming soon" not in text
+
+
+def test_h12_invalidations_builds_study_with_limit():
+    stub = ResearchReport(
+        topic="h12_invalidations",
+        title="H12 Invalidation Study",
+        headline="stub",
+    )
+    with patch("analytics.h12_invalidations_report", return_value=stub) as mock_fn:
+        report = router.build_report("h12_invalidations", years=3, text="last 5 invalidations")
+    mock_fn.assert_called_once_with(3, limit=5)
+    assert report.topic == "h12_invalidations"

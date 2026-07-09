@@ -25,6 +25,7 @@ _SNAPSHOT_BUILDERS: dict[str, ReportBuilder] = {
 _STUDY_BUILDERS: dict[str, StudyBuilder] = {
     "h12_sfp": analytics.h12_sfp_report,
     "weekly_sfp": analytics.weekly_sfp_report,
+    "h12_invalidations": analytics.h12_invalidations_report,
 }
 
 
@@ -43,7 +44,14 @@ def build_catalog() -> str:
     return format_catalog()
 
 
-def build_report(topic_id: str, *, years: int = 4) -> ResearchReport:
+def parse_limit(text: str, default: int = 10) -> int:
+    match = re.search(r"last\s+(\d+)", text, re.IGNORECASE)
+    if match:
+        return max(1, min(int(match.group(1)), 20))
+    return default
+
+
+def build_report(topic_id: str, *, years: int = 4, text: str = "") -> ResearchReport:
     spec = TOPICS.get(topic_id)
     if spec is None:
         raise ValueError(f"Unknown research topic: {topic_id}")
@@ -63,6 +71,11 @@ def build_report(topic_id: str, *, years: int = 4) -> ResearchReport:
         return _SNAPSHOT_BUILDERS[topic_id]()
 
     if topic_id in _STUDY_BUILDERS:
+        if topic_id == "h12_invalidations":
+            return analytics.h12_invalidations_report(
+                years,
+                limit=parse_limit(text),
+            )
         return _STUDY_BUILDERS[topic_id](years)
 
     raise ValueError(f"No builder registered for topic: {topic_id}")
@@ -74,6 +87,8 @@ def topic_status_message(topic_id: str) -> str | None:
     if spec and spec.category == "study":
         if topic_id == "weekly_sfp":
             return "Analyzing weekly SFPs..."
+        if topic_id == "h12_invalidations":
+            return "Analyzing last H12 SFP invalidations..."
         return "Analyzing H12 SFPs..."
     if spec and spec.category == "snapshot":
         return f"Building {spec.label.lower()} report..."

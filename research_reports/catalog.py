@@ -85,9 +85,16 @@ TOPICS: dict[str, TopicSpec] = {
         topic_id="h12_invalidations",
         label="H12 invalidations",
         description="last 10 H12 SFP invalidations + forward outcomes",
-        category="coming_soon",
-        aliases=("h12-invalidation", "invalidations"),
-        keywords=("h12 invalidation", "invalidated sfp", "sfp invalidated"),
+        category="study",
+        aliases=("h12-invalidation", "invalidations", "h12_invalidation"),
+        keywords=(
+            "h12 invalidation",
+            "h12 sfp invalidated",
+            "invalidated sfp",
+            "sfp invalidated",
+            "last 10 times a h12 sfp was invalidated",
+            "what happened after h12 sfp invalid",
+        ),
     ),
 }
 
@@ -111,10 +118,6 @@ def format_catalog() -> str:
     for spec in TOPICS.values():
         if spec.category == "study":
             lines.append(f"  /research {spec.topic_id} — {spec.description}")
-    lines.extend(["", "Coming soon"])
-    for spec in TOPICS.values():
-        if spec.category == "coming_soon":
-            lines.append(f"  /research {spec.topic_id} — {spec.description}")
     lines.extend(
         [
             "",
@@ -122,6 +125,7 @@ def format_catalog() -> str:
             '  "What\'s ETH funding right now?"',
             '  "BTC dominance and USDT dominance"',
             '  "What % of H12 SFPs reversed in 4 years?"',
+            '  "Last 10 times an H12 SFP was invalidated"',
             "",
             "Not financial advice.",
         ]
@@ -153,6 +157,9 @@ def match_topic_from_text(text: str) -> str | None:
         topic = topic_from_token(first)
         if topic:
             return topic
+
+    if "invalid" in normalized and ("h12" in normalized or "12h" in normalized):
+        return "h12_invalidations"
 
     for spec in TOPICS.values():
         for kw in spec.keywords:

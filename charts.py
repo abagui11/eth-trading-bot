@@ -814,6 +814,8 @@ def render_research_chart(
   timeframe: str = "W1",
   cycle_id: str | None = None,
   years: int = 4,
+  title_override: str | None = None,
+  panel_text: str | None = None,
 ) -> str:
   """
   Render a single-TF research chart with SFP markers and stats panel.
@@ -831,7 +833,7 @@ def render_research_chart(
 
   date_start = df.index[0].strftime("%Y-%m")
   date_end = df.index[-1].strftime("%Y-%m")
-  title = f"ETH-USD {timeframe} — SFP Study ({years}y)"
+  title = title_override or f"ETH-USD {timeframe} — SFP Study ({years}y)"
   fig, ax_price, ax_text = _build_annotated_figure(df, title)
 
   outcome_colors = {
@@ -884,23 +886,26 @@ def render_research_chart(
   b_pct = stats.get("outcome_b_pct", 0)
   c_pct = stats.get("outcome_c_pct", 0)
 
-  tf_label = "W-FRI weekly" if timeframe == "W1" else f"{timeframe} Coinbase"
-  panel = (
-    f"{timeframe} SFP Results\n\n"
-    f"Period: {date_start} to {date_end}\n"
-    f"Coinbase ETH-USD ({tf_label})\n\n"
-    f"Headline (Outcome A):\n"
-    f"  {reversal_pct}% reversal\n"
-    f"  ({rev} rev / {inv} inv)\n"
-    f"  n={total} SFPs scored\n\n"
-    f"Also logged:\n"
-    f"  Neutral: {neu}\n"
-    f"  Pending: {pend}\n"
-    f"  Outcome B (>=5% move): {b_pct}%\n"
-    f"  Outcome C (structure break): {c_pct}%\n\n"
-    f"Green=reversal  Red=invalidation\n"
-    f"Gray=neutral/pending"
-  )
+  if panel_text is None:
+    tf_label = "W-FRI weekly" if timeframe == "W1" else f"{timeframe} Coinbase"
+    panel = (
+      f"{timeframe} SFP Results\n\n"
+      f"Period: {date_start} to {date_end}\n"
+      f"Coinbase ETH-USD ({tf_label})\n\n"
+      f"Headline (Outcome A):\n"
+      f"  {reversal_pct}% reversal\n"
+      f"  ({rev} rev / {inv} inv)\n"
+      f"  n={total} SFPs scored\n\n"
+      f"Also logged:\n"
+      f"  Neutral: {neu}\n"
+      f"  Pending: {pend}\n"
+      f"  Outcome B (>=5% move): {b_pct}%\n"
+      f"  Outcome C (structure break): {c_pct}%\n\n"
+      f"Green=reversal  Red=invalidation\n"
+      f"Gray=neutral/pending"
+    )
+  else:
+    panel = panel_text
   _draw_rationale_panel(ax_text, "Research", panel)
 
   return _save_figure(fig, path)
