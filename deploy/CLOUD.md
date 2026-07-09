@@ -315,7 +315,7 @@ This restarts both `eth-agent` and `eth-dashboard`.
 
 ### Research reports (`/research` in Telegram)
 
-Subscribers can run `/research` for the topic catalog. Snapshot topics (digest, macro, funding, volume, dominance, miner) need outbound HTTPS to Coinbase, Binance Futures, CoinGecko, and Hashrate Index.
+Subscribers can run `/research` for the topic catalog. Snapshot topics (digest, macro, funding, volume, dominance, miner) need outbound HTTPS to Coinbase, Bybit (perp/funding fallback when Binance returns 451), CoinGecko, and blockchain.info. US VPS hosts often cannot reach Binance Futures — Bybit is used automatically as fallback.
 
 SFP pattern studies need historical OHLC in `ohlc.db`:
 

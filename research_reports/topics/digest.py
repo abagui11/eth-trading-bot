@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from research_reports.format import ResearchReport
+from research_reports.htf_chart import resolve_htf_chart
 from research_reports.topics import dominance, funding, macro, miner, volume
 
 
@@ -35,13 +36,22 @@ def build_digest_report() -> ResearchReport:
 
     unique_sources = list(dict.fromkeys(all_sources))
 
+    chart_path, chart_caption = resolve_htf_chart()
+    if chart_path:
+        all_interpretation.insert(
+            0,
+            "H12 chart attached — zones, key levels, and detected structure match the hourly agent.",
+        )
+
     return ResearchReport(
         topic="digest",
         title="Market Digest",
         headline=headline or "ETH market context digest",
         sections=sections,
-        interpretation=all_interpretation[:4] or [
+        interpretation=all_interpretation[:5] or [
             "Chart structure remains primary for entries.",
         ],
         sources=unique_sources,
+        chart_path=chart_path,
+        caption=chart_caption or "ETH-USD H12 structure",
     )
