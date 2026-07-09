@@ -10,7 +10,6 @@ from telegram import Update
 from telegram.ext import Application, CommandHandler, ContextTypes, MessageHandler, filters
 
 import access
-import analytics
 import chart_view
 import chat
 import config
@@ -19,6 +18,8 @@ import ledger
 import notify
 import paper
 import research
+from research_reports import catalog as research_catalog
+from research_reports import router as research_router
 
 logger = logging.getLogger(__name__)
 
@@ -32,16 +33,14 @@ WELCOME_MESSAGE = (
     "You will receive an hourly trade suggestion (chart + rationale) if a setup is found.\n"
     "Reply anytime to ask about the latest suggestion — e.g. \"Why this entry?\" or "
     "\"What would invalidate the trade?\" Use /chart to see the latest analysis chart.\n\n"
-    "Research: ask about historical patterns, e.g. \"What % of H12 SFPs reversed "
-    "in the past 4 years?\" or use /research h12_sfp\n\n"
+    "Research: use /research for the topic catalog — market digest, funding, "
+    "volume, dominance, macro, and SFP pattern studies.\n\n"
     "Paper PnL assumes a ${start:,.0f} starting portfolio with 25% of live equity deployed per trade. Not financial advice."
 )
 
-_RESEARCH_KEYWORDS = re.compile(
-    r"(weekly\s+sfp|h12\s+sfp|sfp\s+reversal|%.*sfp|sfp.*%|sfp.*past|past.*sfp|"
-    r"research\s+(weekly|h12)|how\s+many\s+sfp)",
-    re.IGNORECASE,
-)
+def _is_research_query(text: str) -> bool:
+    return research_catalog.is_research_query(text)
+
 
 _CHART_QUERY = re.compile(
     r"(?:"
@@ -64,13 +63,6 @@ def _username(update: Update) -> str | None:
     return user.username
 
 
-def _is_research_query(text: str) -> bool:
-    normalized = text.strip().lower()
-    if normalized.startswith("/research"):
-        return True
-    return bool(_RESEARCH_KEYWORDS.search(text))
-
-
 def _is_chart_query(text: str) -> bool:
     normalized = text.strip().lower()
     if normalized in ("/chart", "chart"):
@@ -78,24 +70,10 @@ def _is_chart_query(text: str) -> bool:
     return bool(_CHART_QUERY.search(text))
 
 
-def _research_years(text: str) -> int:
-    match = re.search(r"(\d+)\s*years?", text, re.IGNORECASE)
-    if match:
-        return max(1, min(int(match.group(1)), 10))
-    return 4
-
-
 async def _reply(update: Update, text: str) -> None:
     if update.message is None:
         return
     await update.message.reply_text(text)
-
-
-def _research_timeframe(text: str) -> str:
-    normalized = text.strip().lower()
-    if "h12" in normalized or "12h" in normalized or "12-hour" in normalized:
-        return "H12"
-    return "W1"
 
 
 async def _handle_chart(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -138,35 +116,34 @@ async def _handle_research(update: Update, context: ContextTypes.DEFAULT_TYPE, t
     if update.message is None:
         return
 
-    years = _research_years(text)
-    timeframe = _research_timeframe(text)
-    label = "H12" if timeframe == "H12" else "weekly"
-    await _reply(update, f"Analyzing {label} SFPs over the past {years} years...")
+    topic_id = research_router.resolve_topic(text)
+    if topic_id is None:
+        await _reply(update, research_router.build_catalog())
+        return
+
+    years = research_router.parse_years(text)
+    status_msg = research_router.topic_status_message(topic_id)
+    if status_msg:
+        await _reply(update, status_msg)
 
     loop = asyncio.get_running_loop()
     try:
-        if timeframe == "H12":
-            result = await loop.run_in_executor(None, analytics.h12_sfp_report, years)
-        else:
-            result = await loop.run_in_executor(None, analytics.weekly_sfp_report, years)
+        report = await loop.run_in_executor(
+            None,
+            lambda: research_router.build_report(topic_id, years=years),
+        )
     except Exception:
-        logger.exception("Research handler failed")
+        logger.exception("Research handler failed for topic %s", topic_id)
         await _reply(update, "Sorry, the research analysis failed. Try again later.")
         return
 
     bot = context.bot
     chat_id = update.effective_chat.id if update.effective_chat else update.message.chat_id
     try:
-        await notify.send_research_to_chat(
-            bot,
-            chat_id,
-            result.chart_path,
-            result.caption,
-            result.summary_text,
-        )
+        await notify.send_research_report(bot, chat_id, report)
     except Exception:
-        logger.exception("Failed to send research chart")
-        await _reply(update, result.summary_text[:4096])
+        logger.exception("Failed to send research report")
+        await _reply(update, report.detail_text[:4096])
 
 
 async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -223,18 +200,9 @@ async def cmd_help(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         "/start — welcome + latest status\n"
         "/status — current suggestion + paper PnL\n"
         "/chart — latest analysis chart + what the bot is watching\n"
-        "/research weekly_sfp — weekly SFP reversal study (4 years)\n"
-        "/research h12_sfp — H12 SFP reversal study (4 years)\n"
+        "/research — research topic catalog\n"
         "/help — this message\n\n"
-        "Ask about the latest hourly suggestion, e.g.:\n"
-        "• Why this entry?\n"
-        "• What invalidates the trade?\n"
-        "• How does this match the SFP example?\n"
-        "• /chart or \"show me the latest chart\"\n\n"
-        "Research questions (returns chart + stats), e.g.:\n"
-        "• What % of H12 SFPs resulted in a reversal in the past 4 years?\n"
-        "• /research h12_sfp\n"
-        "• /research weekly_sfp",
+        + research_router.build_catalog(),
     )
 
 
@@ -340,18 +308,16 @@ async def cmd_research(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         return
 
     args = context.args or []
-    subcmd = args[0].lower() if args else "h12_sfp"
-    if subcmd in ("weekly_sfp", "weekly-sfp", "weekly"):
-        timeframe = "W1"
-    elif subcmd in ("h12_sfp", "h12-sfp", "h12", "sfp"):
-        timeframe = "H12"
-    else:
+    if not args:
+        await _reply(update, research_router.build_catalog())
+        return
+
+    subcmd = args[0].lower()
+    topic_id = research_catalog.topic_from_token(subcmd)
+    if topic_id is None:
         await _reply(
             update,
-            "Usage:\n"
-            "/research h12_sfp — H12 SFP study (default)\n"
-            "/research weekly_sfp — weekly SFP study\n\n"
-            "Or ask in plain text, e.g. \"What % of H12 SFPs reversed in the past 4 years?\"",
+            f"Unknown topic: {subcmd}\n\n{research_router.build_catalog()}",
         )
         return
 
@@ -362,8 +328,7 @@ async def cmd_research(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
             years = max(1, min(int(match.group(1)), 10))
             break
 
-    prefix = "h12" if timeframe == "H12" else "weekly"
-    text = f"{prefix} sfp past {years} years"
+    text = f"/research {topic_id} {years} years"
     await _handle_research(update, context, text)
 
 

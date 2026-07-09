@@ -313,6 +313,18 @@ sudo bash /opt/eth-trading-agent/deploy/update.sh
 
 This restarts both `eth-agent` and `eth-dashboard`.
 
+### Research reports (`/research` in Telegram)
+
+Subscribers can run `/research` for the topic catalog. Snapshot topics (digest, macro, funding, volume, dominance, miner) need outbound HTTPS to Coinbase, Binance Futures, CoinGecko, and Hashrate Index.
+
+SFP pattern studies need historical OHLC in `ohlc.db`:
+
+```bash
+sudo -u ethagent bash -c 'cd /opt/eth-trading-agent && .venv/bin/python backfill.py --all'
+```
+
+Run once on a fresh VPS (or after DB wipe). Hourly backfill is required for H12 SFP studies.
+
 ### Backfill chart-read scores (older cycles)
 
 After upgrading, run once to score historical hourly audits:

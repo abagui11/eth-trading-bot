@@ -2,25 +2,25 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
 from datetime import datetime, timezone
 
 import charts
 import ohlc_cache
 from patterns.sfp import SFPEvent, compute_stats, detect_sfps
+from research_reports.format import ResearchReport
 
 _METHODOLOGY: dict[str, str] = {
     "W1": (
         "Methodology: Coinbase ETH-USD, weekly W-FRI bars. "
         "SFP = L=3 pivot, wick sweeps >=0.2% past a swing from the last ~20 weeks, close back inside. "
         "Outcome A = >=2% follow-through from event close within N bars (or invalidation if close past level). "
-        "B/C = >=5% move / structure break (same window). Not financial advice."
+        "B/C = >=5% move / structure break (same window)."
     ),
     "H12": (
         "Methodology: Coinbase ETH-USD, 12h bars resampled from H1. "
         "SFP = L=4 extreme pivot, latest swing swept >=0.3% within ~3 weeks, close back inside. "
         "Outcome A = >=1.5% follow-through from event close within N bars (or invalidation). "
-        "B/C = >=5% move / structure break (same window). Not financial advice."
+        "B/C = >=5% move / structure break (same window)."
     ),
 }
 
@@ -29,16 +29,10 @@ _LABELS: dict[str, str] = {
     "H12": "H12",
 }
 
-
-@dataclass
-class ResearchResult:
-    chart_path: str
-    summary_text: str
-    caption: str
-    events: list[SFPEvent]
-    stats: dict
-    years: int
-    timeframe: str = "W1"
+_TOPIC_IDS: dict[str, str] = {
+    "W1": "weekly_sfp",
+    "H12": "h12_sfp",
+}
 
 
 def _bar_count_note(timeframe: str, bar_count: int, years: int) -> str:
@@ -46,39 +40,37 @@ def _bar_count_note(timeframe: str, bar_count: int, years: int) -> str:
     return f"Bars analyzed: {bar_count} (~{per_year}/year)"
 
 
-def _format_summary(
+def _build_sections(
     stats: dict,
     years: int,
     events: list[SFPEvent],
     timeframe: str,
     bar_count: int,
-) -> str:
-    label = _LABELS.get(timeframe, timeframe)
-    lines = [
-        f"{label} SFP reversal study ({years} years)",
-        _bar_count_note(timeframe, bar_count, years),
-        "",
-        f"Headline (Outcome A): {stats['reversal_pct']}% reversal",
+) -> list[tuple[str, list[str]]]:
+    scored = stats["reversals"] + stats["invalidations"]
+    metrics = [
+        f"• {_bar_count_note(timeframe, bar_count, years)}",
+        f"• Headline (Outcome A): {stats['reversal_pct']}% reversal",
         f"  {stats['reversals']} reversals / {stats['invalidations']} invalidations",
-        f"  ({stats['reversals'] + stats['invalidations']} scored; "
-        f"{stats['neutral']} neutral, {stats['pending']} pending)",
-        "",
-        f"Total SFPs detected: {stats['total_sfps']}",
-        f"Outcome B (>=5% move in direction): {stats['outcome_b_pct']}% "
+        f"  ({scored} scored; {stats['neutral']} neutral, {stats['pending']} pending)",
+        f"• Total SFPs detected: {stats['total_sfps']}",
+        f"• Outcome B (>=5% move): {stats['outcome_b_pct']}% "
         f"({stats['outcome_b_count']}/{stats['outcome_bc_eligible']})",
-        f"Outcome C (structure break): {stats['outcome_c_pct']}% "
+        f"• Outcome C (structure break): {stats['outcome_c_pct']}% "
         f"({stats['outcome_c_count']}/{stats['outcome_bc_eligible']})",
-        "",
-        "Recent events:",
     ]
+    recent_lines = ["Recent events:"]
     recent = sorted(events, key=lambda e: e.ts)[-5:]
     for e in recent:
-        lines.append(
+        recent_lines.append(
             f"  {e.ts[:10]} {e.direction} @ {e.swept_level:,.0f} -> {e.outcome_a}"
         )
-    footnote = _METHODOLOGY.get(timeframe, _METHODOLOGY["W1"])
-    lines.extend(["", footnote])
-    return "\n".join(lines)
+    methodology = _METHODOLOGY.get(timeframe, _METHODOLOGY["W1"])
+    return [
+        ("Metrics", metrics),
+        ("Recent events", recent_lines[1:] if len(recent_lines) > 1 else ["• None"]),
+        ("Methodology", [methodology]),
+    ]
 
 
 def _build_caption(stats: dict, years: int, timeframe: str) -> str:
@@ -91,7 +83,7 @@ def _build_caption(stats: dict, years: int, timeframe: str) -> str:
     )[:1024]
 
 
-def sfp_report(timeframe: str = "W1", years: int = 4) -> ResearchResult:
+def sfp_report(timeframe: str = "W1", years: int = 4) -> ResearchReport:
     """Run SFP study for W1 or H12: cache -> detect -> chart -> summary."""
     tf = timeframe.upper()
     if tf == "W1":
@@ -117,26 +109,37 @@ def sfp_report(timeframe: str = "W1", years: int = 4) -> ResearchResult:
         years=years,
     )
 
-    summary = _format_summary(stats, years, events, tf, len(bars))
-    caption = _build_caption(stats, years, tf)
+    label = _LABELS.get(tf, tf)
+    scored = stats["reversals"] + stats["invalidations"]
+    headline = (
+        f"{label} SFP reversal study ({years} years): "
+        f"{stats['reversal_pct']}% reversal ({stats['reversals']}/{scored} scored)"
+    )
 
-    return ResearchResult(
+    interpretation = [
+        f"{stats['total_sfps']} SFPs detected over {years} years on Coinbase ETH-USD.",
+        "Outcome A measures reversal vs invalidation within the scoring window.",
+        "Use as historical context — not a standalone trade signal.",
+    ]
+
+    return ResearchReport(
+        topic=_TOPIC_IDS.get(tf, tf.lower()),
+        title=f"{label} SFP Study",
+        headline=headline,
+        sections=_build_sections(stats, years, events, tf, len(bars)),
+        interpretation=interpretation,
+        sources=["Coinbase OHLC (ohlc.db)", "patterns/sfp.py"],
         chart_path=chart_path,
-        summary_text=summary,
-        caption=caption,
-        events=events,
-        stats=stats,
-        years=years,
-        timeframe=tf,
+        caption=_build_caption(stats, years, tf),
     )
 
 
-def weekly_sfp_report(years: int = 4) -> ResearchResult:
+def weekly_sfp_report(years: int = 4) -> ResearchReport:
     """Run weekly SFP study: cache -> detect -> chart -> summary."""
     return sfp_report("W1", years=years)
 
 
-def h12_sfp_report(years: int = 4) -> ResearchResult:
+def h12_sfp_report(years: int = 4) -> ResearchReport:
     """Run H12 SFP study: cache -> detect -> chart -> summary."""
     return sfp_report("H12", years=years)
 
@@ -144,5 +147,5 @@ def h12_sfp_report(years: int = 4) -> ResearchResult:
 if __name__ == "__main__":
     print("Running H12 SFP report...")
     result = h12_sfp_report(years=4)
-    print(result.summary_text)
+    print(result.detail_text)
     print(f"\nChart: {result.chart_path}")

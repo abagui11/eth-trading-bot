@@ -151,12 +151,33 @@ When the H1 chart shows structure similar to this reference screenshot, the agen
 
 # Research commands
 
-Historical backtests (Telegram `/research`):
+Telegram `/research` shows a **topic catalog** when sent with no args. Reports use a standardized format (headline, metrics, interpretation, sources).
+
+## Market snapshot (text)
+
+| Topic | Command | Data |
+|---|---|---|
+| Full digest | `/research digest` | macro + funding + volume + dominance + miner |
+| Macro | `/research macro` | active headlines, posture, pulses (`macro/`) |
+| Funding | `/research funding` | ETH perp funding (Binance ETHUSDT) |
+| Volume | `/research volume` | Coinbase spot vs Binance perp 24h |
+| Dominance | `/research dominance` | BTC.D + USDT.D (CoinGecko) |
+| Miner breakeven | `/research miner` | BTC miner breakeven estimate (hashprice proxy) |
+
+Natural language also works, e.g. "What's ETH funding right now?" or "BTC dominance".
+
+## Pattern studies (chart + stats)
+
+Requires `python backfill.py --all` on the server (`ohlc.db`).
 
 1. `weekly_sfp` — weekly SFP reversal stats (4 years, W-FRI bars)
 2. `h12_sfp` — H12 SFP reversal stats (4 years, resampled from H1)
 
 SFP scoring: Outcome A = reversal vs invalidation within N bars; B = ≥5% move; C = structure break.
+
+## Coming soon
+
+- `h12_invalidations` — last 10 H12 SFP invalidations + forward outcomes
 
 ---
 

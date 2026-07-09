@@ -138,6 +138,28 @@ async def send_research_to_chat(
         await bot.send_message(chat_id=chat_id, text=detail_text[:4096])
 
 
+async def send_research_report(
+    bot: Bot,
+    chat_id: int | str,
+    report: object,
+) -> None:
+    """Send a ResearchReport — chart optional."""
+    from research_reports.format import ResearchReport
+
+    if not isinstance(report, ResearchReport):
+        raise TypeError("report must be a ResearchReport")
+
+    detail = report.detail_text
+    if report.chart_path:
+        caption = report.caption or report.headline[:1024]
+        await send_photo_with_caption(bot, chat_id, report.chart_path, caption)
+        if detail:
+            await bot.send_message(chat_id=chat_id, text=detail[:4096])
+        return
+
+    await bot.send_message(chat_id=chat_id, text=detail[:4096])
+
+
 async def broadcast_to_subscribers(
     bot: Bot,
     suggestion: Suggestion,

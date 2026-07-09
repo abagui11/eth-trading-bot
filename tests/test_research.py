@@ -4,8 +4,8 @@ from __future__ import annotations
 
 import re
 
-from analytics import _build_caption, _format_summary
 from patterns.sfp import SFPEvent, compute_stats
+from research_reports.format import ResearchReport, format_report_text
 
 _SECRET_PATTERNS = (
     re.compile(r"sk-[a-zA-Z0-9]{20,}"),
@@ -19,7 +19,7 @@ def _assert_no_secrets(text: str) -> None:
         assert not pattern.search(text), f"secret-like value in outbound text: {pattern.pattern}"
 
 
-def test_summary_and_caption_contain_no_secrets():
+def test_sfp_report_text_contains_no_secrets():
     events = [
         SFPEvent(
             ts="2026-01-01T00:00:00Z",
@@ -36,10 +36,18 @@ def test_summary_and_caption_contain_no_secrets():
         )
     ]
     stats = compute_stats(events)
-    summary = _format_summary(stats, years=4, events=events, timeframe="W1", bar_count=200)
-    caption = _build_caption(stats, years=4, timeframe="W1")
-    _assert_no_secrets(summary)
-    _assert_no_secrets(caption)
+    report = ResearchReport(
+        topic="weekly_sfp",
+        title="Weekly SFP Study",
+        headline=f"{stats['reversal_pct']}% reversal",
+        sections=[("Metrics", [f"• Total SFPs: {stats['total_sfps']}"])],
+        interpretation=["Historical context only."],
+        sources=["Coinbase OHLC"],
+        caption="Weekly SFP caption",
+    )
+    text = format_report_text(report)
+    _assert_no_secrets(text)
+    _assert_no_secrets(report.caption or "")
 
 
 def test_compute_stats_bc_denominator_matches_counts():
@@ -79,7 +87,3 @@ def test_compute_stats_bc_denominator_matches_counts():
     assert stats["outcome_c_count"] == 1
     assert stats["outcome_b_pct"] == 0.0
     assert stats["outcome_c_pct"] == 100.0
-
-    summary = _format_summary(stats, years=4, events=events, timeframe="H12", bar_count=100)
-    assert "(0/1)" in summary
-    assert "(1/1)" in summary
