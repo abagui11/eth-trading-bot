@@ -241,8 +241,11 @@ def market_context_to_dict(
         "zone_snapshot": _zone_snapshot_to_dict(ctx.zone_snapshot),
         "setup_state": ctx.setup_state.to_dict() if ctx.setup_state else None,
         "alerts": list(ctx.alerts),
-        "h12_sfps": [_sfp_to_dict(e) for e in ctx.h12_sfps],
-        "h1_sfps": [_sfp_to_dict(e) for e in ctx.h1_sfps],
+        "h4_sfps": [_sfp_to_dict(e) for e in ctx.h4_sfps],
+        "m5_sfps": [_sfp_to_dict(e) for e in ctx.m5_sfps],
+        # Dual-write legacy keys for older dashboard/chat readers.
+        "h12_sfps": [_sfp_to_dict(e) for e in ctx.h4_sfps],
+        "h1_sfps": [_sfp_to_dict(e) for e in ctx.m5_sfps],
         "live_invalidated_sfps": [
             _sfp_to_dict(e) for e in invalidated
         ],
@@ -256,6 +259,12 @@ def market_context_to_dict(
 
 def market_context_from_dict(data: dict[str, Any]) -> MarketContext:
     setup_raw = data.get("setup_state")
+    h4_raw = data.get("h4_sfps")
+    if h4_raw is None:
+        h4_raw = data.get("h12_sfps", [])
+    m5_raw = data.get("m5_sfps")
+    if m5_raw is None:
+        m5_raw = data.get("h1_sfps", [])
     return MarketContext(
         range_24h=_range_from_dict(data.get("range_24h")),
         is_ranging=bool(data.get("is_ranging", False)),
@@ -264,8 +273,8 @@ def market_context_from_dict(data: dict[str, Any]) -> MarketContext:
         zone_snapshot=_zone_snapshot_from_dict(data.get("zone_snapshot")),
         setup_state=SetupState.from_dict(setup_raw) if setup_raw else None,
         alerts=list(data.get("alerts", [])),
-        h12_sfps=[_sfp_from_dict(e) for e in data.get("h12_sfps", [])],
-        h1_sfps=[_sfp_from_dict(e) for e in data.get("h1_sfps", [])],
+        h4_sfps=[_sfp_from_dict(e) for e in h4_raw],
+        m5_sfps=[_sfp_from_dict(e) for e in m5_raw],
         live_invalidated_sfps=[
             _sfp_from_dict(e) for e in data.get("live_invalidated_sfps", [])
         ],

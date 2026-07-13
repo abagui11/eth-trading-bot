@@ -26,6 +26,28 @@ def _h1_series(hours: int, start_price: float = 1570.0) -> list[dict]:
     return bars
 
 
+def _m5_series(bars: int = 60, start_price: float = 1570.0) -> list[dict]:
+    """Fabricate M5 bars (5-minute spacing) for build_market_context tests."""
+    base = datetime(2026, 6, 30, 0, 0, tzinfo=timezone.utc)
+    out = []
+    for i in range(bars):
+        ts = (base + timedelta(minutes=5 * i)).strftime("%Y-%m-%dT%H:%M:%SZ")
+        p = start_price + (i % 5) - 2
+        out.append(_bar(ts, p, p + 3, p - 3, p))
+    return out
+
+
+def _h4_series(bars: int = 60, start_price: float = 2200.0) -> list[dict]:
+    base = datetime(2026, 6, 1, 0, 0, tzinfo=timezone.utc)
+    out = []
+    price = start_price
+    for i in range(bars):
+        ts = (base + timedelta(hours=4 * i)).strftime("%Y-%m-%dT%H:%M:%SZ")
+        price = max(1500.0, price - 8)
+        out.append(_bar(ts, price, price + 20, price - 20, price - 5))
+    return out
+
+
 class MarketContextTests(unittest.TestCase):
     def setUp(self) -> None:
         self._tmpdir = tempfile.TemporaryDirectory(ignore_cleanup_errors=True)
@@ -42,7 +64,7 @@ class MarketContextTests(unittest.TestCase):
         old = SFPEvent(
             ts="2026-06-28T23:00:00Z",
             bar_idx=10,
-            timeframe="H1",
+            timeframe="M5",
             direction="bullish",
             swept_level=1560.0,
             sweep_depth_pct=0.2,
@@ -55,7 +77,7 @@ class MarketContextTests(unittest.TestCase):
         fresh = SFPEvent(
             ts="2026-06-30T16:00:00Z",
             bar_idx=50,
-            timeframe="H1",
+            timeframe="M5",
             direction="bearish",
             swept_level=1620.0,
             sweep_depth_pct=0.2,
@@ -74,7 +96,7 @@ class MarketContextTests(unittest.TestCase):
         event = SFPEvent(
             ts="2026-06-30T12:00:00Z",
             bar_idx=12,
-            timeframe="H1",
+            timeframe="M5",
             direction="bearish",
             swept_level=1587.0,
             sweep_depth_pct=0.2,
@@ -95,16 +117,14 @@ class MarketContextTests(unittest.TestCase):
         h1[-3]["close"] = 1620.0
         h1[-1]["close"] = 1575.0
         h1[-1]["high"] = 1580.0
+        h4 = _h4_series()
+        m5 = _m5_series()
+        m5[-3]["high"] = 1625.0
+        m5[-3]["close"] = 1620.0
+        m5[-1]["close"] = 1575.0
+        m5[-1]["high"] = 1580.0
 
-        h12 = []
-        base = datetime(2026, 6, 1, 0, 0, tzinfo=timezone.utc)
-        price = 2200.0
-        for i in range(60):
-            ts = (base + timedelta(hours=12 * i)).strftime("%Y-%m-%dT%H:%M:%SZ")
-            price = max(1500.0, price - 8)
-            h12.append(_bar(ts, price, price + 20, price - 20, price - 5))
-
-        ctx = build_market_context(h12, h1, h1)
+        ctx = build_market_context(h4, h1, m5)
         self.assertIn("Current spot:", ctx.summary_text)
         self.assertIn("do NOT say price has not reached the retest zone", ctx.summary_text)
 
@@ -113,14 +133,9 @@ class MarketContextTests(unittest.TestCase):
 
     def test_summary_uses_retest_vocabulary(self) -> None:
         h1 = _h1_series(30)
-        h12 = []
-        base = datetime(2026, 6, 1, 0, 0, tzinfo=timezone.utc)
-        price = 1800.0
-        for i in range(60):
-            ts = (base + timedelta(hours=12 * i)).strftime("%Y-%m-%dT%H:%M:%SZ")
-            price = max(1500.0, price - 5)
-            h12.append(_bar(ts, price, price + 20, price - 20, price - 5))
-        ctx = build_market_context(h12, h1, h1)
+        h4 = _h4_series(start_price=1800.0)
+        m5 = _m5_series()
+        ctx = build_market_context(h4, h1, m5)
         if "Retest status (rolling 24h)" in ctx.summary_text:
             self.assertIn("Retest status (rolling 24h)", ctx.summary_text)
         self.assertIn(

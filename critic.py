@@ -19,7 +19,7 @@ from patterns.market_context import MarketContext
 from patterns.order_block import (
     OrderBlock,
     bounds_close,
-    find_matching_h1_ob,
+    find_matching_entry_ob,
     format_ob_with_fib,
     zones_overlap,
 )
@@ -37,14 +37,14 @@ _NEGATION_RE = re.compile(
     r"\b(?:no|not|without|none|lack|missing|absent|didn't|did not|hasn't|has not)\b",
     re.IGNORECASE,
 )
-_H1_OB_RE = re.compile(
-    rf"(?i)H1\s+OB[^0-9]*{_ETH_PRICE_RE}\s*[-–]\s*{_ETH_PRICE_RE}",
+_M5_OB_RE = re.compile(
+    rf"(?i)M5\s+OB[^0-9]*{_ETH_PRICE_RE}\s*[-–]\s*{_ETH_PRICE_RE}",
 )
-_H12_ZONE_RE = re.compile(
-    rf"(?i)H12\s+(?:OB|BRKR|breaker|order\s+block)[^0-9]*{_ETH_PRICE_RE}\s*[-–]\s*{_ETH_PRICE_RE}",
+_H4_ZONE_RE = re.compile(
+    rf"(?i)H4\s+(?:OB|BRKR|breaker|order\s+block)[^0-9]*{_ETH_PRICE_RE}\s*[-–]\s*{_ETH_PRICE_RE}",
 )
-_H12_SFP_RE = re.compile(r"(?i)\bH12\s+(?:\w+\s+)?SFP\b")
-_H1_SFP_RE = re.compile(r"(?i)\bH1\s+(?:\w+\s+)?SFP\b")
+_H4_SFP_RE = re.compile(r"(?i)\bH4\s+(?:\w+\s+)?SFP\b")
+_M5_SFP_RE = re.compile(r"(?i)\bM5\s+(?:\w+\s+)?SFP\b")
 _GENERIC_SFP_RE = re.compile(r"(?i)\bSFP\b")
 _KEY_LEVEL_NAMES = (
     "Weekly Open",
@@ -80,11 +80,11 @@ class AuditFinding:
 
 
 CRITICAL_RETRY_CODES = frozenset({
-    "H1_OB_MISLABEL",
-    "H1_SFP_NOT_FOUND",
-    "H12_SFP_NOT_FOUND",
+    "M5_OB_MISLABEL",
+    "M5_SFP_NOT_FOUND",
+    "H4_SFP_NOT_FOUND",
     "INVALIDATED_SFP_CITED",
-    "JSON_H12_AS_H1_OB",
+    "JSON_H4_AS_M5_OB",
     "RETEST_STATUS_CONFLICT",
     "RANGE_BREAK_CONFLICT",
     "KEY_LEVEL_MISMATCH",
@@ -206,8 +206,8 @@ def _looks_like_fib_ratio(raw: str) -> bool:
         return False
 
 
-def _nearest_h1_ob(spot: float, order_blocks: list[OrderBlock]) -> OrderBlock | None:
-    """Pick the most relevant H1 OB: containing spot first, else nearest by range distance."""
+def _nearest_m5_ob(spot: float, order_blocks: list[OrderBlock]) -> OrderBlock | None:
+    """Pick the most relevant M5 OB: containing spot first, else nearest by range distance."""
     if not order_blocks:
         return None
     containing = [ob for ob in order_blocks if ob.low <= spot <= ob.high]
@@ -249,33 +249,33 @@ def sanitize_rationale(
     if zone_snap and zone_snap.primary_bearish:
         z = zone_snap.primary_bearish
         parts.append(
-            f"Primary H12 zone: bearish {z.low:,.2f}-{z.high:,.2f} (bias only)."
+            f"Primary H4 zone: bearish {z.low:,.2f}-{z.high:,.2f} (bias only)."
         )
     elif zone_snap and zone_snap.primary_bullish:
         z = zone_snap.primary_bullish
         parts.append(
-            f"Primary H12 zone: bullish {z.low:,.2f}-{z.high:,.2f} (bias only)."
+            f"Primary H4 zone: bullish {z.low:,.2f}-{z.high:,.2f} (bias only)."
         )
     retest_line = _retest_status_line(ctx)
     if retest_line:
         parts.append(retest_line)
-    if ctx.h12_sfps:
+    if ctx.h4_sfps:
         parts.append(
-            f"Recent valid H12 SFPs: {len(ctx.h12_sfps)} in snapshot window."
+            f"Recent valid H4 SFPs: {len(ctx.h4_sfps)} in snapshot window."
         )
     else:
-        parts.append("No valid H12 SFP in the recent window.")
-    if ctx.h1_sfps:
+        parts.append("No valid H4 SFP in the recent window.")
+    if ctx.m5_sfps:
         parts.append(
-            f"Recent valid H1 SFPs: {len(ctx.h1_sfps)} in snapshot window."
+            f"Recent valid M5 SFPs: {len(ctx.m5_sfps)} in snapshot window."
         )
     else:
-        parts.append("No valid H1 SFP in the recent window.")
-    nearest = _nearest_h1_ob(ctx.spot, ctx.order_blocks)
+        parts.append("No valid M5 SFP in the recent window.")
+    nearest = _nearest_m5_ob(ctx.spot, ctx.order_blocks)
     if nearest:
-        parts.append(f"Nearest detected H1 OB: {format_ob_with_fib(nearest)}.")
+        parts.append(f"Nearest detected M5 OB: {format_ob_with_fib(nearest)}.")
     else:
-        parts.append("No detected H1 OB in lookback — wait for H1 fib retest.")
+        parts.append("No detected M5 OB in lookback — wait for M5 fib retest.")
     parts.append("No trade until LTF structure aligns with programmatic context.")
     return " ".join(parts)
 
@@ -386,7 +386,7 @@ def refine_suggestion(
             market_context, downgrade_reason=reason_codes or None
         )
         suggestion = Suggestion.no_trade(llm_body)
-        suggestion.decision_charts = ["H12"]
+        suggestion.decision_charts = ["H4"]
         downgraded = True
         sanitized = True
     elif findings_require_refine(
@@ -395,7 +395,7 @@ def refine_suggestion(
     ):
         llm_body = sanitize_rationale(market_context)
         suggestion = Suggestion.no_trade(llm_body)
-        suggestion.decision_charts = ["H12"]
+        suggestion.decision_charts = ["H4"]
         sanitized = True
 
     return RefineResult(
@@ -436,7 +436,7 @@ def _zone_match(
     return None
 
 
-def _h1_ob_match(low: float, high: float, ctx: MarketContext) -> bool:
+def _m5_ob_match(low: float, high: float, ctx: MarketContext) -> bool:
     lo, hi = min(low, high), max(low, high)
     for ob in ctx.order_blocks:
         if bounds_close(lo, hi, ob.low, ob.high):
@@ -445,11 +445,10 @@ def _h1_ob_match(low: float, high: float, ctx: MarketContext) -> bool:
 
 
 def _mentions_positive_sfp(text: str, timeframe: str) -> bool:
-    window_start = 0
-    if timeframe == "H12":
-        pattern = _H12_SFP_RE
+    if timeframe == "H4":
+        pattern = _H4_SFP_RE
     else:
-        pattern = _H1_SFP_RE
+        pattern = _M5_SFP_RE
     for match in pattern.finditer(text):
         start = match.start()
         prefix = text[max(0, start - 40):start]
@@ -475,63 +474,63 @@ def _mentions_invalidated_sfp(text: str, ctx: MarketContext) -> AuditFinding | N
                     f"{event.direction}) but it was live-invalidated in market context"
                 ),
             )
-    if _mentions_positive_sfp(text, "H12") and not ctx.h12_sfps:
+    if _mentions_positive_sfp(text, "H4") and not ctx.h4_sfps:
         for event in ctx.live_invalidated_sfps:
-            if event.timeframe == "H12":
+            if event.timeframe in ("H4", "H12"):
                 return AuditFinding(
                     code="INVALIDATED_SFP_CITED",
                     message=(
-                        f"Text cites H12 SFP but only invalidated H12 SFP exists "
+                        f"Text cites H4 SFP but only invalidated H4 SFP exists "
                         f"(@ {event.swept_level:,.2f})"
                     ),
                 )
-    if _mentions_positive_sfp(text, "H1") and not ctx.h1_sfps:
+    if _mentions_positive_sfp(text, "M5") and not ctx.m5_sfps:
         for event in ctx.live_invalidated_sfps:
-            if event.timeframe == "H1":
+            if event.timeframe in ("M5", "H1"):
                 return AuditFinding(
                     code="INVALIDATED_SFP_CITED",
                     message=(
-                        f"Text cites H1 SFP but only invalidated H1 SFP exists "
+                        f"Text cites M5 SFP but only invalidated M5 SFP exists "
                         f"(@ {event.swept_level:,.2f})"
                     ),
                 )
     return None
 
 
-def _check_h1_ob_bounds(text: str, ctx: MarketContext) -> list[AuditFinding]:
+def _check_m5_ob_bounds(text: str, ctx: MarketContext) -> list[AuditFinding]:
     findings: list[AuditFinding] = []
-    for match in _H1_OB_RE.finditer(text):
+    for match in _M5_OB_RE.finditer(text):
         raw_low, raw_high = match.group(1), match.group(2)
         if _looks_like_fib_ratio(raw_low) or _looks_like_fib_ratio(raw_high):
             continue
         low = _parse_price(raw_low)
         high = _parse_price(raw_high)
-        if _h1_ob_match(low, high, ctx):
+        if _m5_ob_match(low, high, ctx):
             continue
-        h12_match = _zone_match(
+        h4_match = _zone_match(
             low,
             high,
             ctx.htf_zones,
             zone_types={"order_block", "breaker"},
         )
-        if h12_match is not None:
+        if h4_match is not None:
             findings.append(
                 AuditFinding(
-                    code="H1_OB_MISLABEL",
+                    code="M5_OB_MISLABEL",
                     message=(
-                        f"H1 OB {low:,.2f}-{high:,.2f} matches H12 "
-                        f"{h12_match.zone_type.upper()} {h12_match.low:,.2f}-"
-                        f"{h12_match.high:,.2f} — likely H12 zone mislabeled as H1 OB"
+                        f"M5 OB {low:,.2f}-{high:,.2f} matches H4 "
+                        f"{h4_match.zone_type.upper()} {h4_match.low:,.2f}-"
+                        f"{h4_match.high:,.2f} — likely H4 zone mislabeled as M5 OB"
                     ),
                 )
             )
         else:
             findings.append(
                 AuditFinding(
-                    code="H1_OB_NOT_FOUND",
+                    code="M5_OB_NOT_FOUND",
                     message=(
-                        f"H1 OB {low:,.2f}-{high:,.2f} cited in text but no matching "
-                        f"detected H1 order block in snapshot"
+                        f"M5 OB {low:,.2f}-{high:,.2f} cited in text but no matching "
+                        f"detected M5 order block in snapshot"
                     ),
                     severity="warning",
                 )
@@ -539,9 +538,9 @@ def _check_h1_ob_bounds(text: str, ctx: MarketContext) -> list[AuditFinding]:
     return findings
 
 
-def _check_h12_zone_bounds(text: str, ctx: MarketContext) -> list[AuditFinding]:
+def _check_h4_zone_bounds(text: str, ctx: MarketContext) -> list[AuditFinding]:
     findings: list[AuditFinding] = []
-    for match in _H12_ZONE_RE.finditer(text):
+    for match in _H4_ZONE_RE.finditer(text):
         raw_low, raw_high = match.group(1), match.group(2)
         if _looks_like_fib_ratio(raw_low) or _looks_like_fib_ratio(raw_high):
             continue
@@ -551,9 +550,9 @@ def _check_h12_zone_bounds(text: str, ctx: MarketContext) -> list[AuditFinding]:
             continue
         findings.append(
             AuditFinding(
-                code="H12_ZONE_NOT_FOUND",
+                code="H4_ZONE_NOT_FOUND",
                 message=(
-                    f"H12 zone {low:,.2f}-{high:,.2f} cited but no matching H12 OB/BRKR "
+                    f"H4 zone {low:,.2f}-{high:,.2f} cited but no matching H4 OB/BRKR "
                     f"in snapshot"
                 ),
                 severity="warning",
@@ -564,18 +563,18 @@ def _check_h12_zone_bounds(text: str, ctx: MarketContext) -> list[AuditFinding]:
 
 def _check_sfp_presence(text: str, ctx: MarketContext) -> list[AuditFinding]:
     findings: list[AuditFinding] = []
-    if _mentions_positive_sfp(text, "H12") and not ctx.h12_sfps:
+    if _mentions_positive_sfp(text, "H4") and not ctx.h4_sfps:
         findings.append(
             AuditFinding(
-                code="H12_SFP_NOT_FOUND",
-                message="Text cites H12 SFP but snapshot has no recent valid H12 SFPs",
+                code="H4_SFP_NOT_FOUND",
+                message="Text cites H4 SFP but snapshot has no recent valid H4 SFPs",
             )
         )
-    if _mentions_positive_sfp(text, "H1") and not ctx.h1_sfps:
+    if _mentions_positive_sfp(text, "M5") and not ctx.m5_sfps:
         findings.append(
             AuditFinding(
-                code="H1_SFP_NOT_FOUND",
-                message="Text cites H1 SFP but snapshot has no recent valid H1 SFPs",
+                code="M5_SFP_NOT_FOUND",
+                message="Text cites M5 SFP but snapshot has no recent valid M5 SFPs",
             )
         )
     return findings
@@ -688,26 +687,26 @@ def _check_rationale_vs_json(text: str, suggestion: Suggestion | None) -> list[A
     return findings
 
 
-def _check_h12_as_order_block_json(ctx: MarketContext, suggestion: Suggestion | None) -> AuditFinding | None:
+def _check_h4_as_order_block_json(ctx: MarketContext, suggestion: Suggestion | None) -> AuditFinding | None:
     if suggestion is None or suggestion.action == "no_trade" or not suggestion.order_block:
         return None
     ob = suggestion.order_block
     direction = "bullish" if suggestion.action in ("spot_buy", "deriv_buy") else "bearish"
-    match = find_matching_h1_ob(ob, ctx.order_blocks, direction)  # type: ignore[arg-type]
+    match = find_matching_entry_ob(ob, ctx.order_blocks, direction)  # type: ignore[arg-type]
     if match is not None:
         return None
-    h12_match = _zone_match(
+    h4_match = _zone_match(
         float(ob["low"]),
         float(ob["high"]),
         [z for z in ctx.htf_zones if z.zone_type == "order_block" and not z.mitigated],
         direction=direction,
     )
-    if h12_match is not None:
+    if h4_match is not None:
         return AuditFinding(
-            code="JSON_H12_AS_H1_OB",
+            code="JSON_H4_AS_M5_OB",
             message=(
-                f"order_block JSON {ob['low']}-{ob['high']} matches H12 OB "
-                f"({h12_match.low:,.2f}-{h12_match.high:,.2f}) not H1 OB"
+                f"order_block JSON {ob['low']}-{ob['high']} matches H4 OB "
+                f"({h4_match.low:,.2f}-{h4_match.high:,.2f}) not M5 OB"
             ),
         )
     return None
@@ -723,8 +722,8 @@ def verify_deterministic(
         return []
 
     findings: list[AuditFinding] = []
-    findings.extend(_check_h1_ob_bounds(text, ctx))
-    findings.extend(_check_h12_zone_bounds(text, ctx))
+    findings.extend(_check_m5_ob_bounds(text, ctx))
+    findings.extend(_check_h4_zone_bounds(text, ctx))
     findings.extend(_check_sfp_presence(text, ctx))
     findings.extend(_check_key_levels(text, ctx))
     findings.extend(_check_rationale_vs_json(text, suggestion))
@@ -733,7 +732,7 @@ def verify_deterministic(
         lambda: _mentions_invalidated_sfp(text, ctx),
         lambda: _check_retest_status(text, ctx),
         lambda: _check_range_break(text, ctx),
-        lambda: _check_h12_as_order_block_json(ctx, suggestion),
+        lambda: _check_h4_as_order_block_json(ctx, suggestion),
     ):
         result = checker()
         if result is not None:
@@ -757,8 +756,8 @@ Rules:
 - Only flag HALLUCINATION when the text clearly contradicts the market context or visible chart overlays.
 - Use UNVERIFIED for subjective or uncheckable claims (trade quality, future price).
 - Do NOT evaluate whether the trade is good — only factual accuracy.
-- H12 OB/BRKR are HTF zones; H1 OB is separate for entries.
-- Only valid SFPs are those listed under Recent H12/H1 SFPs in context (not Live-invalidated).
+- H4 OB/BRKR are HTF zones; M5 OB is separate for entries.
+- Only valid SFPs are those listed under Recent H4/M5 SFPs in context (not Live-invalidated).
 
 Return JSON only:
 {"claims":[{"claim":"...","verdict":"VERIFIED|UNVERIFIED|HALLUCINATION","reason":"..."}]}
@@ -939,8 +938,8 @@ def audit_hourly_cycle(
 _CHAT_CRITICAL_CODES = frozenset({
     "LLM_HALLUCINATION",
     "KEY_LEVEL_MISMATCH",
-    "H1_OB_MISLABEL",
-    "JSON_H12_AS_H1_OB",
+    "M5_OB_MISLABEL",
+    "JSON_H4_AS_M5_OB",
 })
 
 

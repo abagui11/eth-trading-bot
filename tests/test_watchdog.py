@@ -27,12 +27,12 @@ def _bar(ts: str, o: float, h: float, l: float, c: float) -> dict:
     return {"ts": ts, "open": o, "high": h, "low": l, "close": c, "volume": 100.0}
 
 
-def _h12_bars() -> list[dict]:
+def _h4_bars() -> list[dict]:
     base = datetime(2026, 6, 1, 0, 0, tzinfo=timezone.utc)
     bars = []
     price = 2400.0
     for i in range(40):
-        ts = (base + timedelta(hours=12 * i)).strftime("%Y-%m-%dT%H:%M:%SZ")
+        ts = (base + timedelta(hours=4 * i)).strftime("%Y-%m-%dT%H:%M:%SZ")
         swing = 30 if i % 4 == 0 else -20
         price += swing
         bars.append(_bar(ts, price, price + 15, price - 15, price))
@@ -65,7 +65,7 @@ def _bullish_ctx(spot: float) -> MarketContext:
     ob = _bullish_ob()
     z_low, z_high = fib_zone_bounds("bullish", ob.low, ob.high)
     assert z_low <= spot <= z_high or spot == fib_level("bullish", ob.low, ob.high, 0.25)
-    h12_zone = HTFZone(
+    h4_zone = HTFZone(
         "order_block",
         "bullish",
         ob.low,
@@ -74,8 +74,8 @@ def _bullish_ctx(spot: float) -> MarketContext:
     )
     snap = ZoneSnapshot(
         spot=spot,
-        zones_containing_price=[h12_zone],
-        primary_bullish=h12_zone,
+        zones_containing_price=[h4_zone],
+        primary_bullish=h4_zone,
         primary_bearish=None,
         nearest_bearish_above=None,
         nearest_bullish_below=None,
@@ -90,8 +90,8 @@ def _bullish_ctx(spot: float) -> MarketContext:
         zone_snapshot=snap,
         setup_state=None,
         order_blocks=[ob],
-        htf_zones=[h12_zone],
-        setup_tags=["h1_ob_bullish_in_fib"],
+        htf_zones=[h4_zone],
+        setup_tags=["m5_ob_bullish_in_fib"],
     )
 
 
@@ -100,14 +100,14 @@ class WatchdogTriggerTests(unittest.TestCase):
         ob = _bullish_ob()
         spot = fib_level("bullish", ob.low, ob.high, 0.25)
         ctx = _bullish_ctx(spot)
-        h1 = [_bar("2026-06-30T18:00:00Z", spot, spot + 5, spot - 5, spot)]
-        triggers = evaluate_triggers(ctx, h1, positions=[])
-        self.assertTrue(any(t.name == "h1_ob_fib_long" for t in triggers))
+        m5 = [_bar("2026-06-30T18:00:00Z", spot, spot + 5, spot - 5, spot)]
+        triggers = evaluate_triggers(ctx, m5, positions=[])
+        self.assertTrue(any(t.name == "m5_ob_fib_long" for t in triggers))
 
     def test_evaluate_short_retest_trigger(self) -> None:
         ob = _bearish_ob()
         spot = 2610.0
-        h12_zone = HTFZone(
+        h4_zone = HTFZone(
             "order_block",
             "bearish",
             ob.low,
@@ -116,9 +116,9 @@ class WatchdogTriggerTests(unittest.TestCase):
         )
         snap = ZoneSnapshot(
             spot=spot,
-            zones_containing_price=[h12_zone],
+            zones_containing_price=[h4_zone],
             primary_bullish=None,
-            primary_bearish=h12_zone,
+            primary_bearish=h4_zone,
             nearest_bearish_above=None,
             nearest_bullish_below=None,
             bearish_retest_low=2585.0,
@@ -132,11 +132,11 @@ class WatchdogTriggerTests(unittest.TestCase):
             zone_snapshot=snap,
             setup_state=None,
             order_blocks=[ob],
-            htf_zones=[h12_zone],
-            setup_tags=["short_trigger_retest", "h1_ob_bearish_in_fib"],
+            htf_zones=[h4_zone],
+            setup_tags=["short_trigger_retest", "m5_ob_bearish_in_fib"],
         )
-        h1 = [_bar("2026-06-30T18:00:00Z", spot, spot + 5, spot - 5, spot)]
-        triggers = evaluate_triggers(ctx, h1, positions=[])
+        m5 = [_bar("2026-06-30T18:00:00Z", spot, spot + 5, spot - 5, spot)]
+        triggers = evaluate_triggers(ctx, m5, positions=[])
         self.assertTrue(any(t.name == "short_trigger_retest" for t in triggers))
 
     def test_build_suggestion_passes_validation(self) -> None:
@@ -144,7 +144,7 @@ class WatchdogTriggerTests(unittest.TestCase):
         spot = fib_level("bullish", ob.low, ob.high, 0.25)
         ctx = _bullish_ctx(spot)
         trigger = WatchdogTrigger(
-            name="h1_ob_fib_long",
+            name="m5_ob_fib_long",
             direction="bullish",
             ob=ob,
             reason="test",
@@ -152,21 +152,21 @@ class WatchdogTriggerTests(unittest.TestCase):
             deploy_pct=0.125,
             entry_tranche="0.25",
         )
-        suggestion = build_suggestion(trigger, ctx, _h12_bars())
+        suggestion = build_suggestion(trigger, ctx, _h4_bars())
         self.assertEqual(suggestion.action, "spot_buy")
         self.assertIsNotNone(suggestion.risk_reward)
         self.assertGreaterEqual(suggestion.risk_reward or 0, 1.0)
-        self.assertIn("[Watchdog — h1_ob_fib_long]", suggestion.rationale)
-        self.assertIn("H12 bullish zone", suggestion.rationale)
-        self.assertIn("H1 OB coincides with H12 OB", suggestion.rationale)
+        self.assertIn("[Watchdog — m5_ob_fib_long]", suggestion.rationale)
+        self.assertIn("H4 bullish zone", suggestion.rationale)
+        self.assertIn("M5 OB coincides with H4 OB", suggestion.rationale)
         self.assertEqual(suggestion.entry_tranche, "0.25")
 
     def test_build_rationale_includes_signals_block(self) -> None:
-        spot = 2408.0
+        spot = fib_level("bullish", 2380.0, 2420.0, 0.25)
         ctx = _bullish_ctx(spot)
-        ctx.alerts.append("Price in bullish H1 OB fib zone")
+        ctx.alerts.append("Price in bullish M5 OB fib zone")
         trigger = WatchdogTrigger(
-            name="h1_ob_fib_long",
+            name="m5_ob_fib_long",
             direction="bullish",
             ob=_bullish_ob(),
             reason="Aligned long setup",
@@ -178,12 +178,13 @@ class WatchdogTriggerTests(unittest.TestCase):
         self.assertIn("Aligned long setup", rationale)
 
     def test_htf_conflict_blocks_long(self) -> None:
-        spot = 2408.0
+        ob = _bullish_ob()
+        spot = fib_level("bullish", ob.low, ob.high, 0.25)
         ctx = _bullish_ctx(spot)
         ctx.setup_tags.append("htf_zone_conflict")
-        h1 = [_bar("2026-06-30T18:00:00Z", spot, spot + 5, spot - 5, spot)]
-        triggers = evaluate_triggers(ctx, h1, positions=[])
-        self.assertFalse(any(t.name == "h1_ob_fib_long" for t in triggers))
+        m5 = [_bar("2026-06-30T18:00:00Z", spot, spot + 5, spot - 5, spot)]
+        triggers = evaluate_triggers(ctx, m5, positions=[])
+        self.assertFalse(any(t.name == "m5_ob_fib_long" for t in triggers))
 
 
 class WatchdogCooldownTests(unittest.TestCase):
@@ -199,7 +200,7 @@ class WatchdogCooldownTests(unittest.TestCase):
 
     def test_cooldown_blocks_repeat(self) -> None:
         trigger = WatchdogTrigger(
-            name="h1_ob_fib_long",
+            name="m5_ob_fib_long",
             direction="bullish",
             ob=_bullish_ob(),
             reason="test",
@@ -222,7 +223,7 @@ class WatchdogNotifyTests(unittest.TestCase):
             stop_loss=2350.0,
             take_profits=[2500.0],
             risk_reward=2.0,
-            rationale="[Watchdog — h1_ob_fib_long]\n\nSetup.",
+            rationale="[Watchdog — m5_ob_fib_long]\n\nSetup.",
         )
         caption = build_caption(suggestion)
         self.assertTrue(caption.startswith("WATCHDOG — SPOT_BUY"))

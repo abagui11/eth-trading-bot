@@ -10,7 +10,7 @@ import ledger
 import paper
 import research
 
-from dashboard.charts import h12_marked_path
+from dashboard.charts import h4_marked_path
 from dashboard.performance import build_performance, _score_badge
 from dashboard.status import format_agent_status
 from macro.context import macro_payload_for_dashboard
@@ -41,13 +41,13 @@ def get_status_payload() -> dict[str, Any]:
     verdict = None
     if status.get("cycle_id"):
         verdict = audit.get_verdict_by_cycle_id(str(status["cycle_id"]))
-    chart_path = h12_marked_path((snapshot or {}).get("marked_chart_paths"))
+    chart_path = h4_marked_path((snapshot or {}).get("marked_chart_paths"))
     return {
         **status,
         "spot": spot,
         "chart_read_score": verdict.get("score") if verdict else None,
         "score_badge": _score_badge(verdict.get("score") if verdict else None),
-        "h12_chart_url": (
+        "h4_chart_url": (
             f"/api/chart/{status['cycle_id']}" if chart_path and status.get("cycle_id") else None
         ),
     }
@@ -94,7 +94,7 @@ def get_cycle_detail(cycle_id: str) -> dict[str, Any] | None:
         "snapshot": (snapshot or {}).get("snapshot"),
         "suggestion": (snapshot or {}).get("suggestion"),
         "verdict": verdict,
-        "h12_chart_url": f"/api/chart/{cycle_id}" if h12_marked_path(marked) else None,
+        "h4_chart_url": f"/api/chart/{cycle_id}" if h4_marked_path(marked) else None,
     }
 
 

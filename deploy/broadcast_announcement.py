@@ -49,14 +49,14 @@ def _load_suggestion(cycle_id: str) -> Suggestion:
 
 def _regenerate_chart(suggestion: Suggestion, cycle_id: str) -> str:
     """Re-render annotated chart with current charts.py (fixes broken PNG on disk)."""
-    h1_bars = research.get_ohlc("H1")
+    m5_bars = research.get_ohlc("M5")
     render_cycle = f"{cycle_id}_resent"
-    h1_stub = str(config.CHARTS_DIR / f"{cycle_id}_H1.png")
+    m5_stub = str(config.CHARTS_DIR / f"{cycle_id}_M5.png")
     return charts.annotate_chart(
-        h1_stub,
+        m5_stub,
         suggestion,
         render_cycle,
-        h1_bars=h1_bars,
+        m5_bars=m5_bars,
     )
 
 

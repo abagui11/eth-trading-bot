@@ -226,7 +226,7 @@ def answer(user_message: str) -> str:
     text_context = f"{text_context}\n\nUser question: {user_message}"
 
     live_chart_paths: dict[str, str] = {}
-    for tf in ("H12", "H1"):
+    for tf in ("H4", "M5"):
         path = snapshot_charts.get(tf)
         if path and Path(path).exists():
             live_chart_paths[tf] = path

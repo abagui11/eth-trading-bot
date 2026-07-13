@@ -34,7 +34,8 @@ except ImportError:  # pragma: no cover
 
 RANGE_STATE_KEY = "range_24h_announced"
 SFP_MAX_AGE_HOURS = 18
-H1_SFP_MAX_BARS = 18
+M5_SFP_MAX_BARS = 216  # ~18h of M5 bars
+M5_OB_LOOKBACK = 240  # ~20h on M5 (H1 used lookback 60 ≈ 2.5d wall-clock scaled down)
 
 
 @dataclass
@@ -46,14 +47,23 @@ class MarketContext:
     zone_snapshot: ZoneSnapshot | None
     setup_state: SetupState | None
     alerts: list[str] = field(default_factory=list)
-    h12_sfps: list[SFPEvent] = field(default_factory=list)
-    h1_sfps: list[SFPEvent] = field(default_factory=list)
+    h4_sfps: list[SFPEvent] = field(default_factory=list)
+    m5_sfps: list[SFPEvent] = field(default_factory=list)
     live_invalidated_sfps: list[SFPEvent] = field(default_factory=list)
     order_blocks: list[OrderBlock] = field(default_factory=list)
     htf_zones: list[HTFZone] = field(default_factory=list)
     key_levels_near: list[KeyLevel] = field(default_factory=list)
     setup_tags: list[str] = field(default_factory=list)
     summary_text: str = ""
+
+    # Backward-compatible aliases for older snapshot / test code.
+    @property
+    def h12_sfps(self) -> list[SFPEvent]:
+        return self.h4_sfps
+
+    @property
+    def h1_sfps(self) -> list[SFPEvent]:
+        return self.m5_sfps
 
     def to_prompt_block(self) -> str:
         return self.summary_text
@@ -118,10 +128,10 @@ def _bars_since_extreme(h1_bars: list[dict], field_name: str) -> tuple[int, floa
     return bars_ago, extreme
 
 
-def _htf_bearish_bias(h12_bars: list[dict], zone_snap: ZoneSnapshot) -> bool:
-    if len(h12_bars) < 20:
+def _htf_bearish_bias(h4_bars: list[dict], zone_snap: ZoneSnapshot) -> bool:
+    if len(h4_bars) < 20:
         return zone_snap.primary_bearish is not None
-    closes = [float(b["close"]) for b in h12_bars[-20:]]
+    closes = [float(b["close"]) for b in h4_bars[-20:]]
     mid = len(closes) // 2
     first_avg = sum(closes[:mid]) / mid
     second_avg = sum(closes[mid:]) / (len(closes) - mid)
@@ -140,12 +150,12 @@ def _fib_position_label(spot: float, z_low: float, z_high: float) -> str:
     return "inside"
 
 
-def _format_h12_zone_fib(zone: HTFZone) -> str:
+def _format_htf_zone_fib(zone: HTFZone) -> str:
     z_low, z_high = fib_zone_bounds(zone.direction, zone.low, zone.high)
     return f"fib 0.25-0.50 entry band: {z_low:,.2f}-{z_high:,.2f}"
 
 
-def _h1_ob_overlaps_h12(ob: OrderBlock, htf_zones: list[HTFZone]) -> HTFZone | None:
+def _m5_ob_overlaps_h4(ob: OrderBlock, htf_zones: list[HTFZone]) -> HTFZone | None:
     for zone in htf_zones:
         if zone.mitigated or zone.zone_type != "order_block":
             continue
@@ -170,20 +180,23 @@ def _format_sfp(event: SFPEvent) -> str:
 
 
 def build_market_context(
-    h12_bars: list[dict],
     h4_bars: list[dict],
     h1_bars: list[dict],
+    m5_bars: list[dict],
     daily_bars: list[dict] | None = None,
     *,
     spot_override: float | None = None,
 ) -> MarketContext:
-    """Compute ICT signals and range alerts from live OHLC."""
+    """Compute ICT signals and range alerts from live OHLC (H4 / H1 / M5)."""
     alerts: list[str] = []
     setup_tags: list[str] = []
     spot = float(spot_override) if spot_override is not None else (
-        float(h1_bars[-1]["close"]) if h1_bars else 0.0
+        float(m5_bars[-1]["close"]) if m5_bars else (
+            float(h1_bars[-1]["close"]) if h1_bars else 0.0
+        )
     )
 
+    # 24h range stays on H1 (24 bars = 24h).
     range_24h = compute_range_24h(h1_bars)
     is_ranging = bool(range_24h and range_24h.is_ranging)
     range_break: str | None = None
@@ -234,54 +247,53 @@ def build_market_context(
         if is_ranging:
             setup_tags.append("ranging")
 
-    h12_sfps = detect_sfps(h12_bars, timeframe="H12")
-    h1_sfps = detect_sfps(h1_bars, timeframe="H1")
-    recent_h12, inv_h12 = _filter_recent_sfps(h12_sfps, spot=spot, max_age_hours=36)
-    recent_h1, inv_h1 = _filter_recent_sfps(
-        h1_sfps,
+    h4_sfps = detect_sfps(h4_bars, timeframe="H4")
+    m5_sfps = detect_sfps(m5_bars, timeframe="M5")
+    recent_h4, inv_h4 = _filter_recent_sfps(h4_sfps, spot=spot, max_age_hours=36)
+    recent_m5, inv_m5 = _filter_recent_sfps(
+        m5_sfps,
         spot=spot,
         max_age_hours=SFP_MAX_AGE_HOURS,
-        max_bars=H1_SFP_MAX_BARS,
+        max_bars=M5_SFP_MAX_BARS,
     )
-    live_invalidated = inv_h12 + inv_h1
+    live_invalidated = inv_h4 + inv_m5
 
-    for event in recent_h12:
-        setup_tags.append(f"h12_sfp_{event.direction}")
-    for event in recent_h1:
-        setup_tags.append(f"h1_sfp_{event.direction}")
+    for event in recent_h4:
+        setup_tags.append(f"h4_sfp_{event.direction}")
+    for event in recent_m5:
+        setup_tags.append(f"m5_sfp_{event.direction}")
 
-    htf_zones = detect_htf_zones(h12_bars)
+    htf_zones = detect_htf_zones(h4_bars)
     zone_snap = resolve_zones(spot, htf_zones)
-    bearish_bias = _htf_bearish_bias(h12_bars, zone_snap)
+    bearish_bias = _htf_bearish_bias(h4_bars, zone_snap)
 
-    recent_bearish_h1 = any(e.direction == "bearish" for e in recent_h1)
+    recent_bearish_m5 = any(e.direction == "bearish" for e in recent_m5)
     setup_state, setup_alerts, setup_state_tags = update_bearish_retest_state(
         spot=spot,
         range_high_24h=range_24h.high if range_24h else None,
         retest_low=zone_snap.bearish_retest_low,
         retest_high=zone_snap.bearish_retest_high,
         htf_bearish_bias=bearish_bias,
-        recent_bearish_h1_sfp=recent_bearish_h1,
+        recent_bearish_m5_sfp=recent_bearish_m5,
     )
     alerts.extend(setup_alerts)
     setup_tags.extend(setup_state_tags)
 
-    # Canonical zone alerts (replace noisy multi-OB dumps)
     if zone_snap.primary_bearish and zone_snap.primary_bullish:
         alerts.append(
-            "STRUCTURE CONFLICT: price inside both bullish and bearish H12 zones — "
+            "STRUCTURE CONFLICT: price inside both bullish and bearish H4 zones — "
             "require clear LTF+HTF alignment; do not cite only the bullish OB"
         )
         setup_tags.append("htf_zone_conflict")
     elif zone_snap.primary_bearish:
         low, high = zone_snap.bearish_retest_low, zone_snap.bearish_retest_high
         alerts.append(
-            f"Primary H12 zone: BEARISH {zone_snap.primary_bearish.low:,.2f}-"
+            f"Primary H4 zone: BEARISH {zone_snap.primary_bearish.low:,.2f}-"
             f"{zone_snap.primary_bearish.high:,.2f} | supply retest {low:,.2f}-{high:,.2f}"
         )
     elif zone_snap.primary_bullish:
         alerts.append(
-            f"Primary H12 zone: BULLISH {zone_snap.primary_bullish.low:,.2f}-"
+            f"Primary H4 zone: BULLISH {zone_snap.primary_bullish.low:,.2f}-"
             f"{zone_snap.primary_bullish.high:,.2f}"
         )
 
@@ -297,31 +309,31 @@ def build_market_context(
         )
         setup_tags.append("retest_already_tagged")
 
-    order_blocks = find_order_blocks(h1_bars)
+    order_blocks = find_order_blocks(m5_bars, lookback=min(M5_OB_LOOKBACK, len(m5_bars)))
     for ob in order_blocks:
         z_low, z_high = fib_zone_bounds(ob.direction, ob.low, ob.high)
         in_full_ob = ob.low <= spot <= ob.high
         in_fib = price_in_ob(spot, ob)
-        h12_match = _h1_ob_overlaps_h12(ob, htf_zones)
+        h4_match = _m5_ob_overlaps_h4(ob, htf_zones)
         if in_fib:
             side = "short" if ob.direction == "bearish" else "long"
             overlap = (
-                f" (overlaps H12 OB {h12_match.low:,.2f}-{h12_match.high:,.2f})"
-                if h12_match
+                f" (overlaps H4 OB {h4_match.low:,.2f}-{h4_match.high:,.2f})"
+                if h4_match
                 else ""
             )
             alerts.append(
-                f"Price in {ob.direction} H1 OB entry band {z_low:,.2f}-{z_high:,.2f}"
+                f"Price in {ob.direction} M5 OB entry band {z_low:,.2f}-{z_high:,.2f}"
                 f"{overlap} — potential {side} setup"
             )
-            setup_tags.append(f"h1_ob_{ob.direction}_in_fib")
+            setup_tags.append(f"m5_ob_{ob.direction}_in_fib")
         elif in_full_ob:
             fib_pos = _fib_position_label(spot, z_low, z_high)
             alerts.append(
-                f"Price inside {ob.direction} H1 OB ({ob.low:,.2f}-{ob.high:,.2f}) "
+                f"Price inside {ob.direction} M5 OB ({ob.low:,.2f}-{ob.high:,.2f}) "
                 f"but {fib_pos} entry band ({z_low:,.2f}-{z_high:,.2f}) — wait for fib retest"
             )
-            setup_tags.append(f"h1_ob_{ob.direction}_no_fib")
+            setup_tags.append(f"m5_ob_{ob.direction}_no_fib")
 
     key_levels_near: list[KeyLevel] = []
     if daily_bars:
@@ -377,23 +389,23 @@ def build_market_context(
         lines.append(phase_line)
 
     if zone_snap.zones_containing_price:
-        lines.append("Canonical H12 zones at price (structure/bias — NOT the H1 entry OB):")
+        lines.append("Canonical H4 zones at price (structure/bias — NOT the M5 entry OB):")
         for z in zone_snap.zones_containing_price:
-            lines.append(f"  - {format_zone(z)} | {_format_h12_zone_fib(z)}")
+            lines.append(f"  - {format_zone(z)} | {_format_htf_zone_fib(z)}")
 
     if order_blocks:
-        lines.append("Detected H1 order blocks (use these for order_block JSON + entries):")
+        lines.append("Detected M5 order blocks (use these for order_block JSON + entries):")
         for ob in order_blocks[-5:]:
-            overlap = _h1_ob_overlaps_h12(ob, htf_zones)
+            overlap = _m5_ob_overlaps_h4(ob, htf_zones)
             overlap_note = (
-                f" | overlaps H12 OB {overlap.low:,.2f}-{overlap.high:,.2f}"
+                f" | overlaps H4 OB {overlap.low:,.2f}-{overlap.high:,.2f}"
                 if overlap
-                else " | no H12 OB overlap"
+                else " | no H4 OB overlap"
             )
             in_fib = "spot IN fib" if price_in_ob(spot, ob) else "spot outside fib"
             lines.append(f"  - {format_ob_with_fib(ob)}{overlap_note} | {in_fib}")
     else:
-        lines.append("Detected H1 order blocks: none in lookback window")
+        lines.append("Detected M5 order blocks: none in lookback window")
 
     bullish_at_spot = [ob for ob in order_blocks if ob.direction == "bullish" and ob.low <= spot <= ob.high]
     bearish_at_spot = [ob for ob in order_blocks if ob.direction == "bearish" and ob.low <= spot <= ob.high]
@@ -403,9 +415,9 @@ def build_market_context(
         )
         if spot < z_low:
             lines.append(
-                f"CAUTION: spot inside H12 bullish OB but below H12 fib sweet spot "
+                f"CAUTION: spot inside H4 bullish OB but below H4 fib sweet spot "
                 f"({z_low:,.2f}-{z_high:,.2f}) — do NOT call this a fib entry; "
-                f"cite H12 OB for bias only unless a separate H1 OB fib entry exists"
+                f"cite H4 OB for bias only unless a separate M5 OB fib entry exists"
             )
     if zone_snap.primary_bearish and not any(price_in_ob(spot, ob) for ob in bearish_at_spot):
         z_low, z_high = fib_zone_bounds(
@@ -413,8 +425,8 @@ def build_market_context(
         )
         if spot > z_high:
             lines.append(
-                f"CAUTION: spot inside H12 bearish OB but above H12 fib sweet spot "
-                f"({z_low:,.2f}-{z_high:,.2f}) — cite H12 OB for bias only"
+                f"CAUTION: spot inside H4 bearish OB but above H4 fib sweet spot "
+                f"({z_low:,.2f}-{z_high:,.2f}) — cite H4 OB for bias only"
             )
 
     if zone_snap.bearish_retest_low is not None:
@@ -434,17 +446,17 @@ def build_market_context(
         lines.append("Alerts:")
         lines.extend(f"  - {a}" for a in alerts)
 
-    if recent_h12:
-        lines.append(f"Recent H12 SFPs (last {SFP_MAX_AGE_HOURS}h window):")
-        lines.extend(f"  - {_format_sfp(e)}" for e in recent_h12)
+    if recent_h4:
+        lines.append(f"Recent H4 SFPs (last {SFP_MAX_AGE_HOURS}h window):")
+        lines.extend(f"  - {_format_sfp(e)}" for e in recent_h4)
     else:
-        lines.append("Recent H12 SFPs: none in time window")
+        lines.append("Recent H4 SFPs: none in time window")
 
-    if recent_h1:
-        lines.append(f"Recent H1 SFPs (last {SFP_MAX_AGE_HOURS}h):")
-        lines.extend(f"  - {_format_sfp(e)}" for e in recent_h1)
+    if recent_m5:
+        lines.append(f"Recent M5 SFPs (last {SFP_MAX_AGE_HOURS}h):")
+        lines.extend(f"  - {_format_sfp(e)}" for e in recent_m5)
     else:
-        lines.append("Recent H1 SFPs: none in time window")
+        lines.append("Recent M5 SFPs: none in time window")
 
     if live_invalidated:
         lines.append("Live-invalidated SFPs (excluded — spot negated swept level):")
@@ -477,17 +489,17 @@ def build_market_context(
         [
             "",
             "Decision rules:",
-            "- H12 OB/BRKR boxes = HTF structure and bias in rationale. Never label them 'H1 OB'.",
-            "- order_block JSON + entries = H1 OB only (from 'Detected H1 order blocks' above).",
-            "- Entry must be on H1 OB fib tranches 0.25/0.50 or inside the 0.25–0.50 band unless action is no_trade.",
-            "- If H1 OB overlaps an H12 OB, say 'H1 OB coincides with H12 OB' — do not conflate.",
-            "- If only inside H12 OB (no H1 OB fib), default no_trade or wait for H1 fib retest.",
+            "- H4 OB/BRKR boxes = HTF structure and bias in rationale. Never label them 'M5 OB'.",
+            "- order_block JSON + entries = M5 OB only (from 'Detected M5 order blocks' above).",
+            "- Entry must be on M5 OB fib tranches 0.25/0.50 or inside the 0.25–0.50 band unless action is no_trade.",
+            "- If M5 OB overlaps an H4 OB, say 'M5 OB coincides with H4 OB' — do not conflate.",
+            "- If only inside H4 OB (no M5 OB fib), default no_trade or wait for M5 fib retest.",
             "- If retest status (rolling 24h) is FILLED, do NOT say price has not reached the retest zone.",
             "- Setup phase name records workflow history; retest status (rolling 24h) is recomputed each cycle — do not treat them as the same.",
             "- If setup state is bearish_retest_rejected or short_trigger_retest, strongly favor SHORT.",
             "- If HTF zone conflict, default no_trade unless LTF+HTF align clearly.",
-            "- Only cite SFPs listed under Recent H12/H1 SFPs; do not cite Live-invalidated SFPs.",
-            "- Trades: structure_chart=H12, entry_chart=H1 unless exceptional.",
+            "- Only cite SFPs listed under Recent H4/M5 SFPs; do not cite Live-invalidated SFPs.",
+            "- Trades: structure_chart=H4, entry_chart=M5 unless exceptional.",
             "",
             "Use marked charts plus this context. Mention 24h range and setup state in rationale.",
         ]
@@ -501,8 +513,8 @@ def build_market_context(
         zone_snapshot=zone_snap,
         setup_state=setup_state,
         alerts=alerts,
-        h12_sfps=recent_h12,
-        h1_sfps=recent_h1,
+        h4_sfps=recent_h4,
+        m5_sfps=recent_m5,
         live_invalidated_sfps=live_invalidated,
         order_blocks=order_blocks,
         htf_zones=htf_zones,

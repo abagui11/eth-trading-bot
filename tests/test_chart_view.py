@@ -59,7 +59,7 @@ def _fake_market_context() -> MarketContext:
 
 def test_get_latest_chart_view_uses_output_chart(tmp_path, monkeypatch):
     _init_dbs(tmp_path, monkeypatch)
-    chart = config.CHARTS_DIR / "20260702T120000Z_H12_notrade.png"
+    chart = config.CHARTS_DIR / "20260702T120000Z_H4_notrade.png"
     chart.write_bytes(b"png")
 
     ledger.append(
@@ -73,7 +73,7 @@ def test_get_latest_chart_view_uses_output_chart(tmp_path, monkeypatch):
         "20260702T120000Z",
         _fake_market_context(),
         Suggestion.no_trade(rationale="No setup"),
-        {"H12": str(chart)},
+        {"H4": str(chart)},
     )
 
     view = chart_view.get_latest_chart_view()
@@ -81,13 +81,13 @@ def test_get_latest_chart_view_uses_output_chart(tmp_path, monkeypatch):
     assert view.cycle_id == "20260702T120000Z"
     assert view.chart_paths == [str(chart)]
     assert "24h range" in view.watch_summary
-    assert "H1 bearish OB" in view.watch_summary
+    assert "M5 bearish OB" in view.watch_summary
     assert "NO_TRADE" in view.caption.upper()
 
 
 def test_get_latest_chart_view_falls_back_to_marked_chart(tmp_path, monkeypatch):
     _init_dbs(tmp_path, monkeypatch)
-    marked = config.CHARTS_DIR / "20260702T130000Z_H12_marked.png"
+    marked = config.CHARTS_DIR / "20260702T130000Z_H4_marked.png"
     marked.write_bytes(b"png")
 
     ledger.append(
@@ -100,7 +100,7 @@ def test_get_latest_chart_view_falls_back_to_marked_chart(tmp_path, monkeypatch)
         "20260702T130000Z",
         _fake_market_context(),
         Suggestion.no_trade(rationale="Missing output chart"),
-        {"H12": str(marked)},
+        {"H4": str(marked)},
     )
 
     view = chart_view.get_latest_chart_view()

@@ -70,11 +70,14 @@ def update_bearish_retest_state(
     retest_low: float | None,
     retest_high: float | None,
     htf_bearish_bias: bool,
-    recent_bearish_h1_sfp: bool,
+    recent_bearish_m5_sfp: bool = False,
+    recent_bearish_h1_sfp: bool | None = None,
 ) -> tuple[SetupState, list[str], list[str]]:
     """
     Advance bearish retest setup state and return (state, alerts, setup_tags).
     """
+    if recent_bearish_h1_sfp is not None:
+        recent_bearish_m5_sfp = recent_bearish_h1_sfp
     alerts: list[str] = []
     tags: list[str] = []
     state = load_setup_state()
@@ -132,9 +135,9 @@ def update_bearish_retest_state(
                 f"tagging {state.tagged_high or high:,.2f} — favor SHORT if LTF aligns"
             )
             tags.append("bearish_retest_rejected")
-            if recent_bearish_h1_sfp:
+            if recent_bearish_m5_sfp:
                 alerts.append(
-                    "SHORT TRIGGER: bearish H1 SFP at resistance + retest rejection "
+                    "SHORT TRIGGER: bearish M5 SFP at resistance + retest rejection "
                     "(evaluate deriv_sell / spot_sell)"
                 )
                 tags.append("short_trigger_retest")

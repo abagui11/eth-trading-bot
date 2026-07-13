@@ -235,7 +235,7 @@ def entry_valid_at_price(
 
 
 def order_block_ref(ob: OrderBlock) -> str:
-    """Stable key for tranche / scale-in tracking on a detected H1 OB."""
+    """Stable key for tranche / scale-in tracking on a detected entry OB."""
     return f"{ob.direction}:{ob.displacement_ts}:{ob.low:.2f}:{ob.high:.2f}"
 
 
@@ -274,7 +274,7 @@ def order_block_dict_matches(
     *,
     min_overlap_ratio: float = 0.5,
 ) -> bool:
-    """True when JSON order_block aligns with a detected H1 OrderBlock."""
+    """True when JSON order_block aligns with a detected entry OrderBlock."""
     del min_overlap_ratio
     try:
         low = float(ob_dict["low"])
@@ -286,12 +286,12 @@ def order_block_dict_matches(
     return bounds_close(low, high, candidate.low, candidate.high)
 
 
-def find_matching_h1_ob(
+def find_matching_entry_ob(
     ob_dict: dict,
     order_blocks: list[OrderBlock],
     direction: Direction,
 ) -> OrderBlock | None:
-    """Best matching detected H1 OB for a trade's order_block field."""
+    """Best matching detected entry OB for a trade's order_block field."""
     matches = [
         ob
         for ob in order_blocks
@@ -302,6 +302,15 @@ def find_matching_h1_ob(
     return max(matches, key=lambda ob: ob.displacement_ts)
 
 
+def find_matching_h1_ob(
+    ob_dict: dict,
+    order_blocks: list[OrderBlock],
+    direction: Direction,
+) -> OrderBlock | None:
+    """Alias for ``find_matching_entry_ob`` (historical name)."""
+    return find_matching_entry_ob(ob_dict, order_blocks, direction)
+
+
 def format_ob_with_fib(ob: OrderBlock) -> str:
     """Single-line summary with fib entry band for prompts."""
     z_low, z_high = fib_zone_bounds(ob.direction, ob.low, ob.high)
@@ -309,7 +318,7 @@ def format_ob_with_fib(ob: OrderBlock) -> str:
     t2 = fib_level(ob.direction, ob.low, ob.high, ENTRY_FIB_HIGH)
     add = fib_level(ob.direction, ob.low, ob.high, ADD_FIB_LEVEL)
     return (
-        f"{ob.direction} H1 OB {ob.low:,.2f}-{ob.high:,.2f} "
+        f"{ob.direction} M5 OB {ob.low:,.2f}-{ob.high:,.2f} "
         f"(candle {ob.start_ts[:16]}, displacement {ob.displacement_ts[:16]}) "
         f"| entry band 0.25-0.50: {z_low:,.2f}-{z_high:,.2f} "
         f"| tranches @ {t1:,.2f} / {t2:,.2f} | add @ {add:,.2f}"

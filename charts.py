@@ -1,4 +1,4 @@
-"""Render candlestick charts and annotate H1 with trade levels."""
+"""Render candlestick charts and annotate M5 with trade levels."""
 
 from __future__ import annotations
 
@@ -256,7 +256,7 @@ def _draw_key_levels(ax, levels: list[KeyLevel], df: pd.DataFrame | None = None)
 
 
 def _draw_htf_zones(ax, df: pd.DataFrame, zones: list[HTFZone]) -> None:
-  """IMG-style H12 OB/breaker boxes projected onto the chart timeframe."""
+  """IMG-style H4 OB/breaker boxes projected onto the chart timeframe."""
   if not zones or df.empty:
     return
   for zone in zones:
@@ -299,7 +299,7 @@ def _draw_htf_zones(ax, df: pd.DataFrame, zones: list[HTFZone]) -> None:
     ax.text(
       left,
       float(zone.high),
-      f" H12 {label}",
+      f" H4 {label}",
       color=edge,
       fontsize=FONT_SIZE - 1,
       fontweight="bold",
@@ -377,11 +377,11 @@ def render_marked_charts(
     df = _to_mpf_df(bars)
     visible_levels_cache[tf] = _visible_key_levels(key_levels, df)
     path = out_dir / f"{cycle_id}_{tf}_marked.png"
-    fig, ax = _render_candlestick_figure(df, f"ETH-USD {tf} — Key Levels + H12 Structure")
+    fig, ax = _render_candlestick_figure(df, f"ETH-USD {tf} — Key Levels + H4 Structure")
     _draw_htf_zones(ax, df, htf_zones)
     _draw_swing_hlines(ax, df)
     _draw_key_levels(ax, visible_levels_cache[tf], df)
-    if tf == "H1" and market_context is not None:
+    if tf == "M5" and market_context is not None:
       _draw_detected_overlays(ax, df, market_context)
     paths[tf] = _save_chart_figure(fig, path)
 
@@ -572,7 +572,7 @@ def _draw_detected_overlays(
   df: pd.DataFrame,
   market_context: MarketContext | None,
 ) -> None:
-  """Draw programmatic 24h range and order blocks on the H1 chart."""
+  """Draw programmatic 24h range and order blocks on the M5 chart."""
   if market_context is None:
     return
 
@@ -602,7 +602,7 @@ def _draw_detected_overlays(
       ax.text(
         left,
         float(ob.high),
-        " H1 OB",
+        " M5 OB",
         color=edge,
         fontsize=FONT_SIZE - 1,
         fontweight="bold",
@@ -645,7 +645,8 @@ def build_output_charts(
     _draw_htf_zones(ax_price, df, htf_zones)
     _draw_swing_hlines(ax_price, df)
     _draw_key_levels(ax_price, vis, df)
-    _draw_detected_overlays(ax_price, df, market_context)
+    if tf == "M5":
+      _draw_detected_overlays(ax_price, df, market_context)
 
     if show_fib and suggestion.order_block:
       ob = suggestion.order_block
@@ -693,9 +694,9 @@ def build_output_charts(
     return _save_chart_figure(fig, out_path)
 
   if suggestion.action == "no_trade":
-    primary = suggestion.decision_charts[0] if suggestion.decision_charts else "H12"
+    primary = suggestion.decision_charts[0] if suggestion.decision_charts else "H4"
     if primary not in valid_tfs:
-      primary = "H12"
+      primary = "H4"
     paths.append(
       _render_output_chart(
         primary,
@@ -705,12 +706,12 @@ def build_output_charts(
     )
     return paths
 
-  structure_tf = suggestion.structure_chart or "H12"
-  entry_tf = suggestion.entry_chart or "H1"
+  structure_tf = suggestion.structure_chart or "H4"
+  entry_tf = suggestion.entry_chart or "M5"
   if structure_tf not in valid_tfs:
-    structure_tf = "H12"
+    structure_tf = "H4"
   if entry_tf not in valid_tfs:
-    entry_tf = "H1"
+    entry_tf = "M5"
 
   paths.append(
     _render_output_chart(
@@ -745,24 +746,24 @@ def build_output_charts(
 
 
 def annotate_chart(
-  h1_path: str,
+  m5_path: str,
   suggestion: Suggestion,
   cycle_id: str,
-  h1_bars: list[dict] | None = None,
+  m5_bars: list[dict] | None = None,
   market_context: MarketContext | None = None,
 ) -> str:
   """
-  Draw trade markup on a full-width H1 chart (rationale is sent separately via Telegram).
-  Re-plots from h1_bars for correct price alignment (h1_path used for naming only).
+  Draw trade markup on a full-width M5 chart (rationale is sent separately via Telegram).
+  Re-plots from m5_bars for correct price alignment (m5_path used for naming only).
   """
   out_dir = _ensure_charts_dir()
-  annotated_path = out_dir / f"{cycle_id}_H1_annotated.png"
+  annotated_path = out_dir / f"{cycle_id}_M5_annotated.png"
 
-  if h1_bars is None:
-    h1_bars = research.get_ohlc("H1")
-  df = _to_mpf_df(h1_bars)
+  if m5_bars is None:
+    m5_bars = research.get_ohlc("M5")
+  df = _to_mpf_df(m5_bars)
 
-  title = "ETH-USD H1 — Trade Idea" if suggestion.action != "no_trade" else "ETH-USD H1 — No Trade"
+  title = "ETH-USD M5 — Trade Idea" if suggestion.action != "no_trade" else "ETH-USD M5 — No Trade"
   fig, ax = _render_candlestick_figure(df, title, figsize=OUTPUT_FIGSIZE)
 
   _draw_detected_overlays(ax, df, market_context)
@@ -911,9 +912,9 @@ def render_research_chart(
   return _save_figure(fig, path)
 
 
-def _fake_suggestion(h1_bars: list[dict]) -> Suggestion:
-  """Build a plausible fake long setup from recent H1 structure."""
-  df = research.to_dataframe(h1_bars)
+def _fake_suggestion(m5_bars: list[dict]) -> Suggestion:
+  """Build a plausible fake long setup from recent M5 structure."""
+  df = research.to_dataframe(m5_bars)
   recent = df.tail(20)
   ob_low = float(recent["low"].min())
   ob_high = ob_low + (float(recent["high"].max()) - ob_low) * 0.4
@@ -935,7 +936,7 @@ def _fake_suggestion(h1_bars: list[dict]) -> Suggestion:
     stop_loss=round(stop_loss, 2),
     take_profits=[round(tp, 2) for tp in take_profits],
     risk_reward=2.1,
-    rationale="Fake H1 bullish OB retest in discount — markup test",
+    rationale="Fake M5 bullish OB retest in discount — markup test",
     order_block={
       "low": round(ob_low, 2),
       "high": round(ob_high, 2),
@@ -954,18 +955,18 @@ if __name__ == "__main__":
   data = research.get_all_timeframes()
   daily = research.get_daily_bars_for_levels()
   key_levels = compute_key_levels(daily)
-  htf_zones = detect_htf_zones(data["H12"])
-  print(f"Detected {len(htf_zones)} H12 OB/BRKR zones")
+  htf_zones = detect_htf_zones(data["H4"])
+  print(f"Detected {len(htf_zones)} H4 OB/BRKR zones")
 
   print("Rendering marked charts...")
   paths = render_marked_charts(data, key_levels, htf_zones, cycle_id=cycle_id)
   for tf, path in paths.items():
     print(f"  {tf}: {path}")
 
-  fake = _fake_suggestion(data["H1"])
-  fake.structure_chart = "H12"
-  fake.entry_chart = "H1"
-  fake.decision_charts = ["H12", "H1"]
+  fake = _fake_suggestion(data["M5"])
+  fake.structure_chart = "H4"
+  fake.entry_chart = "M5"
+  fake.decision_charts = ["H4", "M5"]
 
   outputs = build_output_charts(fake, data, key_levels, htf_zones, cycle_id)
   for path in outputs:

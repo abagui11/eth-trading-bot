@@ -21,7 +21,7 @@ class Suggestion:
   entry_chart: str | None = None
   deploy_pct: float | None = None  # override TRADE_DEPLOY_PCT for tranche / add sizing
   entry_tranche: str | None = None  # e.g. "0.25", "0.50", "0.718", "sweep"
-  order_block_ref: str | None = None  # links scale-ins to the same H1 OB
+  order_block_ref: str | None = None  # links scale-ins to the same M5 OB
 
   @classmethod
   def no_trade(cls, rationale: str = "No setup") -> Suggestion:

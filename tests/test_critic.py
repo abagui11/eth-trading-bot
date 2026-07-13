@@ -19,7 +19,6 @@ from patterns.key_levels import KeyLevel
 from patterns.market_context import MarketContext
 from patterns.order_block import OrderBlock
 from patterns.range_24h import Range24h
-from patterns.sfp import SFPEvent
 from patterns.zone_resolver import ZoneSnapshot
 
 
@@ -77,19 +76,19 @@ def _base_context(**overrides) -> MarketContext:
     return ctx
 
 
-def test_h1_ob_mislabel_detects_h12_bounds():
+def test_m5_ob_mislabel_detects_h4_bounds():
     ctx = _base_context()
-    text = "Entry on H1 OB 1554.47-1586.51 fib retest."
+    text = "Entry on M5 OB 1554.47-1586.51 fib retest."
     findings = verify_deterministic(text, ctx)
     codes = {f.code for f in findings}
-    assert "H1_OB_MISLABEL" in codes
+    assert "M5_OB_MISLABEL" in codes
 
 
-def test_h12_sfp_not_found_when_none_in_snapshot():
-    ctx = _base_context(h12_sfps=[])
-    text = "H12 bullish SFP at Monday Low supports long bias."
+def test_h4_sfp_not_found_when_none_in_snapshot():
+    ctx = _base_context(h4_sfps=[])
+    text = "H4 bullish SFP at Monday Low supports long bias."
     findings = verify_deterministic(text, ctx)
-    assert any(f.code == "H12_SFP_NOT_FOUND" for f in findings)
+    assert any(f.code == "H4_SFP_NOT_FOUND" for f in findings)
 
 
 def test_key_level_mismatch():
@@ -107,20 +106,20 @@ def test_retest_filled_conflict():
 
 
 def test_no_false_positive_on_negated_sfp():
-    ctx = _base_context(h12_sfps=[], h1_sfps=[])
-    text = "No H12 SFP in the recent window — wait for structure."
+    ctx = _base_context(h4_sfps=[], m5_sfps=[])
+    text = "No H4 SFP in the recent window — wait for structure."
     findings = verify_deterministic(text, ctx)
     assert not any(f.code.endswith("SFP_NOT_FOUND") for f in findings)
 
 
-def test_valid_h1_ob_passes():
+def test_valid_m5_ob_passes():
     ctx = _base_context()
-    text = "H1 OB 1570-1590 fib entry aligns with H12 bullish OB."
+    text = "M5 OB 1570-1590 fib entry aligns with H4 bullish OB."
     findings = verify_deterministic(text, ctx)
-    assert not any(f.code == "H1_OB_MISLABEL" for f in findings)
+    assert not any(f.code == "M5_OB_MISLABEL" for f in findings)
 
 
-def test_json_h12_as_h1_ob_via_suggestion():
+def test_json_h4_as_m5_ob_via_suggestion():
     ctx = _base_context()
     suggestion = Suggestion.from_dict(
         {
@@ -138,13 +137,13 @@ def test_json_h12_as_h1_ob_via_suggestion():
             },
         }
     )
-    findings = verify_deterministic("H12 bullish bias.", ctx, suggestion=suggestion)
-    assert any(f.code == "JSON_H12_AS_H1_OB" for f in findings)
+    findings = verify_deterministic("H4 bullish bias.", ctx, suggestion=suggestion)
+    assert any(f.code == "JSON_H4_AS_M5_OB" for f in findings)
 
 
 def test_split_and_compose_rationale():
     signals = "Signals: 24h range established: 1,550-1,630"
-    llm = "HTF bearish. No valid H1 SFP in window."
+    llm = "HTF bearish. No valid M5 SFP in window."
     full = compose_rationale(llm, signals)
     body, block = split_rationale(full)
     assert block == signals
@@ -154,18 +153,18 @@ def test_split_and_compose_rationale():
 def test_alert_text_not_audited_when_split():
     ctx = _base_context()
     signals = build_signals_block(
-        ["Price in bearish H1 OB fib zone 1,580.00-1,590.00"]
+        ["Price in bearish M5 OB fib zone 1,580.00-1,590.00"]
     )
-    llm = "HTF structure bearish on H12. Waiting for setup."
+    llm = "HTF structure bearish on H4. Waiting for setup."
     full = compose_rationale(llm, signals)
     llm_body, _ = split_rationale(full)
     findings = verify_deterministic(llm_body, ctx)
-    assert not any(f.code == "H1_OB_MISLABEL" for f in findings)
+    assert not any(f.code == "M5_OB_MISLABEL" for f in findings)
 
 
 def test_findings_require_retry_on_critical_codes():
     findings = [
-        AuditFinding(code="H1_SFP_NOT_FOUND", message="test"),
+        AuditFinding(code="M5_SFP_NOT_FOUND", message="test"),
         AuditFinding(code="ENTRY_NOT_IN_RATIONALE", message="warn", severity="warning"),
     ]
     assert findings_require_retry(findings)
@@ -173,16 +172,16 @@ def test_findings_require_retry_on_critical_codes():
 
 def test_findings_require_retry_false_on_warnings_only():
     findings = [
-        AuditFinding(code="H1_OB_NOT_FOUND", message="test", severity="warning"),
+        AuditFinding(code="M5_OB_NOT_FOUND", message="test", severity="warning"),
     ]
     assert not findings_require_retry(findings)
 
 
 def test_no_false_positive_on_fib_ratio_in_text():
     ctx = _base_context()
-    text = "Entry requires fib 0.618-0.786 retest inside H1 OB."
+    text = "Entry requires fib 0.618-0.786 retest inside M5 OB."
     findings = verify_deterministic(text, ctx)
-    assert not any(f.code == "H1_OB_NOT_FOUND" for f in findings)
+    assert not any(f.code == "M5_OB_NOT_FOUND" for f in findings)
 
 
 def test_no_false_positive_on_small_key_level_numbers():
@@ -200,11 +199,11 @@ def test_findings_require_retry_on_llm_hallucination():
 
 
 def test_sanitize_rationale_uses_snapshot_only():
-    ctx = _base_context(h12_sfps=[], h1_sfps=[])
+    ctx = _base_context(h4_sfps=[], m5_sfps=[])
     text = sanitize_rationale(ctx)
-    assert "No valid H1 SFP" in text
-    assert "H1 OB 1,569" not in text
-    assert "1,554.47" not in text or "Primary H12" in text
+    assert "No valid M5 SFP" in text
+    assert "M5 OB 1,569" not in text
+    assert "1,554.47" not in text or "Primary H4" in text
 
 
 def test_refine_suggestion_downgrades_failed_trade(monkeypatch):
@@ -217,15 +216,15 @@ def test_refine_suggestion_downgrades_failed_trade(monkeypatch):
             "stop_loss": 1550.0,
             "take_profits": [1600.0],
             "risk_reward": 2.0,
-            "rationale": "Entry on H1 OB 1554.47-1586.51 fib retest.",
+            "rationale": "Entry on M5 OB 1554.47-1586.51 fib retest.",
             "order_block": {
                 "low": 1554.47,
                 "high": 1586.51,
                 "start_ts": "2026-06-28T10:00:00Z",
                 "end_ts": "2026-06-28T10:00:00Z",
             },
-            "structure_chart": "H12",
-            "entry_chart": "H1",
+            "structure_chart": "H4",
+            "entry_chart": "M5",
         }
     )
 

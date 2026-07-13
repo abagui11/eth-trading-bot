@@ -15,7 +15,7 @@ import config
 import ledger
 import paper
 from dashboard import data
-from dashboard.charts import h12_marked_path, resolve_chart_path
+from dashboard.charts import h4_marked_path, resolve_chart_path
 from macro import store as macro_store
 from macro.context import macro_payload_for_dashboard
 from macro.ingest import ingest_headline
@@ -125,22 +125,22 @@ def create_app() -> FastAPI:
         snapshot = audit.get_latest_snapshot()
         if snapshot is None:
             raise HTTPException(status_code=404, detail="No snapshot")
-        path = h12_marked_path(snapshot.get("marked_chart_paths"))
+        path = h4_marked_path(snapshot.get("marked_chart_paths"))
         if path is None:
-            raise HTTPException(status_code=404, detail="H12 chart not found")
+            raise HTTPException(status_code=404, detail="H4 chart not found")
         return FileResponse(path, media_type="image/png")
 
     @app.get("/api/chart/{cycle_id}")
     async def api_chart_cycle(cycle_id: str) -> FileResponse:
         snapshot = audit.get_snapshot(cycle_id)
         marked = (snapshot or {}).get("marked_chart_paths") if snapshot else None
-        path = h12_marked_path(marked)
+        path = h4_marked_path(marked)
         if path is None:
             row = ledger.get_suggestion_by_cycle_id(cycle_id)
             if row:
                 for part in str(row.get("chart_path") or "").split(","):
                     path = resolve_chart_path(part.strip())
-                    if path and "H12" in path.name and "marked" in path.name:
+                    if path and "H4" in path.name and "marked" in path.name:
                         break
                     path = None
         if path is None:

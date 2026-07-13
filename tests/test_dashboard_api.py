@@ -72,7 +72,7 @@ class DashboardApiTests(unittest.TestCase):
             );
             """
         )
-        marked = str(self._charts / "20260702T120000Z_H12_marked.png")
+        marked = str(self._charts / "20260702T120000Z_H4_marked.png")
         Path(marked).write_bytes(b"\x89PNG\r\n")
         snap = {
             "spot": 2000.0,
@@ -94,7 +94,7 @@ class DashboardApiTests(unittest.TestCase):
                 2000.0,
                 json.dumps(snap),
                 json.dumps({"action": "no_trade"}),
-                json.dumps({"H12": marked}),
+                json.dumps({"H4": marked}),
                 "",
             ),
         )

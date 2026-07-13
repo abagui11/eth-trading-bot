@@ -50,7 +50,7 @@ class SetupStateTests(unittest.TestCase):
             retest_low=1610.0,
             retest_high=1658.0,
             htf_bearish_bias=True,
-            recent_bearish_h1_sfp=False,
+            recent_bearish_m5_sfp=False,
         )
         self.assertEqual(state.phase, "bearish_retest_filled")
         self.assertTrue(any("BEARISH RETEST FILLED" in a for a in alerts))
@@ -72,7 +72,7 @@ class SetupStateTests(unittest.TestCase):
             retest_low=1610.0,
             retest_high=1658.0,
             htf_bearish_bias=True,
-            recent_bearish_h1_sfp=True,
+            recent_bearish_m5_sfp=True,
         )
         self.assertEqual(state.phase, "bearish_retest_rejected")
         self.assertIn("short_trigger_retest", tags)

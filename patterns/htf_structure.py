@@ -1,4 +1,7 @@
-"""H12 HTF market structure: order blocks and breakers (IMG-style rules)."""
+"""HTF market structure: order blocks and breakers (IMG-style rules).
+
+Live agent feeds H4 bars; research may still use H12.
+"""
 
 from __future__ import annotations
 

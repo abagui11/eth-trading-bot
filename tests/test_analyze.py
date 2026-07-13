@@ -23,7 +23,7 @@ def test_validate_no_trade_defaults_decision_chart():
         "order_block": None,
     }
     s = _validate(data)
-    assert s.decision_charts == ["H12"]
+    assert s.decision_charts == ["H4"]
 
 
 def test_validate_trade_requires_structure_and_entry_chart():
@@ -34,10 +34,10 @@ def test_validate_trade_requires_structure_and_entry_chart():
         "stop_loss": 2350.0,
         "take_profits": [2500.0],
         "risk_reward": 2.0,
-        "rationale": "H12 OB retest.",
-        "structure_chart": "H12",
-        "entry_chart": "H1",
-        "decision_charts": ["H12", "H1"],
+        "rationale": "H4 OB retest.",
+        "structure_chart": "H4",
+        "entry_chart": "M5",
+        "decision_charts": ["H4", "M5"],
         "order_block": {
             "low": 2380.0,
             "high": 2420.0,
@@ -46,12 +46,12 @@ def test_validate_trade_requires_structure_and_entry_chart():
         },
     }
     s = _validate(data)
-    assert s.structure_chart == "H12"
-    assert s.entry_chart == "H1"
+    assert s.structure_chart == "H4"
+    assert s.entry_chart == "M5"
     assert s.risk_reward == pytest.approx(92 / 58, rel=1e-3)
 
 
-def test_validate_trade_defaults_missing_entry_chart_to_h1():
+def test_validate_trade_defaults_missing_entry_chart_to_m5():
     data = {
         "action": "spot_buy",
         "size": 0.5,
@@ -60,7 +60,7 @@ def test_validate_trade_defaults_missing_entry_chart_to_h1():
         "take_profits": [2500.0],
         "risk_reward": 2.0,
         "rationale": "test",
-        "structure_chart": "H12",
+        "structure_chart": "H4",
         "order_block": {
             "low": 2380.0,
             "high": 2420.0,
@@ -69,7 +69,7 @@ def test_validate_trade_defaults_missing_entry_chart_to_h1():
         },
     }
     s = _validate(data)
-    assert s.entry_chart == "H1"
+    assert s.entry_chart == "M5"
 
 
 def test_propose_trade_retries_on_json_decode_error():
@@ -82,7 +82,7 @@ def test_propose_trade_retries_on_json_decode_error():
         "risk_reward": None,
         "rationale": "No setup.",
         "order_block": None,
-        "decision_charts": ["H12"],
+        "decision_charts": ["H4"],
     }
     bad_block = MagicMock()
     bad_block.type = "text"
@@ -102,7 +102,7 @@ def test_propose_trade_retries_on_json_decode_error():
     with patch("analyze.anthropic.Anthropic", return_value=client), patch(
         "analyze._build_user_content", return_value=[{"type": "text", "text": "test"}]
     ):
-        suggestion = propose_trade({"H12": "x.png", "H4": "y.png", "H1": "z.png"})
+        suggestion = propose_trade({"H4": "x.png", "H1": "y.png", "M5": "z.png"})
 
     assert suggestion.action == "no_trade"
     assert client.messages.create.call_count == 2

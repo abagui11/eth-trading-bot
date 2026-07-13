@@ -36,7 +36,7 @@ def _existing_paths(*candidates: str | None) -> list[str]:
 
 
 def _paths_from_marked(marked: dict[str, str], *, prefer: list[str] | None = None) -> list[str]:
-    order = prefer or ["H12", "H4", "H1"]
+    order = prefer or ["H4", "H1", "M5"]
     paths: list[str] = []
     for tf in order:
         path = marked.get(tf)
@@ -67,7 +67,7 @@ def _resolve_chart_paths(
     marked = (snapshot_row or {}).get("marked_chart_paths") or {}
     suggestion = (snapshot_row or {}).get("suggestion") or {}
     decision = suggestion.get("decision_charts") or []
-    marked_paths = _paths_from_marked(marked, prefer=list(decision) + ["H12", "H4", "H1"])
+    marked_paths = _paths_from_marked(marked, prefer=list(decision) + ["H4", "H1", "M5"])
     if marked_paths:
         return marked_paths[:2]
 
@@ -86,7 +86,7 @@ def _format_ob(ob: dict) -> str:
     direction = str(ob.get("direction", ""))
     low = float(ob["low"])
     high = float(ob["high"])
-    return f"H1 {direction} OB {low:,.2f}-{high:,.2f}"
+    return f"M5 {direction} OB {low:,.2f}-{high:,.2f}"
 
 
 def _format_sfp(event: dict) -> str:
@@ -131,17 +131,17 @@ def _build_watch_summary(ledger_row: dict, snapshot_row: dict | None) -> str:
 
         order_blocks = snap.get("order_blocks") or []
         if order_blocks:
-            lines.append("H1 order blocks on chart:")
+            lines.append("M5 order blocks on chart:")
             for ob in order_blocks[-3:]:
                 lines.append(f"  • {_format_ob(ob)}")
         else:
-            lines.append("H1 order blocks: none in lookback")
+            lines.append("M5 order blocks: none in lookback")
 
-        h12_sfps = snap.get("h12_sfps") or []
-        h1_sfps = snap.get("h1_sfps") or []
-        if h12_sfps or h1_sfps:
+        h4_sfps = snap.get("h4_sfps") or snap.get("h12_sfps") or []
+        m5_sfps = snap.get("m5_sfps") or snap.get("h1_sfps") or []
+        if h4_sfps or m5_sfps:
             lines.append("Recent SFPs:")
-            for event in (h12_sfps + h1_sfps)[:4]:
+            for event in (h4_sfps + m5_sfps)[:4]:
                 lines.append(f"  • {_format_sfp(event)}")
 
         key_levels = snap.get("key_levels_near") or []
@@ -178,7 +178,7 @@ def _build_watch_summary(ledger_row: dict, snapshot_row: dict | None) -> str:
             lines.append(f"Rationale excerpt: {excerpt}")
 
     lines.append("")
-    lines.append("Watching for H1 fib retests, H12 structure, 24h range breaks, and fresh SFPs.")
+    lines.append("Watching for M5 fib retests, H4 structure, 24h range breaks, and fresh SFPs.")
     return "\n".join(lines)
 
 
@@ -187,7 +187,7 @@ def _build_caption(ledger_row: dict, chart_paths: list[str]) -> str:
     action = str(ledger_row.get("action") or "n/a").upper()
     primary = Path(chart_paths[0]).stem if chart_paths else "chart"
     tf = ""
-    for token in ("H12", "H4", "H1"):
+    for token in ("H4", "H1", "M5", "H12"):
         if token in primary:
             tf = token
             break

@@ -7,7 +7,7 @@ from typing import Any
 TRADE_ACTIONS = frozenset({"spot_buy", "spot_sell", "deriv_buy", "deriv_sell"})
 
 _PHASE_HEADLINES = {
-    "idle": "Monitoring H12 structure — no active setup phase",
+    "idle": "Monitoring H4 structure — no active setup phase",
     "awaiting_bearish_retest": "Waiting for rally into bearish HTF supply zone",
     "bearish_retest_filled": "Bearish retest zone tagged — watching for rejection",
     "bearish_retest_rejected": "Retest rejection — favor short if LTF aligns",
@@ -58,13 +58,13 @@ def format_agent_status(
     for ob in (snap.get("order_blocks") or [])[-2:]:
         direction = str(ob.get("direction", ""))
         low, high = float(ob["low"]), float(ob["high"])
-        watching.append(f"H1 {direction} order block: {_fmt_zone(low, high)}")
+        watching.append(f"M5 {direction} order block: {_fmt_zone(low, high)}")
 
     for zone in (zone_snap.get("zones_containing_price") or [])[:2]:
         ztype = str(zone.get("zone_type", "zone")).upper()
         direction = str(zone.get("direction", ""))
         low, high = float(zone["low"]), float(zone["high"])
-        watching.append(f"H12 {ztype} {direction}: {_fmt_zone(low, high)}")
+        watching.append(f"H4 {ztype} {direction}: {_fmt_zone(low, high)}")
 
     # Open position overrides headline
     if open_positions:
@@ -86,7 +86,7 @@ def format_agent_status(
         if retest_low is not None and retest_high is not None and phase != "idle":
             headline += f" ({_fmt_zone(float(retest_low), float(retest_high))})"
     elif action == "no_trade":
-        headline = "No trade — waiting for H1 fib retest and H12/LTF alignment"
+        headline = "No trade — waiting for M5 fib retest and H4/LTF alignment"
     else:
         headline = f"Latest action: {action.replace('_', ' ')}"
 

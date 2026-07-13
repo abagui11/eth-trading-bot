@@ -437,7 +437,7 @@ def send_macro_pulse_alert(
 
 
 def _latest_output_chart() -> Path:
-    for pattern in ("*_entry.png", "*_structure.png", "*_notrade.png", "*_H1_annotated.png"):
+    for pattern in ("*_entry.png", "*_structure.png", "*_notrade.png", "*_M5_annotated.png"):
         charts_found = sorted(config.CHARTS_DIR.glob(pattern), key=lambda p: p.stat().st_mtime)
         if charts_found:
             return charts_found[-1]

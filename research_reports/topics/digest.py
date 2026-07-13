@@ -40,7 +40,7 @@ def build_digest_report() -> ResearchReport:
     if chart_path:
         all_interpretation.insert(
             0,
-            "H12 chart attached — zones, key levels, and detected structure match the hourly agent.",
+            "H4 chart attached — zones, key levels, and detected structure match the hourly agent.",
         )
 
     return ResearchReport(
@@ -53,5 +53,5 @@ def build_digest_report() -> ResearchReport:
         ],
         sources=unique_sources,
         chart_path=chart_path,
-        caption=chart_caption or "ETH-USD H12 structure",
+        caption=chart_caption or "ETH-USD H4 structure",
     )

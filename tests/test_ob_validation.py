@@ -18,9 +18,9 @@ def _trade_payload(**overrides):
         "stop_loss": 2350.0,
         "take_profits": [2500.0],
         "risk_reward": 2.0,
-        "rationale": "H1 OB fib entry.",
-        "structure_chart": "H12",
-        "entry_chart": "H1",
+        "rationale": "M5 OB fib entry.",
+        "structure_chart": "H4",
+        "entry_chart": "M5",
         "order_block": {
             "low": 2380.0,
             "high": 2420.0,
@@ -33,8 +33,8 @@ def _trade_payload(**overrides):
 
 
 def test_validate_rejects_entry_outside_fib_zone():
-    with pytest.raises(ValueError, match="outside H1 OB fib"):
-        _validate(_trade_payload(entry=2410.0))
+    with pytest.raises(ValueError, match="outside M5 OB fib"):
+        _validate(_trade_payload(entry=2500.0))
 
 
 def test_validate_rejects_narrow_order_block():
@@ -47,8 +47,8 @@ def test_validate_rejects_narrow_order_block():
         }))
 
 
-def test_validate_rejects_h12_bounds_as_order_block():
-    h1_ob = OrderBlock(
+def test_validate_rejects_h4_bounds_as_order_block():
+    m5_ob = OrderBlock(
         direction="bullish",
         low=1570.0,
         high=1590.0,
@@ -63,7 +63,7 @@ def test_validate_rejects_h12_bounds_as_order_block():
         spot=1569.0,
         zone_snapshot=None,
         setup_state=None,
-        order_blocks=[h1_ob],
+        order_blocks=[m5_ob],
         htf_zones=[
             HTFZone(
                 "order_block",
@@ -83,12 +83,12 @@ def test_validate_rejects_h12_bounds_as_order_block():
             "end_ts": "2026-06-28T10:00:00Z",
         },
     )
-    with pytest.raises(ValueError, match="matches H12 OB"):
+    with pytest.raises(ValueError, match="matches H4 OB"):
         _validate(payload, market_context=ctx)
 
 
-def test_validate_accepts_matching_h1_ob_and_fib_entry():
-    h1_ob = OrderBlock(
+def test_validate_accepts_matching_m5_ob_and_fib_entry():
+    m5_ob = OrderBlock(
         direction="bullish",
         low=2380.0,
         high=2420.0,
@@ -103,7 +103,7 @@ def test_validate_accepts_matching_h1_ob_and_fib_entry():
         spot=2395.0,
         zone_snapshot=None,
         setup_state=None,
-        order_blocks=[h1_ob],
+        order_blocks=[m5_ob],
     )
     s = _validate(_trade_payload(), market_context=ctx)
     assert s.action == "spot_buy"

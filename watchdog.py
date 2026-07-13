@@ -1,7 +1,7 @@
 """Sub-hourly programmatic entry scanner.
 
-Runs between hourly vision cycles. When deterministic triggers fire (H1 OB fib,
-bearish retest rejection, H1 SFP on close), builds and validates a trade,
+Runs between hourly vision cycles. When deterministic triggers fire (M5 OB fib,
+bearish retest rejection, M5 SFP on close), builds and validates a trade,
 renders structure/entry charts, then records and broadcasts.
 """
 
@@ -155,11 +155,11 @@ def _append_tranche_triggers(
         side = "long" if direction == "bullish" else "short"
         triggers.append(
             WatchdogTrigger(
-                name=f"h1_ob_fib_{side}",
+                name=f"m5_ob_fib_{side}",
                 direction=direction,
                 ob=ob,
                 reason=(
-                    f"Price at H1 OB fib {tranche} tranche ({fib_level(direction, ob.low, ob.high, fib_mark):,.2f}) "
+                    f"Price at M5 OB fib {tranche} tranche ({fib_level(direction, ob.low, ob.high, fib_mark):,.2f}) "
                     f"with aligned HTF structure"
                 ),
                 priority=70,
@@ -170,24 +170,24 @@ def _append_tranche_triggers(
         break
 
 
-def _latest_h1_bar_ts(h1_bars: list[dict]) -> str | None:
-    if not h1_bars:
+def _latest_entry_bar_ts(entry_bars: list[dict]) -> str | None:
+    if not entry_bars:
         return None
-    return str(h1_bars[-1]["ts"])
+    return str(entry_bars[-1]["ts"])
 
 
-def _sfp_on_latest_bar(event: SFPEvent, h1_bars: list[dict]) -> bool:
-    latest = _latest_h1_bar_ts(h1_bars)
+def _sfp_on_latest_bar(event: SFPEvent, entry_bars: list[dict]) -> bool:
+    latest = _latest_entry_bar_ts(entry_bars)
     if latest is None:
         return False
     return event.ts == latest
 
 
-def _fresh_h1_sfp(ctx: MarketContext, h1_bars: list[dict]) -> SFPEvent | None:
-    for event in reversed(ctx.h1_sfps):
+def _fresh_m5_sfp(ctx: MarketContext, m5_bars: list[dict]) -> SFPEvent | None:
+    for event in reversed(ctx.m5_sfps):
         if event.outcome_a not in ("reversal", "pending"):
             continue
-        if _sfp_on_latest_bar(event, h1_bars):
+        if _sfp_on_latest_bar(event, m5_bars):
             return event
     return None
 
@@ -216,11 +216,11 @@ def evaluate_scale_in(
             continue
         add_level = fib_level(ob.direction, ob.low, ob.high, bot_config.ADD_FIB_LEVEL)
         return WatchdogTrigger(
-            name="h1_ob_fib_add",
+            name="m5_ob_fib_add",
             direction=ob.direction,
             ob=ob,
             reason=(
-                f"Scale-in at H1 OB fib 0.718 ({add_level:,.2f}) — "
+                f"Scale-in at M5 OB fib 0.718 ({add_level:,.2f}) — "
                 f"adds {bot_config.ADD_DEPLOY_PCT:.0%} notional to existing position"
             ),
             priority=95,
@@ -232,7 +232,7 @@ def evaluate_scale_in(
 
 def evaluate_triggers(
     ctx: MarketContext,
-    h1_bars: list[dict],
+    m5_bars: list[dict],
     *,
     positions: list[dict] | None = None,
 ) -> list[WatchdogTrigger]:
@@ -248,7 +248,7 @@ def evaluate_triggers(
                     direction="bearish",
                     ob=ob,
                     reason=(
-                        "Bearish HTF retest rejection + H1 OB fib zone — "
+                        "Bearish HTF retest rejection + M5 OB fib zone — "
                         "programmatic short trigger"
                     ),
                     priority=100,
@@ -256,7 +256,7 @@ def evaluate_triggers(
             )
             break
 
-    sfp = _fresh_h1_sfp(ctx, h1_bars)
+    sfp = _fresh_m5_sfp(ctx, m5_bars)
     if sfp is not None:
         direction: Direction = sfp.direction
         for ob in ctx.order_blocks:
@@ -274,12 +274,12 @@ def evaluate_triggers(
                 stop = round(sfp.swept_level * (1 - SL_BUFFER_PCT), 2)
                 triggers.append(
                     WatchdogTrigger(
-                        name="h1_sfp_sweep_reversal",
+                        name="m5_sfp_sweep_reversal",
                         direction="bullish",
                         ob=ob,
                         reason=(
-                            f"Bullish H1 SFP sweep-reversal: reclaimed above "
-                            f"{sfp.swept_level:,.2f} inside H1 OB"
+                            f"Bullish M5 SFP sweep-reversal: reclaimed above "
+                            f"{sfp.swept_level:,.2f} inside M5 OB"
                         ),
                         priority=88,
                         sfp_event=sfp,
@@ -301,12 +301,12 @@ def evaluate_triggers(
                 stop = round(sfp.swept_level * (1 + SL_BUFFER_PCT), 2)
                 triggers.append(
                     WatchdogTrigger(
-                        name="h1_sfp_sweep_reversal",
+                        name="m5_sfp_sweep_reversal",
                         direction="bearish",
                         ob=ob,
                         reason=(
-                            f"Bearish H1 SFP sweep-reversal: reclaimed below "
-                            f"{sfp.swept_level:,.2f} inside H1 OB"
+                            f"Bearish M5 SFP sweep-reversal: reclaimed below "
+                            f"{sfp.swept_level:,.2f} inside M5 OB"
                         ),
                         priority=88,
                         sfp_event=sfp,
@@ -322,12 +322,12 @@ def evaluate_triggers(
         for ob in _obs_in_fib(ctx, direction):
             triggers.append(
                 WatchdogTrigger(
-                    name="h1_sfp_close",
+                    name="m5_sfp_close",
                     direction=direction,
                     ob=ob,
                     reason=(
-                        f"H1 {direction} SFP confirmed on latest bar close @ "
-                        f"{sfp.swept_level:,.2f} with price in H1 OB entry band"
+                        f"M5 {direction} SFP confirmed on latest bar close @ "
+                        f"{sfp.swept_level:,.2f} with price in M5 OB entry band"
                     ),
                     priority=90,
                     use_sfp_tp=True,
@@ -338,7 +338,7 @@ def evaluate_triggers(
             )
             break
 
-    if "h1_ob_bullish_in_fib" in ctx.setup_tags:
+    if "m5_ob_bullish_in_fib" in ctx.setup_tags:
         for ob in sorted(
             [o for o in ctx.order_blocks if o.direction == "bullish"],
             key=lambda o: o.displacement_ts,
@@ -353,7 +353,7 @@ def evaluate_triggers(
                 allows=_htf_allows_long(ctx),
             )
 
-    if "h1_ob_bearish_in_fib" in ctx.setup_tags:
+    if "m5_ob_bearish_in_fib" in ctx.setup_tags:
         for ob in sorted(
             [o for o in ctx.order_blocks if o.direction == "bearish"],
             key=lambda o: o.displacement_ts,
@@ -372,10 +372,10 @@ def evaluate_triggers(
     return triggers
 
 
-def _swing_levels(h12_bars: list[dict]) -> list[Pivot]:
-    if len(h12_bars) < 10:
+def _swing_levels(h4_bars: list[dict]) -> list[Pivot]:
+    if len(h4_bars) < 10:
         return []
-    df = research.to_dataframe(h12_bars)
+    df = research.to_dataframe(h4_bars)
     return find_pivots(df)
 
 
@@ -383,7 +383,7 @@ def _stop_and_targets(
     *,
     entry: float,
     direction: Direction,
-    h12_bars: list[dict],
+    h4_bars: list[dict],
     use_sfp_tp: bool,
 ) -> tuple[float, list[float]]:
     if use_sfp_tp:
@@ -395,7 +395,7 @@ def _stop_and_targets(
             stop = round(entry * (1 + max(SFP_TP_PCT, SL_BUFFER_PCT)), 2)
         return stop, [tp]
 
-    pivots = _swing_levels(h12_bars)
+    pivots = _swing_levels(h4_bars)
     if direction == "bullish":
         lows = [p for p in pivots if p.kind == "low" and p.price < entry]
         if lows:
@@ -484,7 +484,7 @@ def _order_block_dict(ob: OrderBlock) -> dict:
     }
 
 
-def _h1_ob_overlaps_h12(ob: OrderBlock, htf_zones: list[HTFZone]) -> HTFZone | None:
+def _m5_ob_overlaps_h4(ob: OrderBlock, htf_zones: list[HTFZone]) -> HTFZone | None:
     for zone in htf_zones:
         if zone.mitigated or zone.zone_type != "order_block":
             continue
@@ -500,14 +500,14 @@ def _htf_context_lines(ctx: MarketContext, ob: OrderBlock) -> list[str]:
     snap = ctx.zone_snapshot
     if snap and snap.primary_bullish:
         z = snap.primary_bullish
-        lines.append(f"H12 bullish zone: {z.low:,.2f}-{z.high:,.2f}")
+        lines.append(f"H4 bullish zone: {z.low:,.2f}-{z.high:,.2f}")
     if snap and snap.primary_bearish:
         z = snap.primary_bearish
-        lines.append(f"H12 bearish zone: {z.low:,.2f}-{z.high:,.2f}")
-    overlap = _h1_ob_overlaps_h12(ob, ctx.htf_zones)
+        lines.append(f"H4 bearish zone: {z.low:,.2f}-{z.high:,.2f}")
+    overlap = _m5_ob_overlaps_h4(ob, ctx.htf_zones)
     if overlap is not None:
         lines.append(
-            f"H1 OB coincides with H12 OB {overlap.low:,.2f}-{overlap.high:,.2f}"
+            f"M5 OB coincides with H4 OB {overlap.low:,.2f}-{overlap.high:,.2f}"
         )
     if ctx.range_24h:
         lines.append(
@@ -540,7 +540,7 @@ def _build_rationale(
         f"{trigger.reason}.",
         "",
         (
-            f"Entry {entry:,.2f}; H1 OB {ob.low:,.2f}-{ob.high:,.2f}; "
+            f"Entry {entry:,.2f}; M5 OB {ob.low:,.2f}-{ob.high:,.2f}; "
             f"entry band 0.25-0.50: {z_low:,.2f}-{z_high:,.2f}; "
             f"tranches @ {t25:,.2f}/{t50:,.2f}; add @ {t718:,.2f}."
         ),
@@ -569,7 +569,7 @@ def _render_output_charts(
     daily_bars: list[dict],
 ) -> list[str]:
     key_levels = compute_key_levels(daily_bars)
-    htf_zones = detect_htf_zones(data["H12"])
+    htf_zones = detect_htf_zones(data["H4"])
     return charts.build_output_charts(
         suggestion,
         data,
@@ -583,7 +583,7 @@ def _render_output_charts(
 def build_suggestion(
     trigger: WatchdogTrigger,
     ctx: MarketContext,
-    h12_bars: list[dict],
+    h4_bars: list[dict],
 ) -> Suggestion:
     ob = trigger.ob
     if trigger.entry_tranche in ("0.25", "0.50", "0.718"):
@@ -596,14 +596,14 @@ def build_suggestion(
         _, take_profits = _stop_and_targets(
             entry=entry,
             direction=trigger.direction,
-            h12_bars=h12_bars,
+            h4_bars=h4_bars,
             use_sfp_tp=False,
         )
     else:
         stop_loss, take_profits = _stop_and_targets(
             entry=entry,
             direction=trigger.direction,
-            h12_bars=h12_bars,
+            h4_bars=h4_bars,
             use_sfp_tp=trigger.use_sfp_tp,
         )
     take_profits = _ensure_min_rr(entry, stop_loss, take_profits, trigger.direction)
@@ -618,8 +618,8 @@ def build_suggestion(
         "stop_loss": stop_loss,
         "take_profits": take_profits,
         "rationale": rationale,
-        "structure_chart": "H12",
-        "entry_chart": "H1",
+        "structure_chart": "H4",
+        "entry_chart": "M5",
         "order_block": _order_block_dict(ob),
         "deploy_pct": trigger.deploy_pct,
         "entry_tranche": trigger.entry_tranche,
@@ -658,16 +658,16 @@ def _record_fire(trigger_key: str, cycle_id: str) -> None:
 def _prepare_context() -> tuple[MarketContext, dict[str, list[dict]], float, list[dict]]:
     data = research.get_all_timeframes()
     live_spot = research.get_live_spot_price()
-    h1_live = research.apply_live_spot_to_h1(data["H1"], live_spot)
+    m5_live = research.apply_live_spot_to_bars(data["M5"], live_spot)
     daily_bars = research.get_daily_bars_for_levels()
     ctx = build_market_context(
-        data["H12"],
         data["H4"],
-        h1_live,
+        data["H1"],
+        m5_live,
         daily_bars=daily_bars,
         spot_override=live_spot,
     )
-    data["H1"] = h1_live
+    data["M5"] = m5_live
     return ctx, data, live_spot, daily_bars
 
 
@@ -683,7 +683,7 @@ def run_watchdog() -> Suggestion | None:
         return None
 
     open_positions = paper.get_open_positions(live_spot)
-    triggers = evaluate_triggers(ctx, data["H1"], positions=open_positions)
+    triggers = evaluate_triggers(ctx, data["M5"], positions=open_positions)
     scale_in = evaluate_scale_in(ctx, open_positions)
     if scale_in is not None:
         triggers = [scale_in] + triggers
@@ -720,7 +720,7 @@ def run_watchdog() -> Suggestion | None:
             continue
 
         try:
-            suggestion = build_suggestion(trigger, ctx, data["H12"])
+            suggestion = build_suggestion(trigger, ctx, data["H4"])
         except ValueError as exc:
             logger.info(
                 "Watchdog trigger %s rejected: %s",

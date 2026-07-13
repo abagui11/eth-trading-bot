@@ -18,7 +18,7 @@ RUN_LLM_CRITIC_PRE_BROADCAST = True
 # take-profit logic are unaffected — this only sets trade size.
 TRADE_DEPLOY_PCT = 0.25
 
-# H1 OB fib entry band (bullish: from block low; bearish: from block high).
+# M5 OB fib entry band (bullish: from block low; bearish: from block high).
 ENTRY_FIB_LOW = 0.25
 ENTRY_FIB_HIGH = 0.50
 ENTRY_FIB_TRANCHE_1 = 0.25  # 50% of base deploy at this level
@@ -26,13 +26,13 @@ ENTRY_FIB_TRANCHE_2 = 0.50  # remaining 50% of base deploy
 ADD_FIB_LEVEL = 0.718  # scale-in adds another full TRADE_DEPLOY_PCT
 ENTRY_TRANCHE_DEPLOY_PCT = TRADE_DEPLOY_PCT / 2  # 12.5% per tranche
 ADD_DEPLOY_PCT = TRADE_DEPLOY_PCT  # +25% at 0.718 → 1.25× base exposure
-FIB_LEVEL_TOLERANCE_PCT = 0.004  # "near" a fib mark for intrabar watchdog
+FIB_LEVEL_TOLERANCE_PCT = 0.008  # looser "near" fib mark for M5 watchdog
 
 # Paper position size guardrails (ETH), applied after fixed-fraction sizing.
 MIN_ETH_QTY = 0.25
 MAX_ETH_QTY = 2.0
 
-# Minimum OB zone width as % of mid price (H1 rule; applied to all timeframes).
+# Minimum OB zone width as % of mid price (applied to all timeframes).
 OB_MIN_WIDTH_PCT = 1.25
 
 # Label for the current paper epoch (shown on dashboard after reset).
@@ -40,8 +40,8 @@ PAPER_EPOCH_LABEL = "5k_usd"
 
 # Sub-hourly programmatic entry scanner (charts + no LLM).
 WATCHDOG_ENABLED = True
-WATCHDOG_INTERVAL_SEC = 180  # 3 minutes (valid range: 60–300)
-WATCHDOG_COOLDOWN_SEC = 6 * 3600  # suppress repeat trigger on same H1 OB
+WATCHDOG_INTERVAL_SEC = 60  # 1 minute (valid range: 60–300)
+WATCHDOG_COOLDOWN_SEC = 30 * 60  # 30 min — suppress repeat trigger on same M5 OB
 
 # Macro headline context (RSS + webhook advisory layer).
 MACRO_CONTEXT_ENABLED = True

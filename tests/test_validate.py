@@ -152,8 +152,8 @@ class AnalyzeIntegrationTests(unittest.TestCase):
             "take_profits": [1574.0],
             "risk_reward": 2.0,
             "rationale": "tight",
-            "structure_chart": "H12",
-            "entry_chart": "H1",
+            "structure_chart": "H4",
+            "entry_chart": "M5",
             "order_block": {
                 "low": 1568.0,
                 "high": 1584.0,

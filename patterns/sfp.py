@@ -22,7 +22,9 @@ Direction = Literal["bullish", "bearish"]
 _BAR_SPACING_HOURS: dict[str, float] = {
     "W1": 168.0,
     "H12": 12.0,
+    "H4": 4.0,
     "H1": 1.0,
+    "M5": 5.0 / 60.0,
 }
 
 

@@ -17,10 +17,11 @@ _MAX_CANDLES = 350  # Coinbase hard cap per request
 
 # Spec timeframes -> Coinbase granularity and default bar counts.
 _TIMEFRAME_CONFIG: dict[str, dict[str, Any]] = {
+    "M5": {"granularity": "FIVE_MINUTE", "seconds": 300, "limit": 350},
     "H1": {"granularity": "ONE_HOUR", "seconds": 3600, "limit": 120},
     "H4": {"granularity": "FOUR_HOUR", "seconds": 14400, "limit": 90},
     "D1": {"granularity": "ONE_DAY", "seconds": 86400, "limit": 90},
-    # H12: resample from paginated H1 fetch (Coinbase has no native 12h candles).
+    # H12: resample from paginated H1 fetch (research / historical only).
     "H12": {
         "granularity": "ONE_HOUR",
         "seconds": 3600,
@@ -38,9 +39,10 @@ _TIMEFRAME_CONFIG: dict[str, dict[str, Any]] = {
     },
 }
 
-STRATEGY_TIMEFRAMES = ("H12", "H4", "H1")
+STRATEGY_TIMEFRAMES = ("H4", "H1", "M5")
 
 _GRANULARITY_SECONDS = {
+    "FIVE_MINUTE": 300,
     "ONE_HOUR": 3600,
     "FOUR_HOUR": 14400,
     "ONE_DAY": 86400,
@@ -215,7 +217,7 @@ def fetch_h1_bars(count: int) -> list[dict[str, float | str]]:
 
 
 def get_ohlc(timeframe: str, limit: int | None = None) -> list[dict[str, float | str]]:
-    """Pull ETH candles for a supported timeframe (H12, H4, H1, D1, W1)."""
+    """Pull ETH candles for a supported timeframe (M5, H1, H4, H12, D1, W1)."""
     tf = timeframe.upper()
     if tf not in _TIMEFRAME_CONFIG:
         raise ValueError(f"Unsupported timeframe: {timeframe}. Use one of {list(_TIMEFRAME_CONFIG)}")
@@ -241,12 +243,12 @@ def get_ohlc(timeframe: str, limit: int | None = None) -> list[dict[str, float |
 
 
 def get_all_timeframes() -> dict[str, list[dict[str, float | str]]]:
-    """Fetch OHLC for live strategy timeframes (H12, H4, H1)."""
-    h1 = get_ohlc("H1")
-    h4 = get_ohlc("H4")
-    h1_for_h12 = fetch_h1_bars(_TIMEFRAME_CONFIG["H12"]["h1_fetch_bars"])
-    h12 = _resample_h12(h1_for_h12, _TIMEFRAME_CONFIG["H12"]["limit"])
-    return {"H12": h12, "H4": h4, "H1": h1}
+    """Fetch OHLC for live strategy timeframes (H4, H1, M5)."""
+    return {
+        "H4": get_ohlc("H4"),
+        "H1": get_ohlc("H1"),
+        "M5": get_ohlc("M5"),
+    }
 
 
 def to_dataframe(bars: list[dict[str, float | str]]) -> pd.DataFrame:
@@ -259,9 +261,9 @@ def to_dataframe(bars: list[dict[str, float | str]]) -> pd.DataFrame:
 
 
 def get_spot_price() -> float:
-    """Latest ETH price from the most recent H1 close."""
-    h1 = get_ohlc("H1", limit=1)
-    return float(h1[-1]["close"])
+    """Latest ETH price from the most recent M5 close."""
+    m5 = get_ohlc("M5", limit=1)
+    return float(m5[-1]["close"])
 
 
 def get_live_spot_price() -> float:
@@ -277,20 +279,28 @@ def get_live_spot_price() -> float:
     return float(price)
 
 
+def apply_live_spot_to_bars(
+    bars: list[dict[str, float | str]],
+    spot: float,
+) -> list[dict[str, float | str]]:
+    """Update the forming candle with the live ticker for intrabar scans."""
+    if not bars:
+        return bars
+    out = [dict(b) for b in bars]
+    last = out[-1]
+    last["close"] = spot
+    last["high"] = max(float(last["high"]), spot)
+    last["low"] = min(float(last["low"]), spot)
+    out[-1] = last
+    return out
+
+
 def apply_live_spot_to_h1(
     h1_bars: list[dict[str, float | str]],
     spot: float,
 ) -> list[dict[str, float | str]]:
-    """Update the forming H1 candle with the live ticker for intrabar scans."""
-    if not h1_bars:
-        return h1_bars
-    bars = [dict(b) for b in h1_bars]
-    last = bars[-1]
-    last["close"] = spot
-    last["high"] = max(float(last["high"]), spot)
-    last["low"] = min(float(last["low"]), spot)
-    bars[-1] = last
-    return bars
+    """Backward-compatible alias — prefer ``apply_live_spot_to_bars``."""
+    return apply_live_spot_to_bars(h1_bars, spot)
 
 
 def get_daily_bars_for_levels(limit: int = 400) -> list[dict[str, float | str]]:

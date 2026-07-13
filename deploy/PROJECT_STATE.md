@@ -3,7 +3,7 @@
 > Single source of truth for architecture and status of the Telegram trading bot.
 > See **Documentation maintenance** below — update this file (and related deploy docs) whenever behaviour changes.
 
-**Last updated:** 2026-07-07
+**Last updated:** 2026-07-13
 
 ---
 
@@ -70,21 +70,22 @@ flowchart TD
 
 `research.py` pulls feeds from Coinbase; `patterns/market_context.py` → `build_market_context` assembles a `MarketContext` consumed by both the hourly cycle and the watchdog.
 
+Live strategy timeframes: **H4 → H1 → M5**. H12 remains available for research/historical studies only.
+
 ```mermaid
 flowchart TD
-    API[Coinbase OHLC API] --> R1[H12 resample from paginated H1]
-    API --> R2[H4 / H1 native]
+    API[Coinbase OHLC API] --> R1[H4 / H1 / M5 native]
+    API --> R2[H12 resample from paginated H1<br/>research only]
     API --> R3[Daily bars for key levels]
     API --> R4[Live spot ticker<br/>watchdog only]
 
     R1 --> MC[MarketContext]
-    R2 --> MC
     R3 --> MC
 
-    MC --> MC1[compute_range_24h + range state]
-    MC --> MC2[detect_sfps H12 + H1]
-    MC --> MC3[detect_htf_zones + resolve_zones]
-    MC --> MC4[find_order_blocks H1]
+    MC --> MC1[compute_range_24h on H1 + range state]
+    MC --> MC2[detect_sfps H4 + M5]
+    MC --> MC3[detect_htf_zones + resolve_zones on H4]
+    MC --> MC4[find_order_blocks M5]
     MC --> MC5[update_bearish_retest_state]
     MC --> MC6[compute_key_levels / nearest levels]
     MC --> MC7[summary_text + alerts + setup_tags]
@@ -98,12 +99,12 @@ The LLM path: render charts → propose → validate → refine loop → compose
 
 ```mermaid
 flowchart TD
-    D1[get_all_timeframes + daily bars] --> CTX[build_market_context]
-    CTX --> CH1[render_marked_charts<br/>H12/H4/H1 PNGs with overlays]
+    D1[get_all_timeframes + daily bars] --> CTX[build_market_context H4/H1/M5]
+    CTX --> CH1[render_marked_charts<br/>H4/H1/M5 PNGs with overlays]
     CH1 --> PT[propose_trade — Claude<br/>charts + Trading Guide + market_context]
 
     PT --> V1{_validate in analyze.py}
-    V1 -->|trade| V1a[H1 OB + fib zone match]
+    V1 -->|trade| V1a[M5 OB + fib zone match]
     V1a --> V1b[validate_trade_risk — validate.py<br/>stop dist, R/R, sizing]
     V1 -->|no_trade / parse_error| S0[Suggestion]
     V1b -->|pass/fail| S0
@@ -135,12 +136,12 @@ flowchart TD
 
 ```mermaid
 flowchart TD
-    WD1[get_all_timeframes + live spot<br/>apply_live_spot_to_h1] --> CTX2[build_market_context<br/>spot_override]
+    WD1[get_all_timeframes + live spot<br/>apply_live_spot_to_bars on M5] --> CTX2[build_market_context<br/>spot_override]
     CTX2 --> TRG[evaluate_triggers]
     TRG --> T1[short_trigger_retest]
-    TRG --> T2[h1_sfp_close on latest bar]
-    TRG --> T3[h1_ob_fib tranches 0.25 / 0.50 + 0.718 add]
-    TRG --> T4[h1_sfp_sweep_reversal]
+    TRG --> T2[m5_sfp_close on latest bar]
+    TRG --> T3[m5_ob_fib tranches 0.25 / 0.50 + 0.718 add]
+    TRG --> T4[m5_sfp_sweep_reversal]
 
     T1 --> CD{cooldown?}
     T2 --> CD
@@ -148,7 +149,7 @@ flowchart TD
     CD -->|active| WSKIP[skip trigger]
     CD -->|ok| BS[build_suggestion programmatic]
 
-    BS --> V2[validate_suggestion<br/>same H1 OB + fib + trade risk]
+    BS --> V2[validate_suggestion<br/>same M5 OB + fib + trade risk]
     V2 --> WCH[render output charts]
     WCH --> WLG[ledger + paper.update]
     WLG --> WBD[notify.broadcast / broadcast_text]
@@ -206,21 +207,21 @@ Legend: ✅ done · 🟡 in progress · 🔧 needs work · ⬜ planned · ⚠️
 
 | Component | File(s) | Status | Notes |
 |---|---|---|---|
-| Coinbase OHLC ingest | `research.py` | ✅ | H12 resample, H4/H1 native, daily, live spot |
-| Market context | `patterns/market_context.py` | ✅ | alerts, setup_tags, summary_text |
-| SFP detection | `patterns/sfp.py` | ✅ | H12 + H1 |
-| HTF zones | `patterns/htf_structure.py`, `patterns/zone_resolver.py` | 🟡 | resolve_zones tuning |
-| Order blocks | `patterns/order_block.py` | 🟡 | H1 OB + fib matching |
-| 24h range | `patterns/range_24h.py` | ✅ | |
+| Coinbase OHLC ingest | `research.py` | ✅ | H4/H1/M5 live; H12 resample research-only; daily; live spot |
+| Market context | `patterns/market_context.py` | ✅ | alerts, setup_tags, summary_text (H4/M5) |
+| SFP detection | `patterns/sfp.py` | ✅ | H4 + M5 (live); H12 still used in research |
+| HTF zones | `patterns/htf_structure.py`, `patterns/zone_resolver.py` | 🟡 | detect_zones on H4; resolve_zones tuning |
+| Order blocks | `patterns/order_block.py` | 🟡 | M5 OB + fib matching |
+| 24h range | `patterns/range_24h.py` | ✅ | computed on H1 bars |
 | Bearish retest state | `patterns/setup_state.py` | ✅ | |
 | Hourly cycle | `agent.py` | ✅ | |
 | Trade proposal (LLM) | `analyze.py` | ✅ | JSON retry + `_validate` |
 | Trade risk validation | `validate.py` | ✅ | stop dist, R/R, sizing |
 | Refine / critic loop | `critic.py` | ✅ | pre-broadcast retries; post-cycle monitor |
-| Watchdog | `watchdog.py` | ✅ | 3 triggers, cooldown, no LLM; macro soft gates |
+| Watchdog | `watchdog.py` | ✅ | M5 OB fib triggers, cooldown, no LLM; macro soft gates |
 | Macro context | `macro/` | ✅ | RSS poll, webhook ingest, keyword→Haiku classify, pulse, dashboard |
 | Chat Q&A | `bot.py`, `chat.py` | ✅ | snapshot-grounded + chat audit |
-| Telegram research | `research_reports/`, `metrics/`, `analytics.py` | ✅ | `/research` catalog; snapshot digests + SFP studies |
+| Telegram research | `research_reports/`, `metrics/`, `analytics.py` | ✅ | `/research` catalog; snapshot digests + H12 SFP studies |
 | Persistence | `ledger.py`, `audit.py`, `paper.py` | ✅ | SQLite |
 | Dashboard | `dashboard/` | 🟡 | FastAPI read-only + macro news monitor |
 | Paper trading | `paper.py` | ✅ | fixed 25% deploy sizing, FIFO cap, epoch archives |
@@ -237,18 +238,19 @@ Defaults from `bot_config.py` (non-secret tunables). Secrets and portfolio size 
 | Flag / setting | Default | Effect |
 |---|---|---|
 | `WATCHDOG_ENABLED` | `True` | enables sub-hourly watchdog job |
-| `WATCHDOG_INTERVAL_SEC` | `180` | scan cadence (clamped 60–300s in `main.py`) |
-| `WATCHDOG_COOLDOWN_SEC` | `21600` (6h) | suppress repeat fire on same H1 OB |
+| `WATCHDOG_INTERVAL_SEC` | `60` | scan cadence (clamped 60–300s in `main.py`) |
+| `WATCHDOG_COOLDOWN_SEC` | `1800` (30m) | suppress repeat fire on same M5 OB |
 | `BROADCAST_ONLY_TRADES` | `True` | suppress `no_trade` subscriber DMs |
 | `RUN_LLM_CRITIC_PRE_BROADCAST` | `True` | run LLM critic in refine loop |
 | `MAX_REFINE_PASSES` | `3` | audit retry budget before downgrade |
 | `MAX_OPEN_TRADES` | `20` | paper FIFO cap |
-| `ENTRY_FIB_LOW` / `ENTRY_FIB_HIGH` | `0.25` / `0.50` | H1 OB entry band; watchdog tranches at each level |
+| `ENTRY_FIB_LOW` / `ENTRY_FIB_HIGH` | `0.25` / `0.50` | M5 OB entry band; watchdog tranches at each level |
 | `ADD_FIB_LEVEL` | `0.718` | scale-in adds another `TRADE_DEPLOY_PCT` (1.25× max base exposure) |
 | `ENTRY_TRANCHE_DEPLOY_PCT` | `0.125` | per-tranche deploy (half of `TRADE_DEPLOY_PCT`) |
 | `TRADE_DEPLOY_PCT` | `0.25` | fixed fraction of **live paper equity** deployed as notional per full idea (R/R unaffected) |
+| `FIB_LEVEL_TOLERANCE_PCT` | `0.008` | looser "near" fib mark for M5 watchdog |
 | `MIN_ETH_QTY` / `MAX_ETH_QTY` | `0.25` / `2.0` | paper size guardrails after fixed-fraction sizing |
-| `OB_MIN_WIDTH_PCT` | `1.25` | minimum OB zone width (% of mid price; H1 rule, all TFs) |
+| `OB_MIN_WIDTH_PCT` | `1.25` | minimum OB zone width (% of mid price; applied to all TFs) |
 | `PAPER_EPOCH_LABEL` | `"5k_usd"` | dashboard epoch label |
 | `MACRO_CONTEXT_ENABLED` | `True` | RSS poll + macro advisory injection |
 | `MACRO_POLL_INTERVAL_SEC` | `300` | RSS poll cadence |
@@ -265,7 +267,7 @@ Defaults from `bot_config.py` (non-secret tunables). Secrets and portfolio size 
 
 - [ ] Live execution path (`execute.py`, `EXECUTION_MODE=shadow|live`) not implemented — paper only
 - [ ] Inline approve/reject on Telegram broadcasts not implemented (`notify.py` TODO)
-- [ ] HTF zone / H1 OB resolver edge cases under active tuning
+- [ ] HTF zone / M5 OB resolver edge cases under active tuning
 
 ---
 
@@ -273,6 +275,7 @@ Defaults from `bot_config.py` (non-secret tunables). Secrets and portfolio size 
 
 | Date | Change |
 |---|---|
+| 2026-07-13 | Live stack **H4→H1→M5** wired through agent/analyze/charts/watchdog/critic/audit/dashboard/chat. Watchdog tags `m5_ob_*_in_fib`, triggers `m5_ob_fib_*` / `m5_sfp_*`; critic codes `M5_OB_MISLABEL` / `JSON_H4_AS_M5_OB`. Fib band 0.25–0.50 unchanged; `WATCHDOG_INTERVAL_SEC=60`, cooldown 30m, `FIB_LEVEL_TOLERANCE_PCT=0.008`. H12 research topics unchanged. |
 | 2026-07-09 | `/research h12_invalidations` — last N H12 SFP invalidations with post-invalidation continuation vs mean-reversion stats + chart |
 | 2026-07-09 | Expanded `/research`: topic catalog, standardized reports, market snapshot topics (digest, macro, funding, volume, dominance, miner), SFP studies via shared `ResearchReport` format |
 | 2026-07-09 | Watchdog staged fib entries (12.5% @ 0.25 + 12.5% @ 0.50), 0.718 scale-in (+25%), and `h1_sfp_sweep_reversal` with stop at swept level. Entry band changed from 0.618–0.786 to 0.25–0.50 across guide, validation, and charts. |

@@ -1,4 +1,4 @@
-"""Tests for order block fib zones and H1/H12 matching."""
+"""Tests for order block fib zones and M5/H4 matching."""
 
 from __future__ import annotations
 
@@ -75,7 +75,7 @@ def test_h12_bounds_do_not_match_unrelated_h1_ob():
     assert find_matching_h1_ob(h12_as_ob_dict, [h1_ob], "bullish") is None
 
 
-def test_format_ob_with_fib_includes_h1_label_context():
+def test_format_ob_with_fib_includes_m5_label_context():
     ob = OrderBlock(
         direction="bullish",
         low=2380.0,
@@ -85,7 +85,7 @@ def test_format_ob_with_fib_includes_h1_label_context():
         displacement_ts="2026-06-20T14:00:00Z",
     )
     text = format_ob_with_fib(ob)
-    assert "H1 OB" in text
+    assert "M5 OB" in text
     assert "2,390.00" in text
 
 

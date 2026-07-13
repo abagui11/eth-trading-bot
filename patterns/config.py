@@ -8,7 +8,8 @@ MIN_SWEEP_PCT = 0.001  # 0.1%
 
 # Timeframe-specific SFP detection (conservative / ICT-style liquidity sweeps).
 # Weekly: meaningful swing pivots swept within a recent window (~5 months).
-# H12/H1: only the latest confirmed swing within a short lookback.
+# Live stack H4/M5: only the latest confirmed swing within a short lookback.
+# H12/H1 retained for research / historical studies.
 DETECTION: dict[str, dict[str, int | float | bool]] = {
     "W1": {
         "pivot_left": 3,
@@ -30,12 +31,30 @@ DETECTION: dict[str, dict[str, int | float | bool]] = {
         "require_extreme_pivot": True,
         "extreme_lookback": 20,
     },
+    "H4": {
+        "pivot_left": 4,
+        "pivot_right": 4,
+        "min_sweep_pct": 0.003,
+        "max_pivot_age": 42,  # bars (~1 week on H4)
+        "min_bars_since_pivot": 3,
+        "latest_pivot_only": True,
+        "require_extreme_pivot": True,
+        "extreme_lookback": 20,
+    },
     "H1": {
         "pivot_left": 3,
         "pivot_right": 3,
         "min_sweep_pct": 0.0015,
         "max_pivot_age": 48,  # bars (~2 days on H1)
         "min_bars_since_pivot": 3,
+        "latest_pivot_only": True,
+    },
+    "M5": {
+        "pivot_left": 3,
+        "pivot_right": 3,
+        "min_sweep_pct": 0.001,
+        "max_pivot_age": 288,  # bars (~24h on M5)
+        "min_bars_since_pivot": 6,
         "latest_pivot_only": True,
     },
 }
@@ -46,6 +65,7 @@ OUTCOME_N: dict[str, int] = {
     "H12": 14,
     "H4": 14,
     "H1": 24,
+    "M5": 48,
 }
 
 MOVE_PCT_B = 0.05  # 5%
@@ -54,7 +74,9 @@ MOVE_PCT_B = 0.05  # 5%
 REVERSAL_MIN_MOVE: dict[str, float] = {
     "W1": 0.02,   # 2%
     "H12": 0.015,  # 1.5%
+    "H4": 0.012,  # 1.2%
     "H1": 0.01,   # 1%
+    "M5": 0.005,  # 0.5%
 }
 
 VOLUME_SPIKE_MULT = 1.5

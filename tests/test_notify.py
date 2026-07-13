@@ -14,7 +14,7 @@ def test_hourly_monitor_report_no_trade_skipped_broadcast():
         text_excerpt="HTF bearish, no valid entry.",
         deterministic=[],
         llm_hallucinations=[],
-        llm_verified=["Bearish H12 structure cited correctly"],
+        llm_verified=["Bearish H4 structure cited correctly"],
     )
     text = format_hourly_monitor_report(verdict, broadcast_sent=False)
     assert "NO_TRADE" in text
@@ -28,9 +28,9 @@ def test_hourly_monitor_report_trade_with_issues():
         source="hourly",
         cycle_id="20260701T130000Z",
         action="deriv_sell",
-        text_excerpt="Short at H1 OB retest.",
+        text_excerpt="Short at M5 OB retest.",
         deterministic=[
-            AuditFinding(code="H1_OB_MISLABEL", message="bounds wrong"),
+            AuditFinding(code="M5_OB_MISLABEL", message="bounds wrong"),
         ],
         llm_hallucinations=[
             AuditFinding(code="LLM_HALLUCINATION", message="fake SFP"),
@@ -39,7 +39,7 @@ def test_hourly_monitor_report_trade_with_issues():
     )
     text = format_hourly_monitor_report(verdict, broadcast_sent=True)
     assert "Subscriber broadcast: sent" in text
-    assert "H1_OB_MISLABEL" in text
+    assert "M5_OB_MISLABEL" in text
     assert "LLM_HALLUCINATION" in text
     assert "sanitized" in text.lower()
 

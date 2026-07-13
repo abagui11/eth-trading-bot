@@ -25,7 +25,12 @@ def resolve_chart_path(raw: str | None) -> Path | None:
     return resolved
 
 
-def h12_marked_path(marked: dict[str, str] | None) -> Path | None:
+def h4_marked_path(marked: dict[str, str] | None) -> Path | None:
     if not marked:
         return None
-    return resolve_chart_path(marked.get("H12"))
+    return resolve_chart_path(marked.get("H4") or marked.get("H12"))
+
+
+def h12_marked_path(marked: dict[str, str] | None) -> Path | None:
+    """Alias for ``h4_marked_path`` (historical name)."""
+    return h4_marked_path(marked)
