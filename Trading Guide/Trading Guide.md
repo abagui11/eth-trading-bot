@@ -31,8 +31,8 @@ This is a high level framework for trading and can be used to trade on any timef
       1. Ie last green candle before down which breaks market structure
 
 2. With directional bias, zoom in on **H1** and focus on the order block identified in 1b above.
-   1. Find LTF trend that matches HTF trend
-      1. I.e., There may be rallies/drops that last a couple hours or days in LTF. We want to catch those. Inversely, we **may not** want to long a LTF low in a HTF downtrend, or short a LTF high in a HTF uptrend.
+   1. Note LTF vs HTF trend for context (not a hard veto).
+      1. I.e., There may be rallies/drops that last a couple hours or days in LTF. Catch those on M5 OBs/SFPs even when HTF has not flipped yet — otherwise tops/bottoms are systematically missed.
    2. Repeat steps 1bcd
       1. Mark key levels
 
@@ -50,7 +50,7 @@ This is a high level framework for trading and can be used to trade on any timef
    3. Calculate % distance between entry -> SL and TP. This is the R/R (risk/reward)
 
 5. Execute trade if below three are checked
-   1. Trade matches LTF and HTF structure
+   1. Trade is driven by M5 OB / SFP triggers (HTF is context, not a required match)
    2. Trade is within a OB, Breaker, or FVG
       1. Bonus if shortly after a SFP
    3. R/R is at least 1.0
@@ -120,7 +120,7 @@ When the M5 chart shows structure similar to this reference screenshot, the agen
 1. **Identify the 24h range** (example: 58.5–60.4 in the reference). State that the range exists in `rationale`, and flag again if price breaks above or below the range.
 2. **Identify ranging conditions** when price oscillates inside the 24h range without a clean trend.
 3. **Identify the potential order block** — use **H4 OB/BRKR boxes** on the marked charts when present; they are detected programmatically from H4 structure and cited for **HTF bias only**. For **entries**, use **M5 OBs** from programmatic context (`Detected M5 order blocks`) or infer on M5 using the same displacement rules.
-4. **Alert a potential short inside the M5 OB entry band** when HTF/LTF structure aligns (e.g., bearish M5 OB retest in the **0.25–0.50** zone with R/R ≥ 1.0). Being inside an H4 OB alone is not sufficient for entry.
+4. **Alert a potential short inside the M5 OB entry band** on a valid M5 OB/SFP trigger (e.g., bearish M5 OB retest in the **0.25–0.50** zone with R/R ≥ 1.0). Cite H4 for context; do **not** skip the short solely because H4 is still bullish. Being inside an H4 OB alone is not sufficient for entry.
 
 **Deviations / Adjustments:**
 

@@ -281,8 +281,8 @@ def build_market_context(
 
     if zone_snap.primary_bearish and zone_snap.primary_bullish:
         alerts.append(
-            "STRUCTURE CONFLICT: price inside both bullish and bearish H4 zones — "
-            "require clear LTF+HTF alignment; do not cite only the bullish OB"
+            "STRUCTURE NOTE: price inside both bullish and bearish H4 zones — "
+            "cite both for context; entries still follow M5 OB / SFP triggers"
         )
         setup_tags.append("htf_zone_conflict")
     elif zone_snap.primary_bearish:
@@ -489,7 +489,7 @@ def build_market_context(
         [
             "",
             "Decision rules:",
-            "- H4 OB/BRKR boxes = HTF structure and bias in rationale. Never label them 'M5 OB'.",
+            "- H4 OB/BRKR boxes = HTF structure context in rationale (bias only, not an entry gate). Never label them 'M5 OB'.",
             "- order_block JSON + entries = M5 OB only (from 'Detected M5 order blocks' above).",
             "- Entry must be on M5 OB fib tranches 0.25/0.50 or inside the 0.25–0.50 band unless action is no_trade.",
             "- If M5 OB overlaps an H4 OB, say 'M5 OB coincides with H4 OB' — do not conflate.",
@@ -497,7 +497,7 @@ def build_market_context(
             "- If retest status (rolling 24h) is FILLED, do NOT say price has not reached the retest zone.",
             "- Setup phase name records workflow history; retest status (rolling 24h) is recomputed each cycle — do not treat them as the same.",
             "- If setup state is bearish_retest_rejected or short_trigger_retest, strongly favor SHORT.",
-            "- If HTF zone conflict, default no_trade unless LTF+HTF align clearly.",
+            "- HTF zone overlap is informational only — do NOT block a valid M5 OB/SFP entry because HTF looks conflicted or bullish.",
             "- Only cite SFPs listed under Recent H4/M5 SFPs; do not cite Live-invalidated SFPs.",
             "- Trades: structure_chart=H4, entry_chart=M5 unless exceptional.",
             "",

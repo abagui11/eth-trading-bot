@@ -177,14 +177,50 @@ class WatchdogTriggerTests(unittest.TestCase):
         self.assertIn("HTF context:", rationale)
         self.assertIn("Aligned long setup", rationale)
 
-    def test_htf_conflict_blocks_long(self) -> None:
+    def test_htf_conflict_does_not_block_long(self) -> None:
         ob = _bullish_ob()
         spot = fib_level("bullish", ob.low, ob.high, 0.25)
         ctx = _bullish_ctx(spot)
         ctx.setup_tags.append("htf_zone_conflict")
         m5 = [_bar("2026-06-30T18:00:00Z", spot, spot + 5, spot - 5, spot)]
         triggers = evaluate_triggers(ctx, m5, positions=[])
-        self.assertFalse(any(t.name == "m5_ob_fib_long" for t in triggers))
+        self.assertTrue(any(t.name == "m5_ob_fib_long" for t in triggers))
+
+    def test_short_fires_when_htf_still_bullish(self) -> None:
+        """Dan: tops must be shortable even if HTF has not flipped bearish."""
+        ob = _bearish_ob()
+        spot = fib_level("bearish", ob.low, ob.high, 0.25)
+        bullish_htf = HTFZone(
+            "order_block",
+            "bullish",
+            2300.0,
+            2500.0,
+            "2026-06-10T10:00:00Z",
+        )
+        snap = ZoneSnapshot(
+            spot=spot,
+            zones_containing_price=[bullish_htf],
+            primary_bullish=bullish_htf,
+            primary_bearish=None,
+            nearest_bearish_above=None,
+            nearest_bullish_below=None,
+            bearish_retest_low=None,
+            bearish_retest_high=None,
+        )
+        ctx = MarketContext(
+            range_24h=None,
+            is_ranging=False,
+            range_break=None,
+            spot=spot,
+            zone_snapshot=snap,
+            setup_state=None,
+            order_blocks=[ob],
+            htf_zones=[bullish_htf],
+            setup_tags=["m5_ob_bearish_in_fib"],
+        )
+        m5 = [_bar("2026-06-30T18:00:00Z", spot, spot + 5, spot - 5, spot)]
+        triggers = evaluate_triggers(ctx, m5, positions=[])
+        self.assertTrue(any(t.name == "m5_ob_fib_short" for t in triggers))
 
 
 class WatchdogCooldownTests(unittest.TestCase):

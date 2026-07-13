@@ -76,28 +76,6 @@ def _trigger_key(trigger: WatchdogTrigger) -> str:
     return f"{trigger.name}:{trigger.ob.displacement_ts}:{sfp_ts}"
 
 
-def _htf_allows_long(ctx: MarketContext) -> bool:
-    if "htf_zone_conflict" in ctx.setup_tags:
-        return False
-    snap = ctx.zone_snapshot
-    if snap is None:
-        return False
-    if snap.primary_bearish and not snap.primary_bullish:
-        return False
-    return snap.primary_bullish is not None
-
-
-def _htf_allows_short(ctx: MarketContext) -> bool:
-    if "htf_zone_conflict" in ctx.setup_tags:
-        return False
-    snap = ctx.zone_snapshot
-    if snap is None:
-        return False
-    if snap.primary_bullish and not snap.primary_bearish:
-        return False
-    return snap.primary_bearish is not None or "short_trigger_retest" in ctx.setup_tags
-
-
 def _obs_in_fib(ctx: MarketContext, direction: Direction) -> list[OrderBlock]:
     matches = [
         ob
@@ -130,10 +108,7 @@ def _append_tranche_triggers(
     ob: OrderBlock,
     direction: Direction,
     positions: list[dict],
-    allows: bool,
 ) -> None:
-    if not allows:
-        return
     ref = order_block_ref(ob)
     pairs = (
         (bot_config.ENTRY_FIB_TRANCHE_1, "0.25", bot_config.ENTRY_TRANCHE_DEPLOY_PCT),
@@ -159,8 +134,8 @@ def _append_tranche_triggers(
                 direction=direction,
                 ob=ob,
                 reason=(
-                    f"Price at M5 OB fib {tranche} tranche ({fib_level(direction, ob.low, ob.high, fib_mark):,.2f}) "
-                    f"with aligned HTF structure"
+                    f"Price at M5 OB fib {tranche} tranche "
+                    f"({fib_level(direction, ob.low, ob.high, fib_mark):,.2f})"
                 ),
                 priority=70,
                 deploy_pct=deploy_pct,
@@ -269,8 +244,6 @@ def evaluate_triggers(
                     continue
                 if price_in_ob(ctx.spot, ob):
                     continue
-                if not _htf_allows_long(ctx):
-                    continue
                 stop = round(sfp.swept_level * (1 - SL_BUFFER_PCT), 2)
                 triggers.append(
                     WatchdogTrigger(
@@ -295,8 +268,6 @@ def evaluate_triggers(
                 if not price_in_full_ob(ctx.spot, ob):
                     continue
                 if price_in_ob(ctx.spot, ob):
-                    continue
-                if not _htf_allows_short(ctx):
                     continue
                 stop = round(sfp.swept_level * (1 + SL_BUFFER_PCT), 2)
                 triggers.append(
@@ -350,7 +321,6 @@ def evaluate_triggers(
                 ob=ob,
                 direction="bullish",
                 positions=open_positions,
-                allows=_htf_allows_long(ctx),
             )
 
     if "m5_ob_bearish_in_fib" in ctx.setup_tags:
@@ -365,7 +335,6 @@ def evaluate_triggers(
                 ob=ob,
                 direction="bearish",
                 positions=open_positions,
-                allows=_htf_allows_short(ctx),
             )
 
     triggers.sort(key=lambda t: t.priority, reverse=True)
