@@ -4,7 +4,7 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
   <title>ETH Trading Agent</title>
-  <link rel="stylesheet" href="/static/style.css">
+  <link rel="stylesheet" href="/static/style.css?v=journal6">
 </head>
 <body>
   {% macro tip_badge(label, class_name='badge-none') -%}
@@ -15,48 +15,48 @@
   {#- Button accordion (not <details>) — native disclosure markers can't be reliably hidden. -#}
   <div class="trade-card{% if mode == 'open' %} trade-live{% elif mode == 'archived' %} trade-archived{% endif %}">
     <button type="button" class="trade-summary" aria-expanded="false">
-      <div class="trade-summary-inner">
-        <div class="trade-summary-main">
-          <div class="trade-title">
-            <span class="trade-chevron" aria-hidden="true">▸</span>
-            <span class="trade-title-text">{{ trade_title(t.opened_at, t.side) }}</span>
-          </div>
-          <div class="trade-badges">
-            {{ tip_badge(t.side, 'badge-good' if t.side == 'long' else 'badge-bad') }}
-            {% if mode == 'open' %}
-            {{ tip_badge('LIVE', 'badge-live') }}
-            {% elif t.close_reason %}
-            {{ tip_badge(t.close_reason) }}
-            {% endif %}
-            {% if t.action %}{{ tip_badge(t.action) }}{% endif %}
-            {% for tag in (t.setup_tags or [])[:4] %}
-            {{ tip_badge(tag) }}
-            {% endfor %}
-          </div>
-          <div class="trade-prices">
-            {% if mode == 'open' %}
-            ${{ "%.2f"|format(t.entry or t.avg_entry) }}
-            {% if t.spot %} · mark ${{ "%.2f"|format(t.spot) }}{% endif %}
-            {% else %}
-            ${{ "%.2f"|format(t.entry) }} → ${{ "%.2f"|format(t.exit) }}
-            {% endif %}
-          </div>
-          <div class="trade-pnl {{ 'pos-row' if t.is_winner else 'neg-row' }}">
-            {{ "%+.2f"|format(t.pnl_usd) }}
-            <span class="trade-pnl-pct">({{ "%+.1f"|format(t.pnl_pct) }}%)</span>
-          </div>
-          <div class="trade-meta sub">
-            {% if mode == 'open' %}
-            Opened {{ t.opened_at|trade_time }}
-            {% else %}
-            {{ t.opened_at|trade_time }} → {{ t.closed_at|trade_time }}
-            {% endif %}
-          </div>
-        </div>
-        {% if t.thumb_chart_url %}
+      <span class="trade-summary-main">
+        <span class="trade-title">
+          <span class="trade-chevron" aria-hidden="true">▸</span>
+          <span class="trade-title-text">{{ trade_title(t.opened_at, t.side) }}</span>
+        </span>
+        <span class="trade-badges">
+          {{ tip_badge(t.side, 'badge-good' if t.side == 'long' else 'badge-bad') }}
+          {% if mode == 'open' %}
+          {{ tip_badge('LIVE', 'badge-live') }}
+          {% elif t.close_reason %}
+          {{ tip_badge(t.close_reason) }}
+          {% endif %}
+          {% if t.action %}{{ tip_badge(t.action) }}{% endif %}
+          {% for tag in (t.setup_tags or [])[:4] %}
+          {{ tip_badge(tag) }}
+          {% endfor %}
+        </span>
+        <span class="trade-prices">
+          {% if mode == 'open' %}
+          ${{ "%.2f"|format(t.entry or t.avg_entry) }}
+          {% if t.spot %} · mark ${{ "%.2f"|format(t.spot) }}{% endif %}
+          {% else %}
+          ${{ "%.2f"|format(t.entry) }} → ${{ "%.2f"|format(t.exit) }}
+          {% endif %}
+        </span>
+        <span class="trade-pnl {{ 'pos-row' if t.is_winner else 'neg-row' }}">
+          {{ "%+.2f"|format(t.pnl_usd) }}
+          <span class="trade-pnl-pct">({{ "%+.1f"|format(t.pnl_pct) }}%)</span>
+        </span>
+        <span class="trade-meta sub">
+          {% if mode == 'open' %}
+          Opened {{ t.opened_at|trade_time }}
+          {% else %}
+          {{ t.opened_at|trade_time }} → {{ t.closed_at|trade_time }}
+          {% endif %}
+        </span>
+      </span>
+      {% if t.thumb_chart_url %}
+      <span class="trade-thumb-wrap" aria-hidden="true">
         <img class="trade-thumb" src="{{ t.thumb_chart_url }}" alt="" loading="lazy" width="120" height="72">
-        {% endif %}
-      </div>
+      </span>
+      {% endif %}
     </button>
     <div class="trade-body" hidden>
       {% if t.structure_chart_url or t.execution_chart_url %}

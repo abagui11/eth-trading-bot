@@ -161,16 +161,17 @@ class DashboardUiSmokeTests(unittest.TestCase):
     def test_css_image_caps_and_macro_scroll(self) -> None:
         css = self.client.get("/static/style.css").text
         self.assertIn(".trade-body[hidden]", css)
-        self.assertIn(".trade-summary-inner", css)
+        self.assertIn(".trade-summary-main", css)
         self.assertIn("max-height: 280px", css)
         self.assertIn("max-width: 100%", css)
         self.assertIn(".macro-scroll", css)
         self.assertRegex(css, r"\.macro-scroll\s*\{[^}]*aspect-ratio:\s*1\s*/\s*1")
         self.assertRegex(css, r"\.macro-scroll\s*\{[^}]*width:\s*min\(100%,\s*480px\)")
-        self.assertIn(".trade-summary .trade-thumb", css)
+        self.assertIn(".trade-thumb-wrap", css)
         self.assertIn(".trade-chart .chart-img", css)
         self.assertIn("height: 200px", css)
-        self.assertIn("gap: 16px", css)
+        self.assertIn("gap: 20px", css)
+        self.assertIn("display: flex", css)
         self.assertNotIn("<details", self.client.get("/").text)
         html = self.client.get("/").text
         self.assertEqual(html.count('class="macro-scroll"'), 1)
