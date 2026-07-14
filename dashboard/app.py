@@ -22,6 +22,12 @@ from dashboard.charts import (
     resolve_chart_path,
     resolve_trade_chart,
 )
+from dashboard.formatting import (
+    format_trade_date,
+    format_trade_time,
+    tag_tooltip,
+    trade_title,
+)
 from macro import store as macro_store
 from macro.context import macro_payload_for_dashboard
 from macro.ingest import ingest_headline
@@ -47,6 +53,10 @@ def create_app() -> FastAPI:
     macro_store.init_db()
 
     templates = Jinja2Templates(directory=str(_PKG_DIR / "templates"))
+    templates.env.filters["trade_time"] = format_trade_time
+    templates.env.filters["trade_date"] = format_trade_date
+    templates.env.filters["tag_tip"] = tag_tooltip
+    templates.env.globals["trade_title"] = trade_title
     static_dir = _PKG_DIR / "static"
     if static_dir.is_dir():
         app.mount("/static", StaticFiles(directory=str(static_dir)), name="static")

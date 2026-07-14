@@ -135,7 +135,12 @@ class DashboardUiSmokeTests(unittest.TestCase):
         self.assertNotIn("<details open", html)
         self.assertNotIn('<details class="trade-card" open', html)
         self.assertIn('class="trade-summary-inner"', html)
+        self.assertIn('class="trade-title"', html)
+        self.assertIn("Jul 14 [long]", html)
+        self.assertIn("4:00 PM", html)  # opened_at 16:00Z
+        self.assertNotIn("2026-07-14T16:00", html)
         self.assertIn('class="trade-body"', html)
+        self.assertIn('title="Long position', html)
         # Exactly as many trade cards as details wrappers.
         n_details = len(re.findall(r"<details\s+class=\"trade-card", html))
         n_bodies = len(re.findall(r'class="trade-body"', html))
@@ -151,6 +156,8 @@ class DashboardUiSmokeTests(unittest.TestCase):
         self.assertRegex(css, r"\.trade-summary\s*\{[^}]*display:\s*block")
         self.assertIn("max-height: 280px", css)
         self.assertIn("max-width: 100%", css)
+        self.assertIn(".macro-scroll", css)
+        self.assertRegex(css, r"\.macro-scroll\s*\{[^}]*max-height:\s*220px")
         # Guard against regressing to flex-on-summary.
         self.assertNotRegex(
             css,

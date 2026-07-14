@@ -216,6 +216,25 @@ a { color: var(--accent); }
 
 .macro-gate { color: var(--warn); font-weight: 600; }
 
+.macro-scroll {
+  max-height: 220px;
+  overflow-y: auto;
+  overflow-x: hidden;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 4px 10px;
+  background: var(--bg);
+  -webkit-overflow-scrolling: touch;
+}
+
+.macro-scroll .macro-item:last-child {
+  border-bottom: none;
+}
+
+.badge[title] {
+  cursor: help;
+}
+
 .badge-macro-sev-5 { background: rgba(248, 81, 73, 0.25); color: var(--bad); }
 .badge-macro-sev-4 { background: rgba(210, 153, 34, 0.25); color: var(--warn); }
 .badge-macro-sev-3 { background: rgba(88, 166, 255, 0.2); color: var(--accent); }
@@ -280,18 +299,35 @@ a { color: var(--accent); }
   list-style: none;
 }
 
+details.trade-card > summary {
+  list-style: none;
+}
+
 .trade-summary::-webkit-details-marker,
 .trade-summary::marker {
   display: none;
-  content: "";
+  content: none;
 }
 
 .trade-summary-inner {
   display: flex;
   gap: 12px;
-  align-items: center;
+  align-items: flex-start;
   justify-content: space-between;
   min-width: 0;
+}
+
+.trade-title {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 6px;
+  font-weight: 700;
+  font-size: 0.95rem;
+}
+
+.trade-title-text {
+  line-height: 1.2;
 }
 
 .trade-chevron {
@@ -299,6 +335,7 @@ a { color: var(--accent); }
   font-size: 0.75rem;
   flex-shrink: 0;
   transition: transform 0.15s ease;
+  line-height: 1;
 }
 
 .trade-card[open] > .trade-summary .trade-chevron {
@@ -345,6 +382,7 @@ a { color: var(--accent); }
   max-width: 88px;
   height: 56px;
   max-height: 56px;
+  margin-top: 2px;
   object-fit: cover;
   border-radius: 6px;
   background: var(--card);

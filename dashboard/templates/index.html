@@ -7,20 +7,31 @@
   <link rel="stylesheet" href="/static/style.css">
 </head>
 <body>
+  {% macro tip_badge(label, class_name='badge-none') -%}
+  <span class="badge {{ class_name }}" title="{{ label|tag_tip }}">{{ label }}</span>
+  {%- endmacro %}
+
   {% macro trade_card(t, mode) %}
   {#- Flex must NOT sit on <summary> — that breaks collapse in several browsers. -#}
   <details class="trade-card{% if mode == 'open' %} trade-live{% elif mode == 'archived' %} trade-archived{% endif %}">
     <summary class="trade-summary">
       <div class="trade-summary-inner">
         <div class="trade-summary-main">
+          <div class="trade-title">
+            <span class="trade-chevron" aria-hidden="true">▸</span>
+            <span class="trade-title-text">{{ trade_title(t.opened_at, t.side) }}</span>
+          </div>
           <div class="trade-badges">
-            <span class="badge {% if t.side == 'long' %}badge-good{% else %}badge-bad{% endif %}">{{ t.side }}</span>
+            {{ tip_badge(t.side, 'badge-good' if t.side == 'long' else 'badge-bad') }}
             {% if mode == 'open' %}
-            <span class="badge badge-live">LIVE</span>
+            {{ tip_badge('LIVE', 'badge-live') }}
             {% elif t.close_reason %}
-            <span class="badge badge-none">{{ t.close_reason }}</span>
+            {{ tip_badge(t.close_reason) }}
             {% endif %}
-            {% if t.action %}<span class="badge badge-none">{{ t.action }}</span>{% endif %}
+            {% if t.action %}{{ tip_badge(t.action) }}{% endif %}
+            {% for tag in (t.setup_tags or [])[:4] %}
+            {{ tip_badge(tag) }}
+            {% endfor %}
           </div>
           <div class="trade-prices">
             {% if mode == 'open' %}
@@ -36,17 +47,15 @@
           </div>
           <div class="trade-meta sub">
             {% if mode == 'open' %}
-            Opened {{ t.opened_at[:16] if t.opened_at else '—' }}
+            Opened {{ t.opened_at|trade_time }}
             {% else %}
-            {{ t.opened_at[:16] if t.opened_at else '—' }}
-            → {{ t.closed_at[:16] if t.closed_at else '—' }}
+            {{ t.opened_at|trade_time }} → {{ t.closed_at|trade_time }}
             {% endif %}
           </div>
         </div>
         {% if t.thumb_chart_url %}
         <img class="trade-thumb" src="{{ t.thumb_chart_url }}" alt="" loading="lazy" width="120" height="72">
         {% endif %}
-        <span class="trade-chevron" aria-hidden="true">▸</span>
       </div>
     </summary>
     <div class="trade-body">
@@ -115,7 +124,7 @@
       {% if t.setup_tags %}
       <div class="trade-tags">
         {% for tag in t.setup_tags %}
-        <span class="badge badge-none">{{ tag }}</span>
+        {{ tip_badge(tag) }}
         {% endfor %}
       </div>
       {% endif %}
@@ -191,41 +200,45 @@
       </p>
       {% if macro.active %}
       <p class="sub" style="margin-bottom:6px">Active (injected into agent)</p>
-      <ul class="macro-list" id="macro-active">
-        {% for item in macro.active %}
-        <li class="macro-item macro-active-item">
-          <span class="badge badge-macro-sev-{{ item.severity }}">SEV {{ item.severity }}</span>
-          <span class="badge badge-none">{{ item.eth_bias or 'neutral' }}</span>
-          {% if item.url %}
-          <a href="{{ item.url }}" target="_blank" rel="noopener">{{ item.title }}</a>
-          {% else %}
-          {{ item.title }}
-          {% endif %}
-          {% if item.eth_impact_summary %}
-          <p class="macro-impact">{{ item.eth_impact_summary }}</p>
-          {% endif %}
-        </li>
-        {% endfor %}
-      </ul>
+      <div class="macro-scroll">
+        <ul class="macro-list" id="macro-active">
+          {% for item in macro.active %}
+          <li class="macro-item macro-active-item">
+            <span class="badge badge-macro-sev-{{ item.severity }}">SEV {{ item.severity }}</span>
+            <span class="badge badge-none">{{ item.eth_bias or 'neutral' }}</span>
+            {% if item.url %}
+            <a href="{{ item.url }}" target="_blank" rel="noopener">{{ item.title }}</a>
+            {% else %}
+            {{ item.title }}
+            {% endif %}
+            {% if item.eth_impact_summary %}
+            <p class="macro-impact">{{ item.eth_impact_summary }}</p>
+            {% endif %}
+          </li>
+          {% endfor %}
+        </ul>
+      </div>
       {% else %}
       <p class="sub" id="macro-active-empty">No active macro events (severity ≥ 3).</p>
       {% endif %}
       {% if macro.recent %}
       <p class="sub" style="margin:12px 0 6px">Recent ingested</p>
-      <ul class="macro-list" id="macro-recent">
-        {% for item in macro.recent[:15] %}
-        <li class="macro-item {% if item.status == 'ignored' %}macro-ignored{% endif %}">
-          <span class="badge badge-none">kw {{ item.keyword_score }}</span>
-          {% if item.severity %}<span class="badge badge-macro-sev-{{ item.severity }}">SEV {{ item.severity }}</span>{% endif %}
-          <span class="macro-status">{{ item.status }}</span>
-          {% if item.url %}
-          <a href="{{ item.url }}" target="_blank" rel="noopener">{{ item.title }}</a>
-          {% else %}
-          {{ item.title }}
-          {% endif %}
-        </li>
-        {% endfor %}
-      </ul>
+      <div class="macro-scroll">
+        <ul class="macro-list" id="macro-recent">
+          {% for item in macro.recent[:15] %}
+          <li class="macro-item {% if item.status == 'ignored' %}macro-ignored{% endif %}">
+            <span class="badge badge-none">kw {{ item.keyword_score }}</span>
+            {% if item.severity %}<span class="badge badge-macro-sev-{{ item.severity }}">SEV {{ item.severity }}</span>{% endif %}
+            <span class="macro-status">{{ item.status }}</span>
+            {% if item.url %}
+            <a href="{{ item.url }}" target="_blank" rel="noopener">{{ item.title }}</a>
+            {% else %}
+            {{ item.title }}
+            {% endif %}
+          </li>
+          {% endfor %}
+        </ul>
+      </div>
       {% endif %}
       {% else %}
       <p class="sub">Macro context disabled.</p>
