@@ -12,9 +12,9 @@
   {%- endmacro %}
 
   {% macro trade_card(t, mode) %}
-  {#- Flex must NOT sit on <summary> — that breaks collapse in several browsers. -#}
-  <details class="trade-card{% if mode == 'open' %} trade-live{% elif mode == 'archived' %} trade-archived{% endif %}">
-    <summary class="trade-summary">
+  {#- Button accordion (not <details>) — native disclosure markers can't be reliably hidden. -#}
+  <div class="trade-card{% if mode == 'open' %} trade-live{% elif mode == 'archived' %} trade-archived{% endif %}">
+    <button type="button" class="trade-summary" aria-expanded="false">
       <div class="trade-summary-inner">
         <div class="trade-summary-main">
           <div class="trade-title">
@@ -57,8 +57,8 @@
         <img class="trade-thumb" src="{{ t.thumb_chart_url }}" alt="" loading="lazy" width="120" height="72">
         {% endif %}
       </div>
-    </summary>
-    <div class="trade-body">
+    </button>
+    <div class="trade-body" hidden>
       {% if t.structure_chart_url or t.execution_chart_url %}
       <div class="trade-charts">
         {% if t.structure_chart_url %}
@@ -143,7 +143,7 @@
         {% if t.close_cycle_id %} · Close cycle {{ t.close_cycle_id }}{% endif %}
       </p>
     </div>
-  </details>
+  </div>
   {% endmacro %}
 
   <div class="wrap">
@@ -198,9 +198,9 @@
       <p class="sub" style="margin-bottom:10px">
         Sources: {{ macro.monitored_sources | join(', ') }}
       </p>
-      {% if macro.active %}
-      <p class="sub" style="margin-bottom:6px">Active (injected into agent)</p>
-      <div class="macro-scroll">
+      <div class="macro-scroll" id="macro-feed">
+        {% if macro.active %}
+        <p class="sub macro-scroll-label">Active (injected into agent)</p>
         <ul class="macro-list" id="macro-active">
           {% for item in macro.active %}
           <li class="macro-item macro-active-item">
@@ -217,13 +217,11 @@
           </li>
           {% endfor %}
         </ul>
-      </div>
-      {% else %}
-      <p class="sub" id="macro-active-empty">No active macro events (severity ≥ 3).</p>
-      {% endif %}
-      {% if macro.recent %}
-      <p class="sub" style="margin:12px 0 6px">Recent ingested</p>
-      <div class="macro-scroll">
+        {% else %}
+        <p class="sub" id="macro-active-empty">No active macro events (severity ≥ 3).</p>
+        {% endif %}
+        {% if macro.recent %}
+        <p class="sub macro-scroll-label">Recent ingested</p>
         <ul class="macro-list" id="macro-recent">
           {% for item in macro.recent[:15] %}
           <li class="macro-item {% if item.status == 'ignored' %}macro-ignored{% endif %}">
@@ -238,8 +236,8 @@
           </li>
           {% endfor %}
         </ul>
+        {% endif %}
       </div>
-      {% endif %}
       {% else %}
       <p class="sub">Macro context disabled.</p>
       {% endif %}
@@ -363,6 +361,20 @@
   </div>
 
   <script>
+    function initTradeCards() {
+      document.querySelectorAll('.trade-card > .trade-summary').forEach(function (btn) {
+        btn.addEventListener('click', function () {
+          var card = btn.closest('.trade-card');
+          var body = card.querySelector('.trade-body');
+          var open = !card.classList.contains('is-open');
+          card.classList.toggle('is-open', open);
+          btn.setAttribute('aria-expanded', open ? 'true' : 'false');
+          if (body) body.hidden = !open;
+        });
+      });
+    }
+    initTradeCards();
+
     async function refresh() {
       try {
         const [spotRes, statusRes, macroRes] = await Promise.all([

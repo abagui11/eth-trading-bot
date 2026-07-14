@@ -54,7 +54,6 @@ class DashboardUiSmokeTests(unittest.TestCase):
         self._charts.mkdir()
         self._db.write_bytes(b"")
 
-        # Minimal schema via paper/ledger init after LEDGER_DB patch.
         self._patches = [
             patch.object(config, "LEDGER_DB", self._db),
             patch.object(config, "CHARTS_DIR", self._charts),
@@ -105,10 +104,23 @@ class DashboardUiSmokeTests(unittest.TestCase):
             patch(
                 "dashboard.data.get_macro_payload",
                 return_value={
-                    "enabled": False,
-                    "posture": {},
-                    "monitored_sources": [],
-                    "active": [],
+                    "enabled": True,
+                    "posture": {
+                        "eth_bias": "neutral",
+                        "max_severity": 0,
+                        "gate_long": False,
+                        "gate_short": False,
+                    },
+                    "monitored_sources": ["test"],
+                    "active": [
+                        {
+                            "severity": 4,
+                            "eth_bias": "bearish",
+                            "title": "Test macro",
+                            "url": None,
+                            "eth_impact_summary": "Impact",
+                        }
+                    ],
                     "recent": [],
                 },
             ),
@@ -127,42 +139,37 @@ class DashboardUiSmokeTests(unittest.TestCase):
             p.stop()
         self._tmpdir.cleanup()
 
-    def test_trade_cards_start_collapsed(self) -> None:
+    def test_trade_cards_use_button_accordion_collapsed(self) -> None:
         html = self.client.get("/").text
+        # No native <details> — avoids double disclosure arrows.
+        self.assertNotIn("<details", html)
+        self.assertNotIn("<summary", html)
         self.assertIn('class="trade-card trade-live"', html)
-        self.assertIn('class="trade-card"', html)
-        # No card should be pre-opened.
-        self.assertNotIn("<details open", html)
-        self.assertNotIn('<details class="trade-card" open', html)
-        self.assertIn('class="trade-summary-inner"', html)
         self.assertIn('class="trade-title"', html)
         self.assertIn("Jul 14 [long]", html)
-        self.assertIn("4:00 PM", html)  # opened_at 16:00Z
+        self.assertIn("4:00 PM", html)
         self.assertNotIn("2026-07-14T16:00", html)
-        self.assertIn('class="trade-body"', html)
+        self.assertIn('aria-expanded="false"', html)
+        self.assertIn('class="trade-body" hidden', html)
+        self.assertIn("initTradeCards", html)
         self.assertIn('title="Long position', html)
-        # Exactly as many trade cards as details wrappers.
-        n_details = len(re.findall(r"<details\s+class=\"trade-card", html))
-        n_bodies = len(re.findall(r'class="trade-body"', html))
-        self.assertEqual(n_details, 2)
+        n_buttons = len(re.findall(r'<button type="button" class="trade-summary"', html))
+        n_bodies = len(re.findall(r'class="trade-body" hidden', html))
+        self.assertEqual(n_buttons, 2)
         self.assertEqual(n_bodies, 2)
 
-    def test_css_forces_collapse_and_image_caps(self) -> None:
+    def test_css_image_caps_and_macro_scroll(self) -> None:
         css = self.client.get("/static/style.css").text
-        self.assertIn(".trade-card:not([open]) > .trade-body", css)
-        self.assertRegex(css, r"\.trade-card:not\(\[open\]\)\s*>\s*\.trade-body\s*\{[^}]*display:\s*none")
-        # Flex belongs on the inner wrapper, not on summary.
+        self.assertIn(".trade-body[hidden]", css)
         self.assertIn(".trade-summary-inner", css)
-        self.assertRegex(css, r"\.trade-summary\s*\{[^}]*display:\s*block")
         self.assertIn("max-height: 280px", css)
         self.assertIn("max-width: 100%", css)
         self.assertIn(".macro-scroll", css)
-        self.assertRegex(css, r"\.macro-scroll\s*\{[^}]*max-height:\s*220px")
-        # Guard against regressing to flex-on-summary.
-        self.assertNotRegex(
-            css,
-            r"\.trade-summary\s*\{[^}]*display:\s*flex",
-        )
+        self.assertRegex(css, r"\.macro-scroll\s*\{[^}]*max-height:\s*260px")
+        self.assertNotIn("<details", self.client.get("/").text)
+        html = self.client.get("/").text
+        self.assertEqual(html.count('class="macro-scroll"'), 1)
+        self.assertIn('id="macro-feed"', html)
 
 
 if __name__ == "__main__":
