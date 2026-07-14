@@ -217,7 +217,7 @@ a { color: var(--accent); }
 .macro-gate { color: var(--warn); font-weight: 600; }
 
 .macro-scroll {
-  width: min(100%, 480px);
+  width: min(100%, 640px);
   aspect-ratio: 1 / 1;
   max-height: none;
   overflow-y: auto;

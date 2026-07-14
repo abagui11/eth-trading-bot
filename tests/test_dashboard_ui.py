@@ -166,7 +166,9 @@ class DashboardUiSmokeTests(unittest.TestCase):
         self.assertIn("max-width: 100%", css)
         self.assertIn(".macro-scroll", css)
         self.assertRegex(css, r"\.macro-scroll\s*\{[^}]*aspect-ratio:\s*1\s*/\s*1")
-        self.assertRegex(css, r"\.macro-scroll\s*\{[^}]*width:\s*min\(100%,\s*480px\)")
+        self.assertRegex(
+            css, r"\.macro-scroll\s*\{[^}]*width:\s*min\(100%,\s*640px\)"
+        )
         self.assertIn(".trade-thumb-wrap", css)
         self.assertIn(".trade-chart .chart-img", css)
         self.assertIn("height: 200px", css)

@@ -28,9 +28,18 @@ class DashboardFormattingTests(unittest.TestCase):
 
     def test_tag_tooltips(self) -> None:
         self.assertIn("24h", tag_tooltip("ranging"))
+        self.assertIn("Ranging", tag_tooltip("ranging"))
+        self.assertIn("SFP", tag_tooltip("h4_sfp_bullish"))
         self.assertIn("H4", tag_tooltip("h4_sfp_bearish"))
         self.assertIn("M5", tag_tooltip("m5_sfp_bullish"))
+        self.assertIn("0.25", tag_tooltip("m5_ob_bearish_in_fib"))
         self.assertIn("stop-loss", tag_tooltip("stop_loss").lower())
+        self.assertIn("Macro", tag_tooltip("macro_gate_long"))
+        # Unknown tags still get a readable tip (never blank / "?").
+        tip = tag_tooltip("some_future_tag")
+        self.assertTrue(tip)
+        self.assertNotEqual(tip.strip(), "?")
+        self.assertIn("some future tag", tip)
 
 
 if __name__ == "__main__":

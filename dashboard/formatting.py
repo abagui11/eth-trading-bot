@@ -5,6 +5,7 @@ from __future__ import annotations
 from datetime import datetime, timezone
 
 # Hard-coded glossary for setup tags / badges shown in the journal.
+# Wording follows Trading Guide/Trading Guide.md (24h range, SFP, OB/fib stack).
 TAG_GLOSSARY: dict[str, str] = {
     # Side / status / close reasons
     "long": "Long position — profit if ETH rises.",
@@ -21,28 +22,77 @@ TAG_GLOSSARY: dict[str, str] = {
     "deriv_buy": "Derivatives long suggestion.",
     "deriv_sell": "Derivatives short suggestion.",
     "no_trade": "Cycle concluded with no actionable trade.",
-    # Market context / setup tags
-    "ranging": "Price is chopping inside the 24h high–low range (no clean break).",
+    # Market context / setup tags (Trading Guide: 24h range + SFP + OB fib)
+    "ranging": (
+        "Ranging: price is oscillating inside the 24h high–low without a clean "
+        "trend or range break (Trading Guide — identify ranging conditions)."
+    ),
+    "range_24h": "Trade idea references the 24h high–low range envelope.",
+    "range_24h_ranging": (
+        "Ranging inside the 24h range — chop between the session high and low."
+    ),
     "range_24h_new": "A new 24h range window was just established.",
     "range_24h_break_above": "Price broke above the prior 24h range high.",
     "range_24h_break_below": "Price broke below the prior 24h range low.",
     "range_high_expanded": "The 24h range high extended higher this cycle.",
-    "h4_sfp_bullish": "H4 bullish swing-failure pattern — sweep of lows that failed and reversed up.",
-    "h4_sfp_bearish": "H4 bearish swing-failure pattern — sweep of highs that failed and reversed down.",
-    "m5_sfp_bullish": "M5 bullish swing-failure — short-term low sweep that reversed up.",
-    "m5_sfp_bearish": "M5 bearish swing-failure — short-term high sweep that reversed down.",
-    "m5_ob_bullish_in_fib": "Price is inside a bullish M5 order block’s 0.25–0.50 fib entry band.",
-    "m5_ob_bearish_in_fib": "Price is inside a bearish M5 order block’s 0.25–0.50 fib entry band.",
-    "m5_ob_bullish_no_fib": "Bullish M5 order block nearby, but price is not in the fib entry band yet.",
-    "m5_ob_bearish_no_fib": "Bearish M5 order block nearby, but price is not in the fib entry band yet.",
-    "htf_zone_conflict": "Short-term signal conflicts with the H4 zone bias.",
-    "retest_already_tagged": "This bearish-retest setup was already tagged earlier — avoid duplicates.",
-    "short_trigger_retest": "Bearish retest trigger armed on a marked H4/M5 structure.",
-    "h4_ob": "Higher-timeframe (H4) order-block context in play.",
-    "h1_sfp": "Legacy tag: SFP noted on the old H1 stack (now usually M5/H4).",
-    "range_24h": "Trade idea references the 24h range envelope.",
+    "h4_sfp_bullish": (
+        "H4 bullish swing-failure (SFP): liquidity swept below a swing low, then "
+        "reversed up — HTF reversal signal (Trading Guide SFP)."
+    ),
+    "h4_sfp_bearish": (
+        "H4 bearish swing-failure (SFP): liquidity swept above a swing high, then "
+        "reversed down — HTF reversal signal (Trading Guide SFP)."
+    ),
+    "m5_sfp_bullish": (
+        "M5 bullish SFP: short-term low sweep that failed and reversed up — "
+        "common LTF entry/confirm trigger."
+    ),
+    "m5_sfp_bearish": (
+        "M5 bearish SFP: short-term high sweep that failed and reversed down — "
+        "common LTF entry/confirm trigger."
+    ),
+    "m5_ob_bullish_in_fib": (
+        "Bullish M5 order block with price in the 0.25–0.50 fib entry band "
+        "(staged watchdog/paper long zone)."
+    ),
+    "m5_ob_bearish_in_fib": (
+        "Bearish M5 order block with price in the 0.25–0.50 fib entry band "
+        "(staged watchdog/paper short zone)."
+    ),
+    "m5_ob_bullish_no_fib": (
+        "Bullish M5 order block nearby, but price is outside the 0.25–0.50 fib "
+        "entry band — wait for retest (Trading Guide)."
+    ),
+    "m5_ob_bearish_no_fib": (
+        "Bearish M5 order block nearby, but price is outside the 0.25–0.50 fib "
+        "entry band — wait for retest (Trading Guide)."
+    ),
+    "htf_zone_conflict": (
+        "M5 trigger conflicts with H4 zone bias — HTF is context only; entries "
+        "can still fire on M5 OB/SFP."
+    ),
+    "retest_already_tagged": (
+        "This bearish-retest setup was already tagged earlier — avoid duplicate alerts."
+    ),
+    "short_trigger_retest": "Bearish retest trigger armed on marked H4/M5 structure.",
+    "h4_ob": (
+        "H4 order-block context (HTF bias only). Green = bullish OB, pink = bearish OB; "
+        "entries still need an M5 OB/SFP fib trigger."
+    ),
+    "h12_ob": "Legacy/higher-TF order-block context (H12 research stack).",
+    "h1_sfp": "Legacy tag: SFP on the old H1 stack (live stack is H4 / M5).",
+    "h1_sfp_bullish": "Legacy H1 bullish SFP tag (live stack uses H4 / M5 SFPs).",
+    "h1_sfp_bearish": "Legacy H1 bearish SFP tag (live stack uses H4 / M5 SFPs).",
     "bearish_ob": "Bearish order-block context for a short idea.",
     "bullish_ob": "Bullish order-block context for a long idea.",
+    "macro_gate_long": (
+        "Macro soft-gate: high-severity headlines lean against new longs "
+        "(chart structure still primary)."
+    ),
+    "macro_gate_short": (
+        "Macro soft-gate: high-severity headlines lean against new shorts "
+        "(chart structure still primary)."
+    ),
 }
 
 
@@ -92,16 +142,41 @@ def tag_tooltip(tag: str | None) -> str:
     key = str(tag).strip()
     if key in TAG_GLOSSARY:
         return TAG_GLOSSARY[key]
-    # Soft fallbacks for dynamic tags.
+    # Case-insensitive glossary hit (e.g. Live vs LIVE).
     low = key.lower()
+    for glossary_key, tip in TAG_GLOSSARY.items():
+        if glossary_key.lower() == low:
+            return tip
+    # Soft fallbacks for dynamic tags.
     if low.startswith("h4_sfp_"):
-        direction = low.split("_")[-1]
-        return f"H4 {direction} swing-failure pattern (liquidity sweep that reversed)."
+        direction = low.rsplit("_", 1)[-1]
+        return (
+            f"H4 {direction} swing-failure (SFP): liquidity sweep of a swing that "
+            "failed and reversed (Trading Guide SFP)."
+        )
     if low.startswith("m5_sfp_"):
-        direction = low.split("_")[-1]
-        return f"M5 {direction} swing-failure pattern (short-term liquidity sweep)."
+        direction = low.rsplit("_", 1)[-1]
+        return (
+            f"M5 {direction} swing-failure (SFP): short-term liquidity sweep that "
+            "reversed — LTF entry/confirm trigger."
+        )
+    if low.startswith("h1_sfp_"):
+        direction = low.rsplit("_", 1)[-1]
+        return f"Legacy H1 {direction} SFP tag (live stack uses H4 / M5 SFPs)."
     if low.startswith("m5_ob_") and low.endswith("_in_fib"):
-        return "M5 order block with price inside the 0.25–0.50 fib entry band."
+        return (
+            "M5 order block with price inside the 0.25–0.50 fib entry band "
+            "(Trading Guide staged entries)."
+        )
     if low.startswith("m5_ob_") and low.endswith("_no_fib"):
-        return "M5 order block nearby, waiting for the fib entry band."
-    return key.replace("_", " ")
+        return (
+            "M5 order block nearby, but price is outside the 0.25–0.50 fib entry "
+            "band — wait for retest."
+        )
+    if low.startswith("macro_gate_"):
+        return (
+            "Macro soft-gate from high-severity headlines — advisory only; "
+            "chart structure remains primary."
+        )
+    # Never leave a blank/placeholder tip — spell the tag out.
+    return f"Setup tag: {key.replace('_', ' ')}."
