@@ -4,7 +4,7 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
   <title>ETH Trading Agent</title>
-  <link rel="stylesheet" href="/static/style.css?v=journal8">
+  <link rel="stylesheet" href="/static/style.css?v=journal10">
 </head>
 <body>
   {% macro tip_badge(label, class_name='badge-none') -%}
@@ -53,8 +53,8 @@
         </span>
       </span>
       {% if t.thumb_chart_url %}
-      <span class="trade-thumb-wrap" aria-hidden="true">
-        <img class="trade-thumb" src="{{ t.thumb_chart_url }}" alt="" loading="lazy" width="120" height="72">
+      <span class="trade-thumb-wrap">
+        <img class="trade-thumb zoomable" src="{{ t.thumb_chart_url }}" alt="Trade chart thumbnail" loading="lazy" width="120" height="72">
       </span>
       {% endif %}
     </button>
@@ -64,13 +64,13 @@
         {% if t.structure_chart_url %}
         <figure class="trade-chart">
           <figcaption>Structure · H4</figcaption>
-          <img class="chart-img" src="{{ t.structure_chart_url }}" alt="H4 structure chart" loading="lazy">
+          <img class="chart-img zoomable" src="{{ t.structure_chart_url }}" alt="H4 structure chart" loading="lazy">
         </figure>
         {% endif %}
         {% if t.execution_chart_url %}
         <figure class="trade-chart">
           <figcaption>Execution · M5</figcaption>
-          <img class="chart-img" src="{{ t.execution_chart_url }}" alt="M5 execution chart" loading="lazy">
+          <img class="chart-img zoomable" src="{{ t.execution_chart_url }}" alt="M5 execution chart" loading="lazy">
         </figure>
         {% endif %}
       </div>
@@ -247,7 +247,7 @@
     <section class="card">
       <h2>H4 structure (marked)</h2>
       <p class="sub" style="margin-bottom:8px">What the agent sees now</p>
-      <img class="chart-img" id="h4-chart" src="{{ status.h4_chart_url }}" alt="H4 marked chart" loading="lazy">
+      <img class="chart-img zoomable" id="h4-chart" src="{{ status.h4_chart_url }}" alt="H4 marked chart" loading="lazy">
     </section>
     {% endif %}
 
@@ -360,10 +360,16 @@
     </footer>
   </div>
 
+  <div id="chart-lightbox" class="chart-lightbox" hidden>
+    <button type="button" class="chart-lightbox-close" aria-label="Close enlarged chart">&times;</button>
+    <img class="chart-lightbox-img" alt="">
+  </div>
+
   <script>
     function initTradeCards() {
       document.querySelectorAll('.trade-card > .trade-summary').forEach(function (btn) {
-        btn.addEventListener('click', function () {
+        btn.addEventListener('click', function (ev) {
+          if (ev.target.closest('.zoomable')) return;
           var card = btn.closest('.trade-card');
           var body = card.querySelector('.trade-body');
           var open = !card.classList.contains('is-open');
@@ -374,6 +380,55 @@
       });
     }
     initTradeCards();
+
+    function initChartLightbox() {
+      var box = document.getElementById('chart-lightbox');
+      var big = box.querySelector('.chart-lightbox-img');
+      var closeBtn = box.querySelector('.chart-lightbox-close');
+
+      function openLightbox(src, alt) {
+        big.src = src;
+        big.alt = alt || 'Enlarged chart';
+        box.hidden = false;
+        document.body.classList.add('lightbox-open');
+      }
+
+      function closeLightbox() {
+        box.hidden = true;
+        big.removeAttribute('src');
+        document.body.classList.remove('lightbox-open');
+      }
+
+      document.querySelectorAll('img.zoomable').forEach(function (img) {
+        img.setAttribute('role', 'button');
+        img.setAttribute('tabindex', '0');
+        img.setAttribute('title', 'Click to enlarge');
+        img.addEventListener('click', function (ev) {
+          ev.preventDefault();
+          ev.stopPropagation();
+          openLightbox(img.currentSrc || img.src, img.alt);
+        });
+        img.addEventListener('keydown', function (ev) {
+          if (ev.key === 'Enter' || ev.key === ' ') {
+            ev.preventDefault();
+            ev.stopPropagation();
+            openLightbox(img.currentSrc || img.src, img.alt);
+          }
+        });
+      });
+
+      closeBtn.addEventListener('click', function (ev) {
+        ev.stopPropagation();
+        closeLightbox();
+      });
+      box.addEventListener('click', function (ev) {
+        if (ev.target === box) closeLightbox();
+      });
+      document.addEventListener('keydown', function (ev) {
+        if (ev.key === 'Escape' && !box.hidden) closeLightbox();
+      });
+    }
+    initChartLightbox();
 
     async function refresh() {
       try {

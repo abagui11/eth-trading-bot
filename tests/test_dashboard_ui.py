@@ -152,6 +152,9 @@ class DashboardUiSmokeTests(unittest.TestCase):
         self.assertIn('aria-expanded="false"', html)
         self.assertIn('class="trade-body" hidden', html)
         self.assertIn("initTradeCards", html)
+        self.assertIn("initChartLightbox", html)
+        self.assertIn('id="chart-lightbox"', html)
+        self.assertIn("zoomable", html)
         self.assertIn('title="Long position', html)
         n_buttons = len(re.findall(r'<button type="button" class="trade-summary"', html))
         n_bodies = len(re.findall(r'class="trade-body" hidden', html))
@@ -174,6 +177,8 @@ class DashboardUiSmokeTests(unittest.TestCase):
         self.assertIn("height: 200px", css)
         self.assertIn("gap: 20px", css)
         self.assertIn("display: flex", css)
+        self.assertIn(".chart-lightbox", css)
+        self.assertIn("cursor: zoom-in", css)
         self.assertNotIn("<details", self.client.get("/").text)
         html = self.client.get("/").text
         self.assertEqual(html.count('class="macro-scroll"'), 1)
