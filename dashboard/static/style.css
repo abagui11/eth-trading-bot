@@ -117,9 +117,18 @@ h1 {
 .metric .value.pos { color: var(--good); }
 .metric .value.neg { color: var(--bad); }
 
+img {
+  max-width: 100%;
+  height: auto;
+}
+
 .chart-img {
   width: 100%;
+  max-width: 100%;
+  max-height: 280px;
   height: auto;
+  object-fit: contain;
+  object-position: left center;
   border-radius: 8px;
   display: block;
   background: var(--bg);
@@ -248,6 +257,11 @@ a { color: var(--accent); }
   overflow: hidden;
 }
 
+/* Explicit collapse — do not rely on UA:not([open]) quirks with custom summary layout. */
+.trade-card:not([open]) > .trade-body {
+  display: none;
+}
+
 .trade-card.trade-live {
   border-color: rgba(88, 166, 255, 0.55);
   box-shadow: 0 0 0 1px rgba(88, 166, 255, 0.12);
@@ -257,29 +271,37 @@ a { color: var(--accent); }
   opacity: 0.88;
 }
 
+/* Keep <summary> as list-item/block so browsers hide siblings when closed.
+   Put flex on the inner wrapper only. */
 .trade-summary {
-  display: flex;
-  gap: 12px;
-  align-items: center;
-  justify-content: space-between;
+  display: block;
   padding: 12px 14px;
   cursor: pointer;
   list-style: none;
 }
 
-.trade-summary::-webkit-details-marker {
+.trade-summary::-webkit-details-marker,
+.trade-summary::marker {
   display: none;
+  content: "";
 }
 
-.trade-summary::after {
-  content: "▸";
+.trade-summary-inner {
+  display: flex;
+  gap: 12px;
+  align-items: center;
+  justify-content: space-between;
+  min-width: 0;
+}
+
+.trade-chevron {
   color: var(--muted);
   font-size: 0.75rem;
   flex-shrink: 0;
   transition: transform 0.15s ease;
 }
 
-.trade-card[open] > .trade-summary::after {
+.trade-card[open] > .trade-summary .trade-chevron {
   transform: rotate(90deg);
 }
 
@@ -320,7 +342,9 @@ a { color: var(--accent); }
 
 .trade-thumb {
   width: 88px;
+  max-width: 88px;
   height: 56px;
+  max-height: 56px;
   object-fit: cover;
   border-radius: 6px;
   background: var(--card);
@@ -338,10 +362,14 @@ a { color: var(--accent); }
   grid-template-columns: 1fr;
   gap: 12px;
   margin: 12px 0;
+  max-width: 100%;
 }
 
 .trade-chart {
   margin: 0;
+  min-width: 0;
+  max-width: 100%;
+  overflow: hidden;
 }
 
 .trade-chart figcaption {
@@ -425,6 +453,12 @@ a { color: var(--accent); }
 
   .trade-thumb {
     width: 120px;
+    max-width: 120px;
     height: 72px;
+    max-height: 72px;
+  }
+
+  .chart-img {
+    max-height: 300px;
   }
 }
