@@ -222,6 +222,61 @@ class WatchdogTriggerTests(unittest.TestCase):
         triggers = evaluate_triggers(ctx, m5, positions=[])
         self.assertTrue(any(t.name == "m5_ob_fib_short" for t in triggers))
 
+    def test_fib_short_skips_competing_ob_when_position_open(self) -> None:
+        from patterns.order_block import order_block_ref
+
+        active = _bearish_ob()
+        competing = OrderBlock(
+            direction="bearish",
+            low=2570.0,
+            high=2610.0,
+            start_ts="2026-06-26T12:00:00Z",
+            end_ts="2026-06-26T12:00:00Z",
+            displacement_ts="2026-06-26T14:00:00Z",
+        )
+        # Price near both fib bands
+        spot = fib_level("bearish", competing.low, competing.high, 0.25)
+        bullish_htf = HTFZone(
+            "order_block",
+            "bullish",
+            2300.0,
+            2350.0,
+            "2026-06-20T10:00:00Z",
+        )
+        snap = ZoneSnapshot(
+            spot=spot,
+            zones_containing_price=[bullish_htf],
+            primary_bullish=bullish_htf,
+            primary_bearish=None,
+            nearest_bearish_above=None,
+            nearest_bullish_below=None,
+            bearish_retest_low=None,
+            bearish_retest_high=None,
+        )
+        ctx = MarketContext(
+            range_24h=None,
+            is_ranging=False,
+            range_break=None,
+            spot=spot,
+            zone_snapshot=snap,
+            setup_state=None,
+            order_blocks=[active, competing],
+            htf_zones=[bullish_htf],
+            setup_tags=["m5_ob_bearish_in_fib"],
+        )
+        m5 = [_bar("2026-06-30T18:00:00Z", spot, spot + 5, spot - 5, spot)]
+        positions = [
+            {
+                "side": "short",
+                "order_block_ref": order_block_ref(active),
+                "entry_tranches": ["0.25"],
+            }
+        ]
+        triggers = evaluate_triggers(ctx, m5, positions=positions)
+        fib_shorts = [t for t in triggers if t.name == "m5_ob_fib_short"]
+        self.assertTrue(all(order_block_ref(t.ob) == order_block_ref(active) for t in fib_shorts))
+        self.assertFalse(any(order_block_ref(t.ob) == order_block_ref(competing) for t in fib_shorts))
+
 
 class WatchdogCooldownTests(unittest.TestCase):
     def setUp(self) -> None:

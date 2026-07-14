@@ -101,6 +101,23 @@ def _match_ob_by_ref(order_blocks: list[OrderBlock], ref: str) -> OrderBlock | N
     return None
 
 
+def _active_fib_ob_ref(positions: list[dict], direction: Direction) -> str | None:
+    """If a same-side fib position is open, only that OB may add/tranche further."""
+    side = "long" if direction == "bullish" else "short"
+    for pos in positions:
+        if str(pos.get("side") or "") != side:
+            continue
+        ref = str(pos.get("order_block_ref") or "")
+        if not ref:
+            continue
+        tranches = pos.get("entry_tranches") or []
+        if any(t in ("0.25", "0.50", "0.718") for t in tranches):
+            return ref
+        # Open same-side OB position without tranche tags still owns the slot.
+        return ref
+    return None
+
+
 def _append_tranche_triggers(
     triggers: list[WatchdogTrigger],
     *,
@@ -110,6 +127,10 @@ def _append_tranche_triggers(
     positions: list[dict],
 ) -> None:
     ref = order_block_ref(ob)
+    active_ref = _active_fib_ob_ref(positions, direction)
+    if active_ref is not None and active_ref != ref:
+        # Another M5 OB already owns this side — do not stack competing OBs.
+        return
     pairs = (
         (bot_config.ENTRY_FIB_TRANCHE_1, "0.25", bot_config.ENTRY_TRANCHE_DEPLOY_PCT),
         (bot_config.ENTRY_FIB_TRANCHE_2, "0.50", bot_config.ENTRY_TRANCHE_DEPLOY_PCT),

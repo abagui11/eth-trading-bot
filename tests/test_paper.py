@@ -481,6 +481,78 @@ class PaperPositionTests(unittest.TestCase):
         state = paper.get_state()
         self.assertAlmostEqual(state["eth_qty"], suggestion.size, places=4)
 
+    def test_same_ob_add_does_not_widen_stop(self) -> None:
+        first = Suggestion(
+            action="deriv_sell",
+            size=0.3,
+            entry=1863.0,
+            stop_loss=1878.0,
+            take_profits=[1800.0],
+            risk_reward=2.0,
+            rationale="tranche 0.25",
+            entry_tranche="0.25",
+            order_block_ref="bearish:ob-a",
+        )
+        validate.validate_trade_risk(first, portfolio_value=5000.0)
+        paper.update(first, spot_price=1863.0, cycle_id="wd_a1")
+
+        second = Suggestion(
+            action="deriv_sell",
+            size=0.3,
+            entry=1870.0,
+            stop_loss=1885.0,  # wider stop — must not replace 1878
+            take_profits=[1800.0],
+            risk_reward=2.0,
+            rationale="competing fill",
+            entry_tranche="0.50",
+            order_block_ref="bearish:ob-a",
+        )
+        validate.validate_trade_risk(second, portfolio_value=5000.0)
+        paper.update(second, spot_price=1870.0, cycle_id="wd_a2")
+
+        positions = paper.get_open_positions(1870.0)
+        self.assertEqual(len(positions), 1)
+        self.assertEqual(positions[0]["stop_loss"], 1878.0)
+        self.assertIn("0.25", positions[0]["entry_tranches"])
+        self.assertIn("0.50", positions[0]["entry_tranches"])
+        self.assertGreater(positions[0]["eth_qty"], first.size)
+
+    def test_different_ob_opens_separate_position(self) -> None:
+        first = Suggestion(
+            action="deriv_sell",
+            size=0.3,
+            entry=1863.0,
+            stop_loss=1878.0,
+            take_profits=[1800.0],
+            risk_reward=2.0,
+            rationale="ob a",
+            entry_tranche="0.25",
+            order_block_ref="bearish:ob-a",
+        )
+        validate.validate_trade_risk(first, portfolio_value=5000.0)
+        paper.update(first, spot_price=1863.0, cycle_id="wd_a")
+
+        second = Suggestion(
+            action="deriv_sell",
+            size=0.3,
+            entry=1870.0,
+            stop_loss=1885.0,
+            take_profits=[1800.0],
+            risk_reward=2.0,
+            rationale="ob b",
+            entry_tranche="0.25",
+            order_block_ref="bearish:ob-b",
+        )
+        validate.validate_trade_risk(second, portfolio_value=5000.0)
+        paper.update(second, spot_price=1870.0, cycle_id="wd_b")
+
+        positions = paper.get_open_positions(1870.0)
+        self.assertEqual(len(positions), 2)
+        stops = {float(p["stop_loss"]) for p in positions}
+        self.assertEqual(stops, {1878.0, 1885.0})
+        refs = {p["order_block_ref"] for p in positions}
+        self.assertEqual(refs, {"bearish:ob-a", "bearish:ob-b"})
+
     def test_archive_epoch_and_reset(self) -> None:
         paper.update(
             Suggestion(

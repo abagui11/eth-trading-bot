@@ -414,12 +414,25 @@ def _reduce_positions_fifo(
     return cash
 
 
+def _tighter_stop(side: str, current: float, candidate: float) -> float:
+    """Never widen risk: shorts keep the lower SL, longs keep the higher SL."""
+    if side == "short":
+        return min(current, candidate)
+    return max(current, candidate)
+
+
 def _update_position_metadata(
     conn: sqlite3.Connection,
     position: dict,
     suggestion: Suggestion,
     cycle_id: str | None,
 ) -> None:
+    side = str(position["side"])
+    stop = _tighter_stop(
+        side,
+        float(position["stop_loss"]),
+        float(suggestion.stop_loss),  # type: ignore[arg-type]
+    )
     conn.execute(
         """
         UPDATE paper_positions
@@ -428,7 +441,7 @@ def _update_position_metadata(
         WHERE id = ?
         """,
         (
-            float(suggestion.stop_loss),  # type: ignore[arg-type]
+            stop,
             json.dumps(suggestion.take_profits),
             suggestion.risk_reward,
             suggestion.size,
@@ -452,11 +465,16 @@ def _add_to_net_position(
     if add_qty <= 0:
         return cash
 
+    old_qty = float(position["eth_qty"])
+    room = bot_config.MAX_ETH_QTY - old_qty
+    if room < bot_config.MIN_ETH_QTY:
+        return cash
+    add_qty = min(add_qty, room)
+
     notional = add_qty * entry
     if cash < notional:
         return cash
 
-    old_qty = float(position["eth_qty"])
     old_entry = float(position["avg_entry"])
     new_qty = old_qty + add_qty
     new_avg = (old_qty * old_entry + add_qty * entry) / new_qty
@@ -466,6 +484,14 @@ def _add_to_net_position(
         _parse_entry_tranches(position.get("entry_tranches")),
         suggestion.entry_tranche,
     )
+    stop = _tighter_stop(
+        side,
+        float(position["stop_loss"]),
+        float(suggestion.stop_loss),  # type: ignore[arg-type]
+    )
+    # Keep the original OB link — never retarget SL/ref onto a different block.
+    existing_ref = position.get("order_block_ref")
+    keep_ref = existing_ref or suggestion.order_block_ref
 
     cash -= notional
     conn.execute(
@@ -473,20 +499,20 @@ def _add_to_net_position(
         UPDATE paper_positions
         SET eth_qty = ?, avg_entry = ?, stop_loss = ?, take_profits = ?,
             risk_reward = ?, suggested_size = ?, action = ?, open_cycle_id = ?,
-            order_block_ref = COALESCE(?, order_block_ref),
+            order_block_ref = ?,
             entry_tranches = ?
         WHERE id = ?
         """,
         (
             new_qty,
             new_avg,
-            float(suggestion.stop_loss),  # type: ignore[arg-type]
-            json.dumps(suggestion.take_profits),
+            stop,
+            json.dumps(position.get("take_profits") or suggestion.take_profits),
             suggestion.risk_reward,
             suggestion.size,
             suggestion.action,
             cycle_id,
-            suggestion.order_block_ref,
+            keep_ref,
             json.dumps(tranches) if tranches else None,
             pos_id,
         ),
@@ -495,6 +521,20 @@ def _add_to_net_position(
     equity = _equity(cash, open_positions, spot)
     _log_trade(conn, "open", cycle_id, side, add_qty, entry, cash, equity, pos_id, None)
     return cash
+
+
+def _match_position_for_add(
+    same_side: list[dict],
+    suggestion: Suggestion,
+) -> dict | None:
+    """Only scale into a position that shares the same order_block_ref."""
+    ref = suggestion.order_block_ref
+    if not ref:
+        return same_side[0] if same_side else None
+    for pos in same_side:
+        if str(pos.get("order_block_ref") or "") == ref:
+            return pos
+    return None
 
 
 def _apply_trade_with_netting(
@@ -551,8 +591,19 @@ def _apply_trade_with_netting(
                 cycle_id,
                 eth_qty_override=abs(target_signed),
             )
+        target_pos = _match_position_for_add(same_side, suggestion)
+        if target_pos is None:
+            # Different OB / new idea — open a separate position with its own SL.
+            return _open_position(
+                conn,
+                cash,
+                suggestion,
+                spot,
+                cycle_id,
+                eth_qty_override=add_qty,
+            )
         return _add_to_net_position(
-            conn, cash, same_side[0], suggestion, add_qty, spot, cycle_id
+            conn, cash, target_pos, suggestion, add_qty, spot, cycle_id
         )
 
     if abs(target_signed) < abs(current_signed):
