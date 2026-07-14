@@ -745,6 +745,199 @@ def build_output_charts(
   return paths[:2]
 
 
+def _parse_utc(ts: str | None) -> pd.Timestamp | None:
+  if not ts:
+    return None
+  try:
+    stamp = pd.Timestamp(ts)
+  except (ValueError, TypeError):
+    return None
+  if stamp.tzinfo is None:
+    stamp = stamp.tz_localize("UTC")
+  else:
+    stamp = stamp.tz_convert("UTC")
+  return stamp
+
+
+def _window_bars(
+  bars: list[dict],
+  opened_at: str | None,
+  closed_at: str | None,
+  *,
+  pad_bars: int,
+) -> list[dict]:
+  """Trim OHLC to the trade window with bar padding so Exit stays on-screen."""
+  if not bars:
+    return bars
+  start = _parse_utc(opened_at)
+  end = _parse_utc(closed_at)
+  if start is None and end is None:
+    return bars
+
+  indexed = [(i, _parse_utc(str(b.get("ts") or ""))) for i, b in enumerate(bars)]
+  indexed = [(i, ts) for i, ts in indexed if ts is not None]
+  if not indexed:
+    return bars
+
+  if start is None:
+    start = indexed[0][1]
+  if end is None:
+    end = indexed[-1][1]
+  if start > end:
+    start, end = end, start
+
+  in_range = [i for i, ts in indexed if start <= ts <= end]
+  if not in_range:
+    # Fall back to nearest-neighbor window around open/close.
+    nearest_start = min(indexed, key=lambda item: abs(item[1] - start))[0]
+    nearest_end = min(indexed, key=lambda item: abs(item[1] - end))[0]
+    lo, hi = sorted((nearest_start, nearest_end))
+  else:
+    lo, hi = min(in_range), max(in_range)
+
+  lo = max(0, lo - pad_bars)
+  hi = min(len(bars) - 1, hi + pad_bars)
+  window = bars[lo : hi + 1]
+  return window if len(window) >= 5 else bars
+
+
+def _draw_pnl_callout(ax, exit_price: float, pnl_usd: float, pnl_pct: float) -> None:
+  """Compact P&L badge near the exit level."""
+  color = "#228B22" if pnl_usd >= 0 else "#CC0000"
+  sign = "+" if pnl_usd >= 0 else ""
+  label = f" P&L {sign}{pnl_usd:,.2f} ({sign}{pnl_pct:.1f}%)"
+  transform = blended_transform_factory(ax.transAxes, ax.transData)
+  ax.text(
+    0.02,
+    exit_price,
+    label,
+    color=color,
+    fontsize=FONT_SIZE,
+    fontweight="bold",
+    va="bottom",
+    ha="left",
+    transform=transform,
+    clip_on=True,
+    bbox=dict(
+      boxstyle="round,pad=0.3",
+      facecolor="#FFFFFF",
+      edgecolor=color,
+      alpha=0.9,
+    ),
+  )
+
+
+def build_outcome_charts(
+  suggestion: Suggestion,
+  data: dict[str, list[dict]],
+  key_levels: list[KeyLevel],
+  htf_zones: list[HTFZone],
+  cycle_id: str,
+  *,
+  opened_at: str | None,
+  closed_at: str | None,
+  exit_price: float,
+  pnl_usd: float,
+  pnl_pct: float,
+  market_context: MarketContext | None = None,
+) -> list[str]:
+  """
+  Render H4 + M5 outcome charts spanning open→close with Entry/Exit/SL/TP markup.
+
+  Writes `{cycle_id}_H4_outcome.png` and `{cycle_id}_M5_outcome.png`.
+  """
+  out_dir = _ensure_charts_dir()
+  paths: list[str] = []
+  structure_tf = suggestion.structure_chart or "H4"
+  entry_tf = suggestion.entry_chart or "M5"
+  if structure_tf not in research.STRATEGY_TIMEFRAMES:
+    structure_tf = "H4"
+  if entry_tf not in research.STRATEGY_TIMEFRAMES:
+    entry_tf = "M5"
+
+  pad_by_tf = {"H4": 6, "H1": 12, "M5": 24}
+
+  def _render_outcome(tf: str, title: str, *, show_fib: bool) -> str | None:
+    bars = data.get(tf)
+    if not bars:
+      return None
+    windowed = _window_bars(
+      bars, opened_at, closed_at, pad_bars=pad_by_tf.get(tf, 12)
+    )
+    df = _to_mpf_df(windowed)
+    fig, ax_price = _render_candlestick_figure(df, title, figsize=OUTPUT_FIGSIZE)
+    vis = _visible_key_levels(key_levels, df)
+    _draw_htf_zones(ax_price, df, htf_zones)
+    _draw_swing_hlines(ax_price, df)
+    _draw_key_levels(ax_price, vis, df)
+    if tf == "M5":
+      _draw_detected_overlays(ax_price, df, market_context)
+
+    if show_fib and suggestion.order_block:
+      ob = suggestion.order_block
+      direction = "bearish" if "sell" in suggestion.action else "bullish"
+      _draw_fib_zone(
+        ax_price,
+        df,
+        float(ob["low"]),
+        float(ob["high"]),
+        direction,
+        ob.get("start_ts"),
+        ob.get("end_ts"),
+      )
+    elif suggestion.order_block:
+      ob = suggestion.order_block
+      try:
+        x0, x1 = _bar_x_range(df, ob["start_ts"], ob["end_ts"])
+        left = x0 - 0.3
+        rect = Rectangle(
+          (left, float(ob["low"])),
+          max(x1 - x0 + 0.6, 0.8),
+          float(ob["high"]) - float(ob["low"]),
+          facecolor="#FFD700",
+          edgecolor="#B8860B",
+          alpha=0.35,
+          linewidth=1.5,
+          zorder=4,
+        )
+        ax_price.add_patch(rect)
+      except (KeyError, TypeError, ValueError):
+        pass
+
+    entry = suggestion.entry
+    if entry is not None:
+      _draw_price_line(ax_price, float(entry), "Entry", "#00AA00", "--", label_side="left")
+    if suggestion.stop_loss is not None:
+      _draw_price_line(
+        ax_price, float(suggestion.stop_loss), "SL", "#CC0000", "-", label_side="left"
+      )
+    for i, tp in enumerate(suggestion.take_profits[:3], start=1):
+      _draw_price_line(ax_price, float(tp), f"TP{i}", "#0066CC", ":", label_side="left")
+    _draw_price_line(ax_price, float(exit_price), "Exit", "#FF8C00", "-", label_side="right")
+    _draw_pnl_callout(ax_price, float(exit_price), float(pnl_usd), float(pnl_pct))
+
+    out_path = out_dir / f"{cycle_id}_{tf}_outcome.png"
+    return _save_chart_figure(fig, out_path)
+
+  h4_path = _render_outcome(
+    structure_tf,
+    f"ETH-USD {structure_tf} — Trade Outcome (Structure)",
+    show_fib=False,
+  )
+  if h4_path:
+    paths.append(h4_path)
+
+  m5_path = _render_outcome(
+    entry_tf,
+    f"ETH-USD {entry_tf} — Trade Outcome (Execution)",
+    show_fib=True,
+  )
+  if m5_path:
+    paths.append(m5_path)
+
+  return paths
+
+
 def annotate_chart(
   m5_path: str,
   suggestion: Suggestion,

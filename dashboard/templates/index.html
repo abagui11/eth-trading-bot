@@ -7,10 +7,136 @@
   <link rel="stylesheet" href="/static/style.css">
 </head>
 <body>
+  {% macro trade_card(t, mode) %}
+  <details class="trade-card {% if mode == 'open' %}trade-live{% elif mode == 'archived' %}trade-archived{% endif %}">
+    <summary class="trade-summary">
+      <div class="trade-summary-main">
+        <div class="trade-badges">
+          <span class="badge {% if t.side == 'long' %}badge-good{% else %}badge-bad{% endif %}">{{ t.side }}</span>
+          {% if mode == 'open' %}
+          <span class="badge badge-live">LIVE</span>
+          {% elif t.close_reason %}
+          <span class="badge badge-none">{{ t.close_reason }}</span>
+          {% endif %}
+          {% if t.action %}<span class="badge badge-none">{{ t.action }}</span>{% endif %}
+        </div>
+        <div class="trade-prices">
+          {% if mode == 'open' %}
+          ${{ "%.2f"|format(t.entry or t.avg_entry) }}
+          {% if t.spot %} · mark ${{ "%.2f"|format(t.spot) }}{% endif %}
+          {% else %}
+          ${{ "%.2f"|format(t.entry) }} → ${{ "%.2f"|format(t.exit) }}
+          {% endif %}
+        </div>
+        <div class="trade-pnl {{ 'pos-row' if t.is_winner else 'neg-row' }}">
+          {{ "%+.2f"|format(t.pnl_usd) }}
+          <span class="trade-pnl-pct">({{ "%+.1f"|format(t.pnl_pct) }}%)</span>
+        </div>
+        <div class="trade-meta sub">
+          {% if mode == 'open' %}
+          Opened {{ t.opened_at[:16] if t.opened_at else '—' }}
+          {% else %}
+          {{ t.opened_at[:16] if t.opened_at else '—' }}
+          → {{ t.closed_at[:16] if t.closed_at else '—' }}
+          {% endif %}
+        </div>
+      </div>
+      {% if t.thumb_chart_url %}
+      <img class="trade-thumb" src="{{ t.thumb_chart_url }}" alt="" loading="lazy">
+      {% endif %}
+    </summary>
+    <div class="trade-body">
+      {% if t.structure_chart_url or t.execution_chart_url %}
+      <div class="trade-charts">
+        {% if t.structure_chart_url %}
+        <figure class="trade-chart">
+          <figcaption>Structure · H4</figcaption>
+          <img class="chart-img" src="{{ t.structure_chart_url }}" alt="H4 structure chart" loading="lazy">
+        </figure>
+        {% endif %}
+        {% if t.execution_chart_url %}
+        <figure class="trade-chart">
+          <figcaption>Execution · M5</figcaption>
+          <img class="chart-img" src="{{ t.execution_chart_url }}" alt="M5 execution chart" loading="lazy">
+        </figure>
+        {% endif %}
+      </div>
+      {% endif %}
+
+      <div class="levels-strip">
+        <div class="level">
+          <span class="label">Entry</span>
+          <span class="value">${{ "%.2f"|format(t.entry or t.avg_entry) }}</span>
+        </div>
+        {% if t.stop_loss is not none %}
+        <div class="level">
+          <span class="label">SL</span>
+          <span class="value">${{ "%.2f"|format(t.stop_loss) }}</span>
+        </div>
+        {% endif %}
+        {% for tp in t.take_profits[:3] %}
+        <div class="level">
+          <span class="label">TP{{ loop.index }}</span>
+          <span class="value">${{ "%.2f"|format(tp) }}</span>
+        </div>
+        {% endfor %}
+        {% if t.risk_reward is not none %}
+        <div class="level">
+          <span class="label">R:R</span>
+          <span class="value">{{ "%.2f"|format(t.risk_reward) }}</span>
+        </div>
+        {% endif %}
+        {% if t.order_block %}
+        <div class="level">
+          <span class="label">OB</span>
+          <span class="value">${{ "%.0f"|format(t.order_block.low) }}–{{ "%.0f"|format(t.order_block.high) }}</span>
+        </div>
+        {% endif %}
+        {% if t.eth_qty is not none %}
+        <div class="level">
+          <span class="label">Size</span>
+          <span class="value">{{ "%.3f"|format(t.eth_qty) }} ETH</span>
+        </div>
+        {% endif %}
+      </div>
+
+      {% if mode == 'open' and (t.dist_to_sl_pct is not none or t.dist_to_tp_pct is not none) %}
+      <p class="sub trade-distances">
+        {% if t.dist_to_sl_pct is not none %}{{ "%.2f"|format(t.dist_to_sl_pct) }}% to SL{% endif %}
+        {% if t.dist_to_sl_pct is not none and t.dist_to_tp_pct is not none %} · {% endif %}
+        {% if t.dist_to_tp_pct is not none %}{{ "%.2f"|format(t.dist_to_tp_pct) }}% to TP{% endif %}
+      </p>
+      {% endif %}
+
+      {% if t.setup_tags %}
+      <div class="trade-tags">
+        {% for tag in t.setup_tags %}
+        <span class="badge badge-none">{{ tag }}</span>
+        {% endfor %}
+      </div>
+      {% endif %}
+
+      {% if t.rationale %}
+      <div class="rationale">
+        <h3>Rationale</h3>
+        <p>{{ t.rationale }}</p>
+      </div>
+      {% else %}
+      <p class="sub">No rationale stored for this cycle.</p>
+      {% endif %}
+
+      <p class="sub trade-cycles">
+        Open cycle {{ t.open_cycle_id or '—' }}
+        {% if t.close_cycle_id %} · Close cycle {{ t.close_cycle_id }}{% endif %}
+      </p>
+    </div>
+  </details>
+  {% endmacro %}
+
   <div class="wrap">
     <header>
       <h1>ETH Trading Agent</h1>
-      <p class="sub">Paper portfolio &amp; hourly analysis — public dashboard</p>
+      <p class="sub">An agent for the ETH economy — paper portfolio, chart reads, and trade journal</p>
     </header>
 
     <section class="card" id="status-card">
@@ -105,6 +231,7 @@
     {% if status.h4_chart_url %}
     <section class="card">
       <h2>H4 structure (marked)</h2>
+      <p class="sub" style="margin-bottom:8px">What the agent sees now</p>
       <img class="chart-img" id="h4-chart" src="{{ status.h4_chart_url }}" alt="H4 marked chart" loading="lazy">
     </section>
     {% endif %}
@@ -146,89 +273,41 @@
       </p>
     </section>
 
-    {% if positions %}
-    <section class="card">
-      <h2>Open positions</h2>
-      <div class="table-scroll">
-        <table>
-          <thead>
-            <tr>
-              <th>Side</th>
-              <th>Entry</th>
-              <th>SL</th>
-              <th>Unrealized</th>
-            </tr>
-          </thead>
-          <tbody>
-            {% for pos in positions %}
-            <tr>
-              <td>{{ pos.side }}</td>
-              <td>${{ "%.2f"|format(pos.avg_entry) }}</td>
-              <td>${{ "%.2f"|format(pos.stop_loss) }}</td>
-              <td class="{{ 'pos-row' if pos.unrealized_pnl_usd >= 0 else 'neg-row' }}">
-                {{ "%+.2f"|format(pos.unrealized_pnl_usd) }}
-              </td>
-            </tr>
-            {% endfor %}
-          </tbody>
-        </table>
-      </div>
-    </section>
-    {% endif %}
+    {% if positions or closed_trades %}
+    <section class="card journal-card">
+      <h2>Trade journal</h2>
+      <p class="sub journal-intro">
+        Expand a trade to see structure, execution, levels, and the bot’s rationale.
+      </p>
 
-    {% if closed_trades %}
-    <section class="card">
-      <h2>Closed paper trades</h2>
-      <div class="table-scroll">
-        <table>
-          <thead>
-            <tr>
-              <th>Entry → Exit</th>
-              <th>P&amp;L</th>
-              <th>Cycle</th>
-            </tr>
-          </thead>
-          <tbody>
-            {% for t in closed_trades %}
-            <tr>
-              <td>${{ "%.0f"|format(t.entry) }} → ${{ "%.0f"|format(t.exit) }}</td>
-              <td class="{{ 'pos-row' if t.realized_pnl_usd >= 0 else 'neg-row' }}">
-                {{ "%+.2f"|format(t.realized_pnl_usd) }}
-              </td>
-              <td>{{ t.open_cycle_id or '—' }}</td>
-            </tr>
-            {% endfor %}
-          </tbody>
-        </table>
+      {% if positions %}
+      <h3 class="journal-subhead">Open</h3>
+      <div class="trade-list">
+        {% for pos in positions %}
+        {{ trade_card(pos, 'open') }}
+        {% endfor %}
       </div>
+      {% endif %}
+
+      {% if closed_trades %}
+      <h3 class="journal-subhead">Closed</h3>
+      <div class="trade-list">
+        {% for t in closed_trades %}
+        {{ trade_card(t, 'closed') }}
+        {% endfor %}
+      </div>
+      {% endif %}
     </section>
     {% endif %}
 
     {% if archived_trades %}
-    <section class="card">
-      <h2>Archived paper trades (prior epoch)</h2>
-      <p class="sub">$1k legacy book — preserved for reference; not included in P&amp;L above.</p>
-      <div class="table-scroll">
-        <table>
-          <thead>
-            <tr>
-              <th>Entry → Exit</th>
-              <th>P&amp;L</th>
-              <th>Cycle</th>
-            </tr>
-          </thead>
-          <tbody>
-            {% for t in archived_trades %}
-            <tr>
-              <td>${{ "%.0f"|format(t.entry) }} → ${{ "%.0f"|format(t.exit) }}</td>
-              <td class="{{ 'pos-row' if t.realized_pnl_usd >= 0 else 'neg-row' }}">
-                {{ "%+.2f"|format(t.realized_pnl_usd) }}
-              </td>
-              <td>{{ t.open_cycle_id or '—' }}</td>
-            </tr>
-            {% endfor %}
-          </tbody>
-        </table>
+    <section class="card journal-card journal-archived">
+      <h2>Archived trades (prior epoch)</h2>
+      <p class="sub">Legacy book — preserved for reference; not included in P&amp;L above.</p>
+      <div class="trade-list">
+        {% for t in archived_trades %}
+        {{ trade_card(t, 'archived') }}
+        {% endfor %}
       </div>
     </section>
     {% endif %}

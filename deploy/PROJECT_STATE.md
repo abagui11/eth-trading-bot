@@ -3,7 +3,7 @@
 > Single source of truth for architecture and status of the Telegram trading bot.
 > See **Documentation maintenance** below — update this file (and related deploy docs) whenever behaviour changes.
 
-**Last updated:** 2026-07-13
+**Last updated:** 2026-07-14
 
 ---
 
@@ -187,6 +187,8 @@ flowchart LR
 
     STORE --> DASH[FastAPI dashboard]
     STORE --> TG[Telegram read-back]
+    PNG[charts/ PNGs<br/>structure entry outcome] --> DASH
+    PNG --> TG
 ```
 
 Writers → stores:
@@ -198,6 +200,7 @@ Writers → stores:
 | `audit_snapshots` | hourly cycle | dashboard, chat, monitor |
 | `audit_verdicts` | hourly monitor, chat audit | dashboard |
 | `chat_audits` | chat Q&A | — |
+| `charts/` PNGs | hourly/watchdog output charts; `paper` close → `{cycle}_H4|M5_outcome.png` | dashboard `/api/chart`, Telegram |
 
 ---
 
@@ -223,8 +226,8 @@ Legend: ✅ done · 🟡 in progress · 🔧 needs work · ⬜ planned · ⚠️
 | Chat Q&A | `bot.py`, `chat.py` | ✅ | snapshot-grounded + chat audit |
 | Telegram research | `research_reports/`, `metrics/`, `analytics.py` | ✅ | `/research` catalog; snapshot digests + H12 SFP studies |
 | Persistence | `ledger.py`, `audit.py`, `paper.py` | ✅ | SQLite |
-| Dashboard | `dashboard/` | 🟡 | FastAPI read-only + macro news monitor |
-| Paper trading | `paper.py` | ✅ | fixed 25% deploy sizing, FIFO cap, epoch archives |
+| Dashboard | `dashboard/` | ✅ | Trade journal (expandable cards, dual H4/M5 charts, rationale) + macro + P&L |
+| Paper trading | `paper.py` | ✅ | fixed 25% deploy sizing, FIFO cap, epoch archives; outcome charts on close |
 | Live execution | `execute.py` | ⬜ | shadow/live path not built |
 | OHLC history cache | `ohlc_cache.py` | ✅ | research/backfill only, not hot path |
 | Legacy scheduler | `scheduler.py` | ⚠️ | deprecated; use `main.py` |
@@ -276,6 +279,7 @@ Defaults from `bot_config.py` (non-secret tunables). Secrets and portfolio size 
 
 | Date | Change |
 |---|---|
+| 2026-07-14 | Dashboard **trade journal**: expandable open/closed/archived cards with dual H4 structure + M5 execution charts, levels (Entry/SL/TP/OB), P&L, and rationale. `/api/chart/{cycle}?kind=&tf=` serves structure/entry/outcome/marked; paper closes best-effort write `{cycle}_H4|M5_outcome.png` (Entry+Exit+P&L windowed to open→close). |
 | 2026-07-14 | Fixed paper/watchdog scale-in bug that stacked many same-side M5 OB fills into one position (cash→0, ~2.6 ETH) and **reset SL to the latest fill**. Adds now only merge on matching `order_block_ref`, never widen SL, cap qty at `MAX_ETH_QTY`; watchdog blocks competing OB fib entries while one same-side OB position is open. |
 | 2026-07-13 | M5 entry OB min width lowered via `OB_MIN_WIDTH_PCT_M5=0.15` (HTF stays `OB_MIN_WIDTH_PCT=1.25`). Live probe showed 59/59 M5 OB candidates rejected at 1.25% (widths ~0.05–0.47%). |
 | 2026-07-13 | Removed HTF alignment hard-gate from watchdog (`_htf_allows_long/short`). Entries fire on M5 OB fib / SFP triggers; H4 zones remain context only. Softened market_context / Trading Guide / analyze prompts so HTF conflict no longer defaults to no_trade. |

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import time
 from typing import Any
 
@@ -10,7 +11,7 @@ import ledger
 import paper
 import research
 
-from dashboard.charts import h4_marked_path
+from dashboard.charts import h4_marked_path, trade_chart_urls
 from dashboard.performance import build_performance, _score_badge
 from dashboard.status import format_agent_status
 from macro.context import macro_payload_for_dashboard
@@ -100,15 +101,18 @@ def get_cycle_detail(cycle_id: str) -> dict[str, Any] | None:
 
 def get_open_positions_payload() -> list[dict[str, Any]]:
     spot = get_live_spot()["spot"]
-    return paper.get_open_positions(spot)
+    return [enrich_open_position(pos) for pos in paper.get_open_positions(spot)]
 
 
 def get_closed_trades_payload(limit: int = 50) -> list[dict[str, Any]]:
-    return paper.get_closed_trades(limit=limit)
+    return [enrich_closed_trade(t) for t in paper.get_closed_trades(limit=limit)]
 
 
 def get_archived_trades_payload(limit: int = 50) -> list[dict[str, Any]]:
-    return paper.get_archived_closed_trades(limit=limit)
+    return [
+        enrich_closed_trade(t, status="archived")
+        for t in paper.get_archived_closed_trades(limit=limit)
+    ]
 
 
 def get_performance_payload() -> dict[str, Any]:
@@ -118,6 +122,171 @@ def get_performance_payload() -> dict[str, Any]:
 
 def get_macro_payload() -> dict[str, Any]:
     return macro_payload_for_dashboard()
+
+
+def enrich_open_position(pos: dict[str, Any]) -> dict[str, Any]:
+    """Join open paper position with ledger/audit and chart URLs."""
+    cycle_id = str(pos.get("open_cycle_id") or "") or None
+    story = _trade_story_from_cycle(cycle_id)
+    charts = trade_chart_urls(
+        cycle_id,
+        closed=False,
+        ledger_chart_path=story.get("chart_path"),
+        marked_chart_paths=story.get("marked_chart_paths"),
+    )
+
+    entry = float(pos.get("avg_entry") or 0)
+    spot = float(pos.get("spot") or 0)
+    stop = float(pos.get("stop_loss") or 0) if pos.get("stop_loss") is not None else None
+    tps = _as_float_list(pos.get("take_profits") or story.get("take_profits"))
+    side = str(pos.get("side") or "")
+    pnl_usd = float(pos.get("unrealized_pnl_usd") or 0)
+    notional = entry * float(pos.get("eth_qty") or 0)
+    pnl_pct = (pnl_usd / notional * 100) if notional else 0.0
+
+    return {
+        **pos,
+        "status": "open",
+        "open_cycle_id": cycle_id,
+        "entry": entry,
+        "exit": None,
+        "action": pos.get("action") or story.get("action"),
+        "stop_loss": stop if stop is not None else story.get("stop_loss"),
+        "take_profits": tps or story.get("take_profits") or [],
+        "risk_reward": pos.get("risk_reward") if pos.get("risk_reward") is not None else story.get("risk_reward"),
+        "rationale": story.get("rationale") or "",
+        "setup_tags": story.get("setup_tags") or [],
+        "order_block": story.get("order_block"),
+        "pnl_usd": pnl_usd,
+        "pnl_pct": pnl_pct,
+        "is_winner": pnl_usd >= 0,
+        "close_reason": None,
+        "dist_to_sl_pct": _distance_pct(side, spot, stop) if stop else None,
+        "dist_to_tp_pct": _distance_to_tp_pct(side, spot, tps),
+        **charts,
+    }
+
+
+def enrich_closed_trade(
+    trade: dict[str, Any],
+    *,
+    status: str = "closed",
+) -> dict[str, Any]:
+    """Join closed paper trade with ledger/audit and chart URLs."""
+    cycle_id = str(trade.get("open_cycle_id") or "") or None
+    story = _trade_story_from_cycle(cycle_id)
+    charts = trade_chart_urls(
+        cycle_id,
+        closed=True,
+        ledger_chart_path=story.get("chart_path"),
+        marked_chart_paths=story.get("marked_chart_paths"),
+    )
+    pnl_usd = float(trade.get("realized_pnl_usd") or 0)
+    pnl_pct = float(trade.get("realized_pnl_pct") or 0)
+    tps = story.get("take_profits") or []
+
+    return {
+        **trade,
+        "status": status,
+        "action": story.get("action") or trade.get("side"),
+        "stop_loss": story.get("stop_loss"),
+        "take_profits": tps,
+        "risk_reward": story.get("risk_reward"),
+        "rationale": story.get("rationale") or "",
+        "setup_tags": story.get("setup_tags") or [],
+        "order_block": story.get("order_block"),
+        "pnl_usd": pnl_usd,
+        "pnl_pct": pnl_pct,
+        "is_winner": pnl_usd >= 0,
+        "dist_to_sl_pct": None,
+        "dist_to_tp_pct": None,
+        **charts,
+    }
+
+
+def _trade_story_from_cycle(cycle_id: str | None) -> dict[str, Any]:
+    if not cycle_id:
+        return {}
+    row = ledger.get_suggestion_by_cycle_id(cycle_id)
+    snapshot = audit.get_snapshot(cycle_id)
+    suggestion = (snapshot or {}).get("suggestion") or {}
+    marked = (snapshot or {}).get("marked_chart_paths") or {}
+
+    tags_raw = (row or {}).get("setup_tags") or suggestion.get("setup_tags") or ""
+    if isinstance(tags_raw, list):
+        tags = [str(t) for t in tags_raw if t]
+    else:
+        tags = [t.strip() for t in str(tags_raw).split(",") if t.strip()]
+
+    stop = None
+    if row and row.get("stop_loss") is not None:
+        stop = float(row["stop_loss"])
+    elif suggestion.get("stop_loss") is not None:
+        stop = float(suggestion["stop_loss"])
+
+    tps = []
+    if row and row.get("take_profits") is not None:
+        tps = _as_float_list(row.get("take_profits"))
+    elif suggestion.get("take_profits") is not None:
+        tps = _as_float_list(suggestion.get("take_profits"))
+
+    rr = None
+    if row and row.get("risk_reward") is not None:
+        rr = float(row["risk_reward"])
+    elif suggestion.get("risk_reward") is not None:
+        rr = float(suggestion["risk_reward"])
+
+    rationale = ""
+    if row and row.get("rationale"):
+        rationale = str(row["rationale"])
+    elif suggestion.get("rationale"):
+        rationale = str(suggestion["rationale"])
+    elif suggestion.get("llm_rationale"):
+        rationale = str(suggestion["llm_rationale"])
+
+    return {
+        "action": (row or {}).get("action") or suggestion.get("action"),
+        "chart_path": (row or {}).get("chart_path"),
+        "marked_chart_paths": marked,
+        "rationale": rationale,
+        "setup_tags": tags,
+        "stop_loss": stop,
+        "take_profits": tps,
+        "risk_reward": rr,
+        "order_block": suggestion.get("order_block"),
+        "size": (row or {}).get("size") or suggestion.get("size"),
+    }
+
+
+def _as_float_list(raw: Any) -> list[float]:
+    if raw is None:
+        return []
+    if isinstance(raw, list):
+        return [float(x) for x in raw]
+    if isinstance(raw, str):
+        try:
+            parsed = json.loads(raw)
+        except json.JSONDecodeError:
+            return []
+        if isinstance(parsed, list):
+            return [float(x) for x in parsed]
+    return []
+
+
+def _distance_pct(side: str, spot: float, level: float | None) -> float | None:
+    if level is None or spot <= 0:
+        return None
+    return abs(spot - float(level)) / spot * 100.0
+
+
+def _distance_to_tp_pct(side: str, spot: float, take_profits: list[float]) -> float | None:
+    if not take_profits or spot <= 0:
+        return None
+    if side == "long":
+        target = min(take_profits)
+    else:
+        target = max(take_profits)
+    return abs(float(target) - spot) / spot * 100.0
 
 
 def _excerpt(text: str, limit: int) -> str:

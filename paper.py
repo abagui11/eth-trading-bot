@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import logging
 import sqlite3
 from datetime import datetime, timezone
 
@@ -13,6 +14,11 @@ from models import Suggestion
 LONG_ACTIONS = {"spot_buy", "deriv_buy"}
 SHORT_ACTIONS = {"spot_sell", "deriv_sell"}
 TRADE_ACTIONS = LONG_ACTIONS | SHORT_ACTIONS
+
+logger = logging.getLogger(__name__)
+
+# Close events queued during a paper mutation; flushed after commit.
+_PENDING_OUTCOMES: list[dict] = []
 
 _STATE_SCHEMA = """
 CREATE TABLE IF NOT EXISTS paper_state (
@@ -353,6 +359,118 @@ def _close_all_positions(
     for position in list(positions):
         cash = _close_position_at_market(conn, cash, position, spot, cycle_id, reason)
     return cash
+
+
+def _queue_outcome_chart(event: dict) -> None:
+    _PENDING_OUTCOMES.append(event)
+
+
+def flush_pending_outcome_charts() -> None:
+    """Best-effort outcome PNG render for queued full closes (never raises)."""
+    events = list(_PENDING_OUTCOMES)
+    _PENDING_OUTCOMES.clear()
+    for event in events:
+        try:
+            _render_outcome_chart(event)
+        except Exception:
+            logger.exception(
+                "outcome chart failed for cycle %s",
+                event.get("open_cycle_id"),
+            )
+
+
+def _render_outcome_chart(event: dict) -> None:
+    """Build H4/M5 outcome charts for a fully closed paper position."""
+    open_cycle_id = event.get("open_cycle_id")
+    if not open_cycle_id:
+        return
+
+    import audit
+    import charts as charts_mod
+    import ledger
+    import research
+    from models import Suggestion
+
+    row = ledger.get_suggestion_by_cycle_id(str(open_cycle_id))
+    snapshot = audit.get_snapshot(str(open_cycle_id))
+    suggestion_data = (snapshot or {}).get("suggestion") or {}
+
+    action = str(
+        (row or {}).get("action")
+        or suggestion_data.get("action")
+        or event.get("action")
+        or ("spot_buy" if event.get("side") == "long" else "spot_sell")
+    )
+    entry = event.get("entry")
+    if entry is None and row is not None:
+        entry = row.get("entry")
+    if entry is None:
+        entry = suggestion_data.get("entry")
+
+    stop = event.get("stop_loss")
+    if stop is None and row is not None:
+        stop = row.get("stop_loss")
+    if stop is None:
+        stop = suggestion_data.get("stop_loss")
+
+    tps = event.get("take_profits") or []
+    if not tps and row is not None:
+        tps = row.get("take_profits") or []
+    if not tps:
+        tps = suggestion_data.get("take_profits") or []
+
+    order_block = suggestion_data.get("order_block") or event.get("order_block")
+    suggestion = Suggestion(
+        action=action,
+        size=float((row or {}).get("size") or suggestion_data.get("size") or 0),
+        entry=float(entry) if entry is not None else None,
+        stop_loss=float(stop) if stop is not None else None,
+        take_profits=[float(tp) for tp in tps],
+        risk_reward=(
+            float(row["risk_reward"])
+            if row and row.get("risk_reward") is not None
+            else (
+                float(suggestion_data["risk_reward"])
+                if suggestion_data.get("risk_reward") is not None
+                else None
+            )
+        ),
+        rationale=str((row or {}).get("rationale") or suggestion_data.get("rationale") or ""),
+        order_block=order_block,
+        structure_chart=suggestion_data.get("structure_chart") or "H4",
+        entry_chart=suggestion_data.get("entry_chart") or "M5",
+    )
+
+    key_levels = []
+    htf_zones = []
+    market_context = None
+    snap_body = (snapshot or {}).get("snapshot")
+    if isinstance(snap_body, dict):
+        try:
+            market_context = audit.market_context_from_dict(snap_body)
+            key_levels = list(market_context.key_levels_near)
+            htf_zones = list(market_context.htf_zones)
+        except Exception:
+            logger.debug("could not rebuild market context for outcome charts", exc_info=True)
+
+    data = {
+        "H4": research.get_ohlc("H4"),
+        "H1": research.get_ohlc("H1"),
+        "M5": research.get_ohlc("M5"),
+    }
+    charts_mod.build_outcome_charts(
+        suggestion,
+        data,
+        key_levels,
+        htf_zones,
+        str(open_cycle_id),
+        opened_at=event.get("opened_at"),
+        closed_at=event.get("closed_at"),
+        exit_price=float(event["exit"]),
+        pnl_usd=float(event.get("pnl_usd") or 0),
+        pnl_pct=float(event.get("pnl_pct") or 0),
+        market_context=market_context,
+    )
 
 
 def _reduce_position(
@@ -1018,8 +1136,12 @@ def _close_position_at_market(
 
     if side == "long":
         cash += eth_qty * spot
+        pnl_usd = eth_qty * (spot - avg_entry)
     elif side == "short":
         cash += eth_qty * (2 * avg_entry - spot)
+        pnl_usd = eth_qty * (avg_entry - spot)
+    else:
+        pnl_usd = 0.0
 
     open_positions = [p for p in _fetch_open_positions(conn) if int(p["id"]) != pos_id]
     equity = _equity(cash, open_positions, spot)
@@ -1027,8 +1149,27 @@ def _close_position_at_market(
         "UPDATE paper_positions SET status = 'closed' WHERE id = ?",
         (pos_id,),
     )
+    closed_at = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
     _log_trade(
         conn, "close", cycle_id, side, eth_qty, spot, cash, equity, pos_id, reason
+    )
+    notional = eth_qty * avg_entry
+    _queue_outcome_chart(
+        {
+            "open_cycle_id": position.get("open_cycle_id"),
+            "opened_at": position.get("opened_at"),
+            "closed_at": closed_at,
+            "side": side,
+            "action": position.get("action"),
+            "entry": avg_entry,
+            "exit": spot,
+            "eth_qty": eth_qty,
+            "stop_loss": position.get("stop_loss"),
+            "take_profits": list(position.get("take_profits") or []),
+            "close_reason": reason,
+            "pnl_usd": pnl_usd,
+            "pnl_pct": (pnl_usd / notional * 100) if notional else 0.0,
+        }
     )
     return cash
 
@@ -1129,26 +1270,30 @@ def _open_position(
 def update(suggestion: Suggestion, spot_price: float, cycle_id: str | None = None) -> dict:
     """Apply latest suggestion to paper portfolio. Returns updated state dict."""
     init_db()
-    with _connect() as conn:
-        state = dict(conn.execute("SELECT * FROM paper_state WHERE id = 1").fetchone())
-        cash = float(state["cash_usd"])
+    _PENDING_OUTCOMES.clear()
+    try:
+        with _connect() as conn:
+            state = dict(conn.execute("SELECT * FROM paper_state WHERE id = 1").fetchone())
+            cash = float(state["cash_usd"])
 
-        cash = _check_sl_tp_closes(conn, cash, spot_price, cycle_id)
+            cash = _check_sl_tp_closes(conn, cash, spot_price, cycle_id)
 
-        if suggestion.action in TRADE_ACTIONS:
-            cash = _apply_trade_with_netting(
-                conn, cash, suggestion, spot_price, cycle_id
+            if suggestion.action in TRADE_ACTIONS:
+                cash = _apply_trade_with_netting(
+                    conn, cash, suggestion, spot_price, cycle_id
+                )
+
+            conn.execute(
+                """
+                UPDATE paper_state
+                SET cash_usd = ?, last_cycle_id = ?, last_spot = ?
+                WHERE id = 1
+                """,
+                (cash, cycle_id, spot_price),
             )
-
-        conn.execute(
-            """
-            UPDATE paper_state
-            SET cash_usd = ?, last_cycle_id = ?, last_spot = ?
-            WHERE id = 1
-            """,
-            (cash, cycle_id, spot_price),
-        )
-        conn.commit()
+            conn.commit()
+    finally:
+        flush_pending_outcome_charts()
 
     return get_state()
 
@@ -1294,76 +1439,80 @@ def restore_open_position(
 ) -> dict:
     """Manually set an open paper position (e.g. backfill after a missed broadcast)."""
     init_db()
-    with _connect() as conn:
-        positions = _fetch_open_positions(conn)
-        for pos in positions:
-            if str(pos.get("open_cycle_id")) == open_cycle_id:
-                return get_state()
+    _PENDING_OUTCOMES.clear()
+    try:
+        with _connect() as conn:
+            positions = _fetch_open_positions(conn)
+            for pos in positions:
+                if str(pos.get("open_cycle_id")) == open_cycle_id:
+                    return get_state()
 
-        if positions and not force:
-            existing = positions[0]
-            raise OpenPositionConflictError(
-                f"Paper already has {existing.get('action')} open "
-                f"(cycle {existing.get('open_cycle_id')}); refusing to add "
-                f"{action} (cycle {open_cycle_id}). Pass force=True to close first."
-            )
-
-        state = dict(conn.execute("SELECT * FROM paper_state WHERE id = 1").fetchone())
-        cash = float(state["cash_usd"])
-        side = "long" if action in LONG_ACTIONS else "short"
-        eth_qty = max(bot_config.MIN_ETH_QTY, min(bot_config.MAX_ETH_QTY, eth_qty))
-        notional = eth_qty * entry
-
-        if force and positions:
-            for pos in list(_fetch_open_positions(conn)):
-                cash = _close_position_at_market(
-                    conn, cash, pos, spot_price, open_cycle_id, "restore_force"
+            if positions and not force:
+                existing = positions[0]
+                raise OpenPositionConflictError(
+                    f"Paper already has {existing.get('action')} open "
+                    f"(cycle {existing.get('open_cycle_id')}); refusing to add "
+                    f"{action} (cycle {open_cycle_id}). Pass force=True to close first."
                 )
-            positions = []
 
-        if len(positions) >= bot_config.MAX_OPEN_TRADES:
-            oldest = positions[0]
-            cash = _close_position_at_market(
-                conn, cash, oldest, spot_price, open_cycle_id, "fifo_max_positions"
+            state = dict(conn.execute("SELECT * FROM paper_state WHERE id = 1").fetchone())
+            cash = float(state["cash_usd"])
+            side = "long" if action in LONG_ACTIONS else "short"
+            eth_qty = max(bot_config.MIN_ETH_QTY, min(bot_config.MAX_ETH_QTY, eth_qty))
+            notional = eth_qty * entry
+
+            if force and positions:
+                for pos in list(_fetch_open_positions(conn)):
+                    cash = _close_position_at_market(
+                        conn, cash, pos, spot_price, open_cycle_id, "restore_force"
+                    )
+                positions = []
+
+            if len(positions) >= bot_config.MAX_OPEN_TRADES:
+                oldest = positions[0]
+                cash = _close_position_at_market(
+                    conn, cash, oldest, spot_price, open_cycle_id, "fifo_max_positions"
+                )
+
+            if cash < notional:
+                raise ValueError(
+                    f"Notional ${notional:,.2f} exceeds available cash ${cash:,.2f}"
+                )
+
+            cash -= notional
+            cursor = conn.execute(
+                """
+                INSERT INTO paper_positions (
+                    open_cycle_id, opened_at, side, action, eth_qty, avg_entry,
+                    stop_loss, take_profits, risk_reward, suggested_size, status
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'open')
+                """,
+                (
+                    open_cycle_id,
+                    opened_at,
+                    side,
+                    action,
+                    eth_qty,
+                    entry,
+                    stop_loss,
+                    json.dumps(take_profits),
+                    risk_reward,
+                    suggested_size,
+                ),
             )
-
-        if cash < notional:
-            raise ValueError(
-                f"Notional ${notional:,.2f} exceeds available cash ${cash:,.2f}"
+            pos_id = int(cursor.lastrowid)
+            all_open = _fetch_open_positions(conn)
+            equity = _equity(cash, all_open, spot_price)
+            _log_trade(
+                conn, "open", open_cycle_id, side, eth_qty, entry, cash, equity, pos_id, None
             )
-
-        cash -= notional
-        cursor = conn.execute(
-            """
-            INSERT INTO paper_positions (
-                open_cycle_id, opened_at, side, action, eth_qty, avg_entry,
-                stop_loss, take_profits, risk_reward, suggested_size, status
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'open')
-            """,
-            (
-                open_cycle_id,
-                opened_at,
-                side,
-                action,
-                eth_qty,
-                entry,
-                stop_loss,
-                json.dumps(take_profits),
-                risk_reward,
-                suggested_size,
-            ),
-        )
-        pos_id = int(cursor.lastrowid)
-        all_open = _fetch_open_positions(conn)
-        equity = _equity(cash, all_open, spot_price)
-        _log_trade(
-            conn, "open", open_cycle_id, side, eth_qty, entry, cash, equity, pos_id, None
-        )
-        conn.execute(
-            "UPDATE paper_state SET cash_usd = ?, last_cycle_id = ?, last_spot = ? WHERE id = 1",
-            (cash, open_cycle_id, spot_price),
-        )
-        conn.commit()
+            conn.execute(
+                "UPDATE paper_state SET cash_usd = ?, last_cycle_id = ?, last_spot = ? WHERE id = 1",
+                (cash, open_cycle_id, spot_price),
+            )
+            conn.commit()
+    finally:
+        flush_pending_outcome_charts()
 
     return get_state()
 

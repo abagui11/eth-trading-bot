@@ -25,9 +25,13 @@ class PaperPositionTests(unittest.TestCase):
         self._portfolio_patch.start()
         self._max_patch = patch.object(bot_config, "MAX_OPEN_TRADES", 4)
         self._max_patch.start()
+        # Outcome chart render hits Coinbase OHLC — keep unit tests offline.
+        self._outcome_patch = patch.object(paper, "flush_pending_outcome_charts")
+        self._outcome_patch.start()
         paper.init_db()
 
     def tearDown(self) -> None:
+        self._outcome_patch.stop()
         self._max_patch.stop()
         self._portfolio_patch.stop()
         self._config_patch.stop()

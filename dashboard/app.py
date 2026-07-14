@@ -15,7 +15,13 @@ import config
 import ledger
 import paper
 from dashboard import data
-from dashboard.charts import h4_marked_path, resolve_chart_path
+from dashboard.charts import (
+    VALID_KINDS,
+    VALID_TFS,
+    h4_marked_path,
+    resolve_chart_path,
+    resolve_trade_chart,
+)
 from macro import store as macro_store
 from macro.context import macro_payload_for_dashboard
 from macro.ingest import ingest_headline
@@ -131,18 +137,41 @@ def create_app() -> FastAPI:
         return FileResponse(path, media_type="image/png")
 
     @app.get("/api/chart/{cycle_id}")
-    async def api_chart_cycle(cycle_id: str) -> FileResponse:
+    async def api_chart_cycle(
+        cycle_id: str,
+        kind: str = "marked",
+        tf: str = "H4",
+    ) -> FileResponse:
+        kind_n = (kind or "marked").lower()
+        tf_n = (tf or "H4").upper()
+        if kind_n not in VALID_KINDS:
+            raise HTTPException(status_code=400, detail=f"Invalid kind={kind!r}")
+        if tf_n not in VALID_TFS:
+            raise HTTPException(status_code=400, detail=f"Invalid tf={tf!r}")
+
         snapshot = audit.get_snapshot(cycle_id)
         marked = (snapshot or {}).get("marked_chart_paths") if snapshot else None
-        path = h4_marked_path(marked)
-        if path is None:
-            row = ledger.get_suggestion_by_cycle_id(cycle_id)
-            if row:
-                for part in str(row.get("chart_path") or "").split(","):
+        row = ledger.get_suggestion_by_cycle_id(cycle_id)
+        ledger_path = (row or {}).get("chart_path") if row else None
+
+        # Default (no query / marked+H4): preserve legacy H4-marked behaviour.
+        if kind_n == "marked" and tf_n == "H4":
+            path = h4_marked_path(marked)
+            if path is None and row:
+                for part in str(ledger_path or "").split(","):
                     path = resolve_chart_path(part.strip())
                     if path and "H4" in path.name and "marked" in path.name:
                         break
                     path = None
+        else:
+            path = resolve_trade_chart(
+                cycle_id,
+                kind=kind_n,
+                tf=tf_n,
+                ledger_chart_path=ledger_path,
+                marked_chart_paths=marked,
+            )
+
         if path is None:
             raise HTTPException(status_code=404, detail="Chart not found")
         return FileResponse(path, media_type="image/png")
