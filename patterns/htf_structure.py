@@ -68,6 +68,8 @@ def _find_ob_candidate(
     msb_idx: int,
     direction: Direction,
     broken_level: float,
+    *,
+    min_width_pct: float,
 ) -> tuple[int, float, float, str] | None:
     """Last opposite-direction candle immediately before MSB."""
     del broken_level
@@ -78,7 +80,7 @@ def _find_ob_candidate(
             continue
         low = round(float(row["low"]), 2)
         high = round(float(row["high"]), 2)
-        if not meets_min_ob_width(low, high):
+        if not meets_min_ob_width(low, high, min_width_pct=min_width_pct):
             return None
         return (j, low, high, _ts_at(df, j))
     return None
@@ -108,6 +110,9 @@ def detect_htf_zones(
     lookback: int = 60,
     pivot_left: int = 2,
     pivot_right: int = 2,
+    *,
+    min_width_pct: float | None = None,
+    product_id: str | None = None,
 ) -> list[HTFZone]:
     """
     Detect HTF order blocks and breakers on closed candles.
@@ -115,7 +120,18 @@ def detect_htf_zones(
     MSB: close through prior swing high/low (wick-only breaks ignored).
     OB: last opposite candle before MSB.
     Breaker: mitigated OB followed by opposite MSB.
+
+    ``min_width_pct`` overrides the product default from
+    ``bot_config.ob_min_width_pct(product_id)``.
     """
+    import bot_config
+
+    width_floor = (
+        float(min_width_pct)
+        if min_width_pct is not None
+        else bot_config.ob_min_width_pct(product_id)
+    )
+
     if len(htf_bars) < 15:
         return []
 
@@ -165,7 +181,9 @@ def detect_htf_zones(
                 v.promoted_to_breaker = True
                 break
 
-            ob = _find_ob_candidate(df, i, "bullish", swing_high.price)
+            ob = _find_ob_candidate(
+                df, i, "bullish", swing_high.price, min_width_pct=width_floor
+            )
             if ob:
                 idx, low, high, start_ts = ob
                 block = _TrackedBlock(
@@ -197,7 +215,9 @@ def detect_htf_zones(
                 v.promoted_to_breaker = True
                 break
 
-            ob = _find_ob_candidate(df, i, "bearish", swing_low.price)
+            ob = _find_ob_candidate(
+                df, i, "bearish", swing_low.price, min_width_pct=width_floor
+            )
             if ob:
                 idx, low, high, start_ts = ob
                 block = _TrackedBlock(

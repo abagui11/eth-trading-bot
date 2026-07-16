@@ -187,6 +187,7 @@ def build_market_context(
     daily_bars: list[dict] | None = None,
     *,
     spot_override: float | None = None,
+    product_id: str | None = None,
 ) -> MarketContext:
     """Compute ICT signals and range alerts from live OHLC (H4 / H1 / M5)."""
     alerts: list[str] = []
@@ -264,7 +265,7 @@ def build_market_context(
     for event in recent_m5:
         setup_tags.append(f"m5_sfp_{event.direction}")
 
-    htf_zones = detect_htf_zones(h4_bars)
+    htf_zones = detect_htf_zones(h4_bars, product_id=product_id)
     zone_snap = resolve_zones(spot, htf_zones)
     bearish_bias = _htf_bearish_bias(h4_bars, zone_snap)
 

@@ -39,9 +39,13 @@ def run_cycle() -> list[tuple[Suggestion, list[str]]] | None:
             data = research.get_all_timeframes(product_id=product_id)
             daily_bars = research.get_daily_bars_for_levels(product_id=product_id)
             key_levels = compute_key_levels(daily_bars)
-            htf_zones = detect_htf_zones(data["H4"])
+            htf_zones = detect_htf_zones(data["H4"], product_id=product_id)
             market_context = build_market_context(
-                data["H4"], data["H1"], data["M5"], daily_bars=daily_bars
+                data["H4"],
+                data["H1"],
+                data["M5"],
+                daily_bars=daily_bars,
+                product_id=product_id,
             )
             marked_paths = charts.render_marked_charts(
                 data,

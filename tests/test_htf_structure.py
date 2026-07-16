@@ -90,3 +90,19 @@ def test_promoted_ob_excluded_when_breaker_exists():
 
 def test_empty_bars_returns_empty():
     assert detect_htf_zones([]) == []
+
+
+def test_ob_min_width_pct_by_product():
+    import bot_config
+
+    assert bot_config.ob_min_width_pct("ETH-USD") == 1.25
+    assert bot_config.ob_min_width_pct("BTC-USD") == 0.60
+    assert bot_config.ob_min_width_pct(None) == 1.25
+
+
+def test_detect_htf_zones_honors_min_width_pct():
+    bars = _bullish_msb_series()
+    wide = detect_htf_zones(bars, lookback=15, min_width_pct=0.01)
+    blocked = detect_htf_zones(bars, lookback=15, min_width_pct=50.0)
+    assert any(z.zone_type == "order_block" for z in wide)
+    assert not any(z.zone_type == "order_block" for z in blocked)

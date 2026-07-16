@@ -280,7 +280,8 @@ Defaults from `bot_config.py` (non-secret tunables). Secrets and portfolio size 
 | `RELATIVE_STRENGTH_ENABLED` | `True` | adds W1 ETH/BTC proposal bias and watchdog soft gate |
 | `PAPER_CONTRIBUTION_USD` | `1000.0` | one-time fake Fund deposit per Telegram user |
 | `HOUSE_CONTRIBUTION_TELEGRAM_ID` | `0` | reserved Telegram ID for the house seed row in `paper_contributions` |
-| `OB_MIN_WIDTH_PCT` | `1.25` | minimum HTF (H4) OB zone width (% of mid price) |
+| `OB_MIN_WIDTH_PCT` | `1.25` | default / ETH HTF (H4) OB zone width floor (% of mid price) |
+| `PRODUCT_OB_MIN_WIDTH_PCT` | `{"ETH-USD": 1.25, "BTC-USD": 0.60}` | per-product HTF OB/breaker width via `ob_min_width_pct(product_id)` |
 | `OB_MIN_WIDTH_PCT_M5` | `0.15` | minimum M5 entry OB width (M5 candles are ~10× thinner than H1) |
 | `PAPER_EPOCH_LABEL` | `"5k_usd"` | dashboard epoch label |
 | `MACRO_CONTEXT_ENABLED` | `True` | RSS poll + macro advisory injection |
@@ -306,6 +307,7 @@ Defaults from `bot_config.py` (non-secret tunables). Secrets and portfolio size 
 
 | Date | Change |
 |---|---|
+| 2026-07-16 | Per-product HTF OB min-width: BTC uses 0.60% (ETH stays 1.25%) so BTC H4 OB/breaker boxes are not over-filtered by ETH-tuned volatility. |
 | 2026-07-16 | Dashboard H4 structure section shows ETH and BTC marked charts side by side; hourly cycle always persists a per-product decision so both charts stay available. |
 | 2026-07-16 | Trading Guide sizing section aligned to USD-notional contract; added `tests/test_relative_strength.py` (W1 ratio/soft-gate) and `tests/test_contributions.py` (Fund/My Metrics). |
 | 2026-07-16 | Sizing contract switched to USD notional: `Suggestion.size` now stores deployed dollars, paper converts to ETH/BTC qty for P&L, and dashboard/Telegram show dollar size first with quantity secondary. |

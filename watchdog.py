@@ -560,7 +560,8 @@ def _render_output_charts(
     daily_bars: list[dict],
 ) -> list[str]:
     key_levels = compute_key_levels(daily_bars)
-    htf_zones = detect_htf_zones(data["H4"])
+    product_id = getattr(suggestion, "product_id", None) or "ETH-USD"
+    htf_zones = detect_htf_zones(data["H4"], product_id=product_id)
     return charts.build_output_charts(
         suggestion,
         data,
@@ -678,6 +679,7 @@ def _prepare_context(
         m5_live,
         daily_bars=daily_bars,
         spot_override=live_spot,
+        product_id=product_id,
     )
     data["M5"] = m5_live
     return ctx, data, live_spot, daily_bars

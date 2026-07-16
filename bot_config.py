@@ -48,8 +48,14 @@ HOUSE_CONTRIBUTION_TELEGRAM_ID = 0
 
 # Minimum OB zone width as % of mid price.
 # HTF (H4) keeps the swing-style filter; M5 entry candles are much thinner.
+# BTC H4 candles are typically narrower in % terms than ETH, so BTC uses a
+# lower HTF floor while ETH keeps the original 1.25% swing filter.
 OB_MIN_WIDTH_PCT = 1.25
 OB_MIN_WIDTH_PCT_M5 = 0.15
+PRODUCT_OB_MIN_WIDTH_PCT: dict[str, float] = {
+    "ETH-USD": OB_MIN_WIDTH_PCT,
+    "BTC-USD": 0.60,
+}
 
 # Label for the current paper epoch (shown on dashboard after reset).
 PAPER_EPOCH_LABEL = "5k_usd"
@@ -75,6 +81,15 @@ RELATIVE_STRENGTH_ENABLED = True
 def qty_caps(product_id: str) -> tuple[float, float]:
     """Return (min_qty, max_qty) for a product; fall back to ETH caps."""
     return PRODUCT_QTY_CAPS.get(product_id, PRODUCT_QTY_CAPS["ETH-USD"])
+
+
+def ob_min_width_pct(product_id: str | None = None) -> float:
+    """HTF OB/breaker minimum width (% of mid) for a product."""
+    if not product_id:
+        return OB_MIN_WIDTH_PCT
+    return float(
+        PRODUCT_OB_MIN_WIDTH_PCT.get(product_id, OB_MIN_WIDTH_PCT)
+    )
 
 
 def product_label(product_id: str) -> str:
