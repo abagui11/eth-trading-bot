@@ -284,15 +284,15 @@ async def cmd_status(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
         await _reply(update, PAYWALL_MESSAGE)
         return
 
-    spot = research.get_spot_price()
-    pnl = paper.format_pnl_footer(spot)
-    position_detail = paper.format_position_detail(spot)
+    spots = research.get_spot_prices()
+    pnl = paper.format_pnl_footer(spots=spots)
+    position_detail = paper.format_position_detail()
 
     latest = ledger.get_latest_suggestion()
     if position_detail:
         lines = [position_detail]
         if latest:
-            open_positions = paper.get_open_positions(spot)
+            open_positions = paper.get_open_positions(spots=spots)
             open_cids = {
                 str(p["open_cycle_id"])
                 for p in open_positions
@@ -301,12 +301,14 @@ async def cmd_status(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
             header = "Latest hourly cycle"
             if open_cids and latest.get("cycle_id") not in open_cids:
                 header += " (may differ from open positions)"
+            product = latest.get("product_id") or "ETH-USD"
             tps = ", ".join(f"{tp:,.2f}" for tp in latest.get("take_profits", [])) or "n/a"
             lines.extend(
                 [
                     "",
                     f"--- {header} ---",
                     f"Cycle: {latest['cycle_id']} ({latest['ts']})",
+                    f"Asset: {bot_config.product_label(product)}",
                     f"Action: {latest['action']}",
                     f"Entry: {latest.get('entry')} | SL: {latest.get('stop_loss')} | TP: {tps}",
                     f"R/R: {latest.get('risk_reward')}",

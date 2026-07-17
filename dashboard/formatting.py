@@ -12,7 +12,7 @@ TAG_GLOSSARY: dict[str, str] = {
     "short": "Short position — profit if ETH falls.",
     "LIVE": "Open paper position still being managed.",
     "stop_loss": "Closed because price hit the stop-loss.",
-    "take_profit": "Closed because price hit a take-profit level.",
+    "take_profit": "Closed (or scaled out) because price hit a take-profit level.",
     "signal_net": "Closed or reduced when a newer signal flipped net exposure.",
     "restore_force": "Closed to make room when restoring another position.",
     "fifo_max_positions": "Closed oldest position after hitting the open-trade cap.",

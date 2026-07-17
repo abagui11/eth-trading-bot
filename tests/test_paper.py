@@ -413,6 +413,103 @@ class PaperPositionTests(unittest.TestCase):
         closed = paper.get_closed_trades(limit=1)
         self.assertEqual(closed[0]["close_reason"], "stop_loss")
 
+    def test_tp1_scales_out_one_third_and_moves_sl_to_breakeven(self) -> None:
+        paper.restore_open_position(
+            action="spot_buy",
+            entry=1803.0,
+            eth_qty=0.75,
+            stop_loss=1796.0,
+            take_profits=[1831.62, 1844.67, 1865.0],
+            risk_reward=4.09,
+            suggested_size=0.75,
+            opened_at="2026-07-17T18:11:00Z",
+            open_cycle_id="cycle_long_tp",
+            spot_price=1803.0,
+        )
+        paper.update(
+            Suggestion.no_trade("mark"), spot_price=1831.62, cycle_id="cycle_tp1"
+        )
+        positions = paper.get_open_positions(1831.62)
+        self.assertEqual(len(positions), 1)
+        self.assertAlmostEqual(positions[0]["eth_qty"], 0.50, places=4)
+        self.assertAlmostEqual(float(positions[0]["stop_loss"]), 1803.0, places=2)
+        self.assertEqual(int(positions[0]["tps_hit"]), 1)
+        closed = paper.get_closed_trades(limit=1)
+        self.assertEqual(closed[0]["close_reason"], "take_profit")
+        self.assertAlmostEqual(closed[0]["eth_qty"], 0.25, places=4)
+        self.assertAlmostEqual(closed[0]["exit"], 1831.62, places=2)
+
+    def test_tp2_scales_out_and_trails_sl_to_tp1(self) -> None:
+        paper.restore_open_position(
+            action="spot_buy",
+            entry=1803.0,
+            eth_qty=0.75,
+            stop_loss=1796.0,
+            take_profits=[1831.62, 1844.67, 1865.0],
+            risk_reward=4.09,
+            suggested_size=0.75,
+            opened_at="2026-07-17T18:11:00Z",
+            open_cycle_id="cycle_long_tp2",
+            spot_price=1803.0,
+        )
+        paper.update(
+            Suggestion.no_trade("mark"), spot_price=1831.62, cycle_id="cycle_tp1"
+        )
+        paper.update(
+            Suggestion.no_trade("mark"), spot_price=1844.67, cycle_id="cycle_tp2"
+        )
+        positions = paper.get_open_positions(1844.67)
+        self.assertEqual(len(positions), 1)
+        self.assertAlmostEqual(positions[0]["eth_qty"], 0.25, places=4)
+        self.assertAlmostEqual(float(positions[0]["stop_loss"]), 1831.62, places=2)
+        self.assertEqual(int(positions[0]["tps_hit"]), 2)
+
+    def test_tp3_closes_remaining_third(self) -> None:
+        paper.restore_open_position(
+            action="spot_buy",
+            entry=1803.0,
+            eth_qty=0.75,
+            stop_loss=1796.0,
+            take_profits=[1831.62, 1844.67, 1865.0],
+            risk_reward=4.09,
+            suggested_size=0.75,
+            opened_at="2026-07-17T18:11:00Z",
+            open_cycle_id="cycle_long_tp3",
+            spot_price=1803.0,
+        )
+        paper.update(
+            Suggestion.no_trade("mark"), spot_price=1865.0, cycle_id="cycle_gap_tps"
+        )
+        self.assertFalse(paper.is_open())
+        closed = paper.get_closed_trades(limit=5)
+        tp_closes = [c for c in closed if c["close_reason"] == "take_profit"]
+        self.assertEqual(len(tp_closes), 3)
+        qtys = sorted(c["eth_qty"] for c in tp_closes)
+        self.assertAlmostEqual(qtys[0], 0.25, places=4)
+        self.assertAlmostEqual(qtys[1], 0.25, places=4)
+        self.assertAlmostEqual(qtys[2], 0.25, places=4)
+
+    def test_single_tp_still_closes_full_position(self) -> None:
+        paper.restore_open_position(
+            action="spot_buy",
+            entry=1800.0,
+            eth_qty=0.5,
+            stop_loss=1700.0,
+            take_profits=[1900.0],
+            risk_reward=1.0,
+            suggested_size=0.5,
+            opened_at="2026-07-17T12:00:00Z",
+            open_cycle_id="cycle_single_tp",
+            spot_price=1800.0,
+        )
+        paper.update(
+            Suggestion.no_trade("mark"), spot_price=1900.0, cycle_id="cycle_tp_full"
+        )
+        self.assertFalse(paper.is_open())
+        closed = paper.get_closed_trades(limit=1)
+        self.assertEqual(closed[0]["close_reason"], "take_profit")
+        self.assertAlmostEqual(closed[0]["eth_qty"], 0.5, places=4)
+
     def test_opposite_signal_reduces_existing_short_exposure(self) -> None:
         paper.restore_open_position(
             action="deriv_sell",

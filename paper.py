@@ -252,6 +252,10 @@ def _ensure_position_columns(conn: sqlite3.Connection) -> None:
         )
     if "qty" not in cols:
         conn.execute("ALTER TABLE paper_positions ADD COLUMN qty REAL")
+    if "tps_hit" not in cols:
+        conn.execute(
+            "ALTER TABLE paper_positions ADD COLUMN tps_hit INTEGER NOT NULL DEFAULT 0"
+        )
 
 
 def _ensure_position_archive_columns(conn: sqlite3.Connection) -> None:
@@ -654,6 +658,8 @@ def _reduce_position(
     cycle_id: str | None,
     reason: str,
     spots: dict[str, float] | None = None,
+    *,
+    allow_dust: bool = False,
 ) -> float:
     side = str(position["side"])
     eth_qty = _pos_qty(position)
@@ -673,7 +679,13 @@ def _reduce_position(
         cash += close_qty * (2 * avg_entry - spot)
 
     remaining = eth_qty - close_qty
-    if remaining < min_qty:
+    if remaining <= 1e-12:
+        position["eth_qty"] = eth_qty
+        position["qty"] = eth_qty
+        return _close_position_at_market(
+            conn, cash, position, spot, cycle_id, reason, spots=resolved
+        )
+    if not allow_dust and remaining < min_qty:
         position["eth_qty"] = eth_qty
         position["qty"] = eth_qty
         return _close_position_at_market(
@@ -684,6 +696,8 @@ def _reduce_position(
         "UPDATE paper_positions SET eth_qty = ?, qty = ? WHERE id = ?",
         (remaining, remaining, pos_id),
     )
+    position["eth_qty"] = remaining
+    position["qty"] = remaining
     open_positions = _fetch_open_positions(conn)
     equity = _equity(cash, open_positions, resolved)
     _log_trade(
@@ -1145,10 +1159,18 @@ def _format_exit_plan(position: dict) -> str:
         tp_f = float(tp)
         if side == "short":
             status = "hit" if spot <= tp_f else "pending"
-            lines.append(f"TP{idx} at ${tp_f:,.2f} — scale out on downside ({status}).")
+            lines.append(
+                f"TP{idx} at ${tp_f:,.2f} — scale out ~1/{max(len(tps), 1)} on downside ({status})."
+            )
         else:
             status = "hit" if spot >= tp_f else "pending"
-            lines.append(f"TP{idx} at ${tp_f:,.2f} — scale out on upside ({status}).")
+            lines.append(
+                f"TP{idx} at ${tp_f:,.2f} — scale out ~1/{max(len(tps), 1)} on upside ({status})."
+            )
+    if len(tps) >= 2:
+        lines.append(
+            "After TP1, SL trails to breakeven; after TP2, SL trails to TP1; etc."
+        )
 
     if not lines:
         return "No SL/TP levels recorded for this position."
@@ -1211,37 +1233,57 @@ def format_position_detail(spot_price: float | None = None) -> str | None:
 
 
 def _pair_closed_trades(rows: list[dict]) -> list[dict]:
-    """Pair open/close ledger rows into closed trade summaries (oldest-first input)."""
+    """Pair open/close ledger rows into closed trade summaries (oldest-first input).
+
+    Supports partial closes (TP scale-outs / signal nets): one open may match
+    multiple close rows; realized qty/PnL use the close size, and any unused
+    open qty stays pending for later closes.
+    """
     pending_opens: dict[int | None, list[dict]] = {}
     closed: list[dict] = []
+
+    def _open_remaining(opened: dict) -> float:
+        if opened.get("_remaining") is not None:
+            return float(opened["_remaining"])
+        return float(
+            opened.get("qty") if opened.get("qty") is not None else opened["eth_qty"]
+        )
 
     for row in rows:
         event = str(row.get("event") or "")
         pos_id = row.get("position_id")
         if event == "open":
-            pending_opens.setdefault(pos_id, []).append(row)
+            opened = dict(row)
+            opened["_remaining"] = _open_remaining(opened)
+            pending_opens.setdefault(pos_id, []).append(opened)
             continue
         if event != "close":
             continue
 
         side = str(row.get("side") or "")
+        close_qty = float(row.get("qty") if row.get("qty") is not None else row["eth_qty"])
         opened: dict | None = None
         if pos_id is not None and pos_id in pending_opens and pending_opens[pos_id]:
-            opened = pending_opens[pos_id].pop()
-        if opened is None:
+            opened = pending_opens[pos_id][-1]
+        if opened is None or _open_remaining(opened) <= 1e-12:
+            opened = None
             for opens in pending_opens.values():
                 for i in range(len(opens) - 1, -1, -1):
-                    if str(opens[i].get("side") or "") == side:
-                        opened = opens.pop(i)
+                    cand = opens[i]
+                    if str(cand.get("side") or "") == side and _open_remaining(cand) > 1e-12:
+                        opened = cand
                         break
-                if opened:
+                if opened is not None:
                     break
         if opened is None:
             continue
 
         entry = float(opened["price"])
         exit_price = float(row["price"])
-        qty = float(opened.get("qty") if opened.get("qty") is not None else opened["eth_qty"])
+        qty = min(close_qty, _open_remaining(opened))
+        if qty <= 1e-12:
+            continue
+        opened["_remaining"] = _open_remaining(opened) - qty
         if side == "long":
             realized_pnl = qty * (exit_price - entry)
         else:
@@ -1481,12 +1523,31 @@ def _sl_hit(side: str, spot: float, stop_loss: float) -> bool:
     return spot >= stop_loss
 
 
-def _tp_hit(side: str, spot: float, take_profits: list[float]) -> bool:
-    if not take_profits:
-        return False
+def _ordered_take_profits(side: str, take_profits: list[float]) -> list[float]:
+    """Nearest-first TP ladder (long: ascending, short: descending)."""
     if side == "long":
-        return spot >= min(take_profits)
-    return spot <= max(take_profits)
+        return sorted(float(tp) for tp in take_profits)
+    return sorted((float(tp) for tp in take_profits), reverse=True)
+
+
+def _tp_level_hit(side: str, spot: float, tp: float) -> bool:
+    if side == "long":
+        return spot >= tp
+    return spot <= tp
+
+
+def _sl_after_tp_hit(
+    side: str,
+    avg_entry: float,
+    ordered_tps: list[float],
+    tps_hit_after: int,
+) -> float:
+    """Trail SL: after TP1 → breakeven; after TP2 → TP1; etc."""
+    if tps_hit_after <= 0:
+        return avg_entry
+    if tps_hit_after == 1:
+        return float(avg_entry)
+    return float(ordered_tps[tps_hit_after - 2])
 
 
 def _check_sl_tp_closes(
@@ -1495,6 +1556,7 @@ def _check_sl_tp_closes(
     spots: dict[str, float],
     cycle_id: str | None,
 ) -> float:
+    """SL full exit; staged TP scale-out (1/N remaining levels) with SL trail."""
     for position in list(_fetch_open_positions(conn)):
         side = str(position["side"])
         product_id = _pos_product(position)
@@ -1502,15 +1564,79 @@ def _check_sl_tp_closes(
         if spot <= 0:
             continue
         sl = float(position["stop_loss"])
-        tps = position.get("take_profits") or []
         if _sl_hit(side, spot, sl):
             cash = _close_position_at_market(
                 conn, cash, position, sl, cycle_id, "stop_loss", spots=spots
             )
-        elif _tp_hit(side, spot, tps):
-            tp_price = min(tps) if side == "long" else max(tps)
-            cash = _close_position_at_market(
-                conn, cash, position, tp_price, cycle_id, "take_profit", spots=spots
+            continue
+
+        ordered_tps = _ordered_take_profits(side, position.get("take_profits") or [])
+        if not ordered_tps:
+            continue
+
+        tps_hit = int(position.get("tps_hit") or 0)
+        pos_id = int(position["id"])
+        avg_entry = float(position["avg_entry"])
+
+        # Gap-through: fill every reached TP in order on this tick.
+        while tps_hit < len(ordered_tps):
+            # Re-read qty/SL in case a prior partial updated the row.
+            live = next(
+                (p for p in _fetch_open_positions(conn) if int(p["id"]) == pos_id),
+                None,
+            )
+            if live is None:
+                break
+            position = live
+            eth_qty = _pos_qty(position)
+            if eth_qty <= 0:
+                break
+
+            tp_price = ordered_tps[tps_hit]
+            if not _tp_level_hit(side, spot, tp_price):
+                break
+
+            remaining_levels = len(ordered_tps) - tps_hit
+            if remaining_levels <= 1:
+                cash = _close_position_at_market(
+                    conn,
+                    cash,
+                    position,
+                    tp_price,
+                    cycle_id,
+                    "take_profit",
+                    spots=spots,
+                )
+                break
+
+            close_qty = eth_qty / remaining_levels
+            cash = _reduce_position(
+                conn,
+                cash,
+                position,
+                close_qty,
+                tp_price,
+                cycle_id,
+                "take_profit",
+                spots=spots,
+                allow_dust=True,
+            )
+            live = next(
+                (p for p in _fetch_open_positions(conn) if int(p["id"]) == pos_id),
+                None,
+            )
+            if live is None:
+                break
+
+            tps_hit += 1
+            new_sl = _tighter_stop(
+                side,
+                float(live["stop_loss"]),
+                _sl_after_tp_hit(side, avg_entry, ordered_tps, tps_hit),
+            )
+            conn.execute(
+                "UPDATE paper_positions SET stop_loss = ?, tps_hit = ? WHERE id = ?",
+                (new_sl, tps_hit, pos_id),
             )
     return cash
 

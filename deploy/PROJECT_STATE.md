@@ -3,7 +3,7 @@
 > Single source of truth for architecture and status of the Telegram trading bot.
 > See **Documentation maintenance** below — update this file (and related deploy docs) whenever behaviour changes.
 
-**Last updated:** 2026-07-16
+**Last updated:** 2026-07-17
 
 ---
 
@@ -248,7 +248,7 @@ Legend: ✅ done · 🟡 in progress · 🔧 needs work · ⬜ planned · ⚠️
 | Telegram research | `research_reports/`, `metrics/`, `analytics.py` | ✅ | `/research` catalog; snapshot digests + H12 SFP studies |
 | Persistence | `ledger.py`, `audit.py`, `paper.py` | ✅ | SQLite |
 | Dashboard | `dashboard/` | ✅ | dual ETH/BTC live spots + side-by-side H4 marked structure; shared-book P&L; dollar trade size + qty; paginated cycles/closed trades; chart-read score tooltips; expandable dual H4/M5 charts |
-| Paper trading | `paper.py` | ✅ | multi-asset (ETH/BTC) book, fixed 25% USD-notional deploy, per-product qty caps, user contributions, FIFO cap, epoch archives; outcome charts on close |
+| Paper trading | `paper.py` | ✅ | multi-asset (ETH/BTC) book, fixed 25% USD-notional deploy, per-product qty caps, user contributions, FIFO cap, epoch archives; staged TP scale-out (1/N per level) with SL trail (BE → prior TP); outcome charts on close |
 | Telegram beta UI | `bot.py`, `telegram_ui.py` | ✅ | inline Fund/My Metrics/Portfolio/Research/Refresh keyboard; one-time fake $1,000 contribution and proportional metrics |
 | Live execution | `execute.py` | ⬜ | shadow/live path not built |
 | OHLC history cache | `ohlc_cache.py` | ✅ | research/backfill only, not hot path |
@@ -307,6 +307,7 @@ Defaults from `bot_config.py` (non-secret tunables). Secrets and portfolio size 
 
 | Date | Change |
 |---|---|
+| 2026-07-17 | Paper TP/SL exit management: scale out ~1/N of remaining size at each TP (not full flat at TP1); after TP1 trail SL to breakeven, after TP2 to TP1, etc. Partial closes pair correctly in closed-trade journal. |
 | 2026-07-16 | Per-product HTF OB min-width: BTC uses 0.60% (ETH stays 1.25%) so BTC H4 OB/breaker boxes are not over-filtered by ETH-tuned volatility. |
 | 2026-07-16 | Dashboard H4 structure section shows ETH and BTC marked charts side by side; hourly cycle always persists a per-product decision so both charts stay available. |
 | 2026-07-16 | Trading Guide sizing section aligned to USD-notional contract; added `tests/test_relative_strength.py` (W1 ratio/soft-gate) and `tests/test_contributions.py` (Fund/My Metrics). |
