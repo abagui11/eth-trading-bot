@@ -134,6 +134,19 @@
       </p>
       {% endif %}
 
+      {% if t.participation %}
+      <p class="sub trade-participation">
+        Participation:
+        {{ t.participation.accepted }} in
+        · {{ t.participation.rejected }} out
+        · {{ t.participation.expired }} expired
+        · {{ t.participation.pending }} pending
+        {% if t.participation.allocated_usd %}
+        · ${{ "%.0f"|format(t.participation.allocated_usd) }} allocated
+        {% endif %}
+      </p>
+      {% endif %}
+
       {% if t.setup_tags %}
       <div class="trade-tags">
         {% for tag in t.setup_tags %}
@@ -162,7 +175,7 @@
   <div class="wrap">
     <header>
       <h1>ETH/BTC Trading Agent</h1>
-      <p class="sub">ICT paper portfolio across ETH and BTC — chart reads, relative strength, and trade journal</p>
+      <p class="sub">Public agent journal — charts, relative strength, and house-book trades. Personal demo books live under My book in Telegram.</p>
     </header>
 
     <section class="card" id="status-card">
@@ -286,7 +299,7 @@
     {% endif %}
 
     <section class="card">
-      <h2>Paper P&amp;L</h2>
+      <h2>Agent book (house)</h2>
       <div class="metrics">
         <div class="metric">
           <div class="label">Equity</div>
@@ -312,8 +325,8 @@
         </div>
       </div>
       <p class="sub" style="margin-top:10px">
-        ${{ "%.0f"|format(performance.starting_usd) }} paper book
-        · ${{ "%.0f"|format(performance.total_contributed_usd or performance.starting_usd) }} contributed
+        House/agent reference book (not user capital)
+        · ${{ "%.0f"|format(performance.starting_usd) }} start
         {% if performance.epoch.epoch_label %}({{ performance.epoch.epoch_label }}){% endif %}
         · {{ performance.closed_trade_count }} closed · {{ performance.open_count }} open
         {% if performance.open_by_product %}

@@ -174,6 +174,23 @@ class DashboardApiTests(unittest.TestCase):
         resp = self.client.get("/api/subscribers")
         self.assertEqual(resp.status_code, 404)
 
+    def test_me_requires_token(self) -> None:
+        resp = self.client.get("/me")
+        self.assertEqual(resp.status_code, 401)
+        self.assertIn("Telegram", resp.text)
+
+    def test_me_with_valid_token(self) -> None:
+        import user_books
+
+        user_books.init_db()
+        user_books.open_paper_account(4242, 1000.0, "dashuser")
+        token = user_books.create_me_token(4242, ttl_sec=600)
+        resp = self.client.get(f"/me?t={token}")
+        self.assertEqual(resp.status_code, 200)
+        self.assertIn("My book", resp.text)
+        self.assertIn("$1000", resp.text)
+        self.assertIn("me_session", resp.cookies)
+
 
 if __name__ == "__main__":
     unittest.main()

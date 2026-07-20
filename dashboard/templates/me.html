@@ -1,0 +1,108 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <title>My book — ETH/BTC Trading Agent</title>
+  <link rel="stylesheet" href="/static/style.css?v=me1">
+</head>
+<body>
+  <div class="wrap">
+    <header>
+      <h1>My book</h1>
+      <p class="sub">Personal demo ledger — separate from the public agent journal</p>
+      <p class="sub"><a href="/">← Agent journal</a></p>
+    </header>
+
+    {% if error %}
+    <section class="card">
+      <h2>{% if authorized %}Account needed{% else %}Sign in via Telegram{% endif %}</h2>
+      <p>{{ error }}</p>
+    </section>
+    {% endif %}
+
+    {% if me %}
+    <section class="card">
+      <h2>Your demo book</h2>
+      <div class="metrics">
+        <div class="metric">
+          <div class="label">Equity</div>
+          <div class="value">${{ "%.2f"|format(me.metrics.equity_usd) }}</div>
+        </div>
+        <div class="metric">
+          <div class="label">Cash</div>
+          <div class="value">${{ "%.2f"|format(me.metrics.cash_usd) }}</div>
+        </div>
+        <div class="metric">
+          <div class="label">PnL</div>
+          <div class="value {{ 'pos' if me.metrics.pnl_usd >= 0 else 'neg' }}">
+            {{ "%+.2f"|format(me.metrics.pnl_usd) }} ({{ "%+.1f"|format(me.metrics.pnl_pct) }}%)
+          </div>
+        </div>
+        <div class="metric">
+          <div class="label">Starting</div>
+          <div class="value">${{ "%.0f"|format(me.metrics.starting_usd) }}</div>
+        </div>
+      </div>
+      <p class="sub" style="margin-top:10px">
+        Demo capital — not real funding. Only Accept / late-join trades affect this book.
+      </p>
+    </section>
+
+    <section class="card">
+      <h2>Open ({{ me.positions|length }})</h2>
+      {% if me.positions %}
+      <ul class="plain">
+        {% for t in me.positions %}
+        <li>
+          <strong>{{ t.product_label }} {{ t.side }}</strong>
+          · entry ${{ "%.2f"|format(t.entry) }}
+          · mark ${{ "%.2f"|format(t.spot or 0) }}
+          · {{ "%+.2f"|format(t.pnl_usd) }}
+          {% if t.entry_mode %} · {{ t.entry_mode }}{% endif %}
+        </li>
+        {% endfor %}
+      </ul>
+      {% else %}
+      <p class="sub">No open positions.</p>
+      {% endif %}
+    </section>
+
+    <section class="card">
+      <h2>Recent closes</h2>
+      {% if me.closed_trades %}
+      <ul class="plain">
+        {% for t in me.closed_trades %}
+        <li>
+          {{ t.product_label }} {{ t.side or '' }}
+          · {{ t.close_reason or 'close' }}
+          · {{ t.ts or t.closed_at }}
+        </li>
+        {% endfor %}
+      </ul>
+      {% else %}
+      <p class="sub">No closed trades yet.</p>
+      {% endif %}
+    </section>
+
+    <section class="card">
+      <h2>Decisions</h2>
+      {% if me.decisions %}
+      <ul class="plain">
+        {% for d in me.decisions %}
+        <li>
+          <strong>{{ d.status }}</strong>
+          · {{ d.product_id }}
+          · {{ d.cycle_id }}
+          {% if d.decided_at %} · {{ d.decided_at }}{% endif %}
+        </li>
+        {% endfor %}
+      </ul>
+      {% else %}
+      <p class="sub">No Accept/Reject history yet.</p>
+      {% endif %}
+    </section>
+    {% endif %}
+  </div>
+</body>
+</html>

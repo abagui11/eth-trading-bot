@@ -7,22 +7,30 @@ from telegram import InlineKeyboardButton, InlineKeyboardMarkup
 import bot_config
 import config
 
-CB_FUND = "ui:fund"
+CB_OPEN = "ui:open"
+CB_OPEN_SIZE_PREFIX = "ui:open:"
 CB_METRICS = "ui:metrics"
+CB_MY_BOOK = "ui:mybook"
 CB_RESEARCH = "ui:research"
 CB_REFRESH = "ui:refresh"
+
+# Backward-compat alias (old Fund button callbacks / tests).
+CB_FUND = CB_OPEN
+
+CB_TRADE_YES_PREFIX = "trade:yes:"
+CB_TRADE_NO_PREFIX = "trade:no:"
+CB_TRADE_JOIN_PREFIX = "trade:join:"
+CB_TRADE_SKIP_PREFIX = "trade:skip:"
 
 WELCOME_MESSAGE = (
     "Welcome to the ETH/BTC Trading Agent (beta).\n\n"
     "This bot does NOT place real trades. It runs an ICT-style swing/day strategy "
-    "on a shared paper portfolio and shows its rationale for ETH and BTC setups "
-    "(including W1 ETH/BTC relative strength).\n\n"
-    "Thesis: as capital concentrates on permissionless agential rails, "
-    "liquid crypto pairs create large, repeatable ICT opportunities — "
-    "order blocks, SFPs, and HTF structure that this agent watches hourly.\n\n"
-    "Fund is a placeholder for future real funding. Today it adds a fake "
-    f"${bot_config.PAPER_CONTRIBUTION_USD:,.0f} paper deposit (once per user) "
-    "so you can track your share of the book.\n\n"
+    "on ETH and BTC (including W1 ETH/BTC relative strength).\n\n"
+    "You get a personal demo paper account. Trade suggestions include Accept / Reject — "
+    "only Accept puts your demo cash into a trade. The public dashboard is the "
+    "agent/house journal; My book shows your personal ledger.\n\n"
+    "Open account once and choose $500 / $1,000 / $2,500 "
+    "(demo capital — not real funding).\n\n"
     "Use the buttons below, or /research for market studies. Not financial advice."
 )
 
@@ -38,20 +46,21 @@ RESEARCH_HELP = (
 def main_keyboard() -> InlineKeyboardMarkup:
     rows: list[list[InlineKeyboardButton]] = [
         [
-            InlineKeyboardButton("Fund", callback_data=CB_FUND),
+            InlineKeyboardButton("Open account", callback_data=CB_OPEN),
             InlineKeyboardButton("My Metrics", callback_data=CB_METRICS),
         ],
+        [InlineKeyboardButton("My book", callback_data=CB_MY_BOOK)],
     ]
     dash = config.DASHBOARD_PUBLIC_URL
     if dash:
         rows.append(
-            [InlineKeyboardButton("Portfolio", url=dash.rstrip("/"))]
+            [InlineKeyboardButton("Agent journal", url=dash.rstrip("/"))]
         )
     else:
         rows.append(
             [
                 InlineKeyboardButton(
-                    "Portfolio (set DASHBOARD_PUBLIC_URL)",
+                    "Journal (set DASHBOARD_PUBLIC_URL)",
                     callback_data=CB_REFRESH,
                 )
             ]
@@ -65,48 +74,102 @@ def main_keyboard() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(rows)
 
 
+def open_account_keyboard() -> InlineKeyboardMarkup:
+    buttons = [
+        InlineKeyboardButton(
+            f"${int(size):,}",
+            callback_data=f"{CB_OPEN_SIZE_PREFIX}{int(size)}",
+        )
+        for size in bot_config.PAPER_ACCOUNT_SIZES
+    ]
+    return InlineKeyboardMarkup([buttons])
+
+
+def trade_decision_keyboard(offer_id: str) -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(
+        [
+            [
+                InlineKeyboardButton(
+                    "Accept", callback_data=f"{CB_TRADE_YES_PREFIX}{offer_id}"
+                ),
+                InlineKeyboardButton(
+                    "Reject", callback_data=f"{CB_TRADE_NO_PREFIX}{offer_id}"
+                ),
+            ]
+        ]
+    )
+
+
+def missed_connection_keyboard(offer_id: str) -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(
+        [
+            [
+                InlineKeyboardButton(
+                    "Join now", callback_data=f"{CB_TRADE_JOIN_PREFIX}{offer_id}"
+                ),
+                InlineKeyboardButton(
+                    "Still no", callback_data=f"{CB_TRADE_SKIP_PREFIX}{offer_id}"
+                ),
+            ]
+        ]
+    )
+
+
 def format_metrics_message(metrics: dict) -> str:
     if not metrics.get("ok"):
+        sizes = " / ".join(f"${int(s):,}" for s in bot_config.PAPER_ACCOUNT_SIZES)
         return (
             "My Metrics\n\n"
-            "You have not Funded yet. Tap Fund to add a fake "
-            f"${bot_config.PAPER_CONTRIBUTION_USD:,.0f} paper deposit "
-            "(placeholder for future real funding)."
+            "You have not opened a paper account yet. Tap Open account and choose "
+            f"{sizes} (demo capital — not real funding)."
         )
+    open_n = int(metrics.get("open_count") or 0)
     return (
-        "My Metrics (paper)\n\n"
-        f"Your deposit: ${metrics['amount_usd']:,.0f}\n"
-        f"Ownership: {metrics['share_pct']:.2f}%\n"
-        f"Your equity: ${metrics['equity_usd']:,.2f}\n"
-        f"Your PnL: ${metrics['pnl_usd']:+,.2f} ({metrics['pnl_pct']:+.2f}%)\n"
-        f"Portfolio equity: ${metrics['portfolio_equity_usd']:,.2f}\n"
-        f"Total contributed: ${metrics['total_contributed_usd']:,.0f}\n\n"
-        "Figures track your share of the shared paper book."
+        "My Metrics (personal demo)\n\n"
+        f"Starting capital: ${metrics['amount_usd']:,.0f}\n"
+        f"Cash: ${float(metrics.get('cash_usd') or 0):,.2f}\n"
+        f"Equity: ${metrics['equity_usd']:,.2f}\n"
+        f"PnL: ${metrics['pnl_usd']:+,.2f} ({metrics['pnl_pct']:+.2f}%)\n"
+        f"Open positions: {open_n}\n\n"
+        "Only trades you Accept (or late-join) affect this book."
+    )
+
+
+def format_open_account_prompt() -> str:
+    sizes = " / ".join(f"${int(s):,}" for s in bot_config.PAPER_ACCOUNT_SIZES)
+    return (
+        "Open paper account\n\n"
+        f"Choose demo starting capital: {sizes}.\n"
+        "Demo capital — not real funding. Once only.\n"
+        "Accept/Reject on trade cards decides whether this cash enters a trade."
+    )
+
+
+def format_open_account_result(result: dict) -> str:
+    if not result.get("ok"):
+        reason = result.get("reason") or "failed"
+        if reason == "already_opened":
+            amount = float(result.get("amount_usd") or result.get("starting_usd") or 0)
+            return (
+                "Account already open.\n\n"
+                f"Starting capital: ${amount:,.0f}\n"
+                f"Cash: ${float(result.get('cash_usd') or amount):,.2f}\n"
+                "Tap My Metrics or My book for your ledger."
+            )
+        if reason == "invalid_amount":
+            return "Invalid size. Use the menu buttons."
+        return f"Open account failed ({reason})."
+    amount = float(result.get("amount_usd") or 0)
+    return (
+        "Paper account opened.\n\n"
+        f"Demo capital: ${amount:,.0f}\n"
+        "This is not real funding — nothing left your wallet.\n"
+        "When a trade card arrives, Accept to deploy cash or Reject to sit out."
     )
 
 
 def format_fund_result(result: dict) -> str:
-    if not result.get("ok"):
-        reason = result.get("reason") or "failed"
-        if reason == "already_funded":
-            amount = float(
-                result.get("amount_usd")
-                or result.get("amount")
-                or bot_config.PAPER_CONTRIBUTION_USD
-            )
-            return (
-                "Already funded.\n\n"
-                f"Your deposit: ${amount:,.0f}\n"
-                f"Ownership: {float(result.get('share_pct') or 0):.2f}%\n"
-                "Tap My Metrics for live equity and PnL."
-            )
-        return f"Fund failed ({reason})."
-    amount = float(result.get("amount_usd") or result.get("amount") or 0)
-    return (
-        "Funded (paper).\n\n"
-        f"Added ${amount:,.0f} to the shared portfolio.\n"
-        f"Your ownership: {float(result['share_pct']):.2f}%\n"
-        f"Book cash: ${float(result['cash_usd']):,.2f}\n"
-        f"Total contributed: ${float(result['total_contributed_usd']):,.0f}\n\n"
-        "This is a placeholder for future real funding — nothing left your wallet."
-    )
+    """Backward-compatible wrapper around open-account results."""
+    if result.get("reason") == "already_funded":
+        result = {**result, "reason": "already_opened"}
+    return format_open_account_result(result)

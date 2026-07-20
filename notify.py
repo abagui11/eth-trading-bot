@@ -9,14 +9,15 @@ from pathlib import Path
 from telegram import Bot
 
 import access
+import bot_config
 import config
 import paper
+import telegram_ui
+import user_books
 from critic import AuditVerdict, split_rationale
 from models import Suggestion
 
 logger = logging.getLogger(__name__)
-
-# TODO: inline approve/reject buttons + APPROVAL_WINDOW_MIN timeout (full build).
 
 
 def format_rationale_text(rationale: str) -> str:
@@ -41,7 +42,20 @@ def format_rationale_text(rationale: str) -> str:
     return "\n\n".join(paragraphs)
 
 
-def build_caption(suggestion: Suggestion) -> str:
+def _side_label(suggestion: Suggestion) -> str:
+    if suggestion.action in ("spot_buy", "deriv_buy"):
+        return "long"
+    if suggestion.action in ("spot_sell", "deriv_sell"):
+        return "short"
+    return "flat"
+
+
+def build_caption(
+    suggestion: Suggestion,
+    *,
+    telegram_id: int | None = None,
+    offer_id: str | None = None,
+) -> str:
     """Short caption for the chart photo (Telegram limit: 1024 characters)."""
     if suggestion.action == "no_trade":
         return "NO TRADE — rationale in the message below."
@@ -51,14 +65,48 @@ def build_caption(suggestion: Suggestion) -> str:
     prefix = ""
     if "[Watchdog" in suggestion.rationale:
         prefix = "WATCHDOG — "
-    return (
-        f"{prefix}{suggestion.action.upper()}\n"
-        f"Entry: {suggestion.entry:,.2f}\n"
-        f"SL: {suggestion.stop_loss:,.2f}\n"
-        f"TP: {tps}\n"
-        f"R/R: {rr}\n"
-        f"Size: ${suggestion.size:,.2f}"
-    )
+
+    lines = [
+        f"{prefix}{suggestion.action.upper()} · {bot_config.product_label(suggestion.product_id)}",
+        f"Entry: {suggestion.entry:,.2f}",
+        f"SL: {suggestion.stop_loss:,.2f}",
+        f"TP: {tps}",
+        f"R/R: {rr}",
+    ]
+
+    if (
+        telegram_id is not None
+        and suggestion.entry is not None
+        and suggestion.stop_loss is not None
+        and suggestion.take_profits
+    ):
+        sizing = user_books.compute_user_notional(
+            telegram_id,
+            float(suggestion.entry),
+            deploy_pct=suggestion.deploy_pct,
+        )
+        if sizing.get("ok"):
+            rr_usd = user_books.prospective_risk_reward_usd(
+                entry=float(suggestion.entry),
+                stop_loss=float(suggestion.stop_loss),
+                take_profit=float(suggestion.take_profits[0]),
+                side=_side_label(suggestion),
+                notional_usd=float(sizing["notional_usd"]),
+            )
+            lines.append(f"Your size ≈ ${float(sizing['notional_usd']):,.0f}")
+            lines.append(
+                f"Downside ≈ ${rr_usd['risk_usd']:,.0f} · "
+                f"Upside (TP1) ≈ ${rr_usd['reward_usd']:,.0f}"
+            )
+        else:
+            lines.append("Open a paper account to Accept with your demo cash.")
+    else:
+        lines.append(f"Agent size: ${suggestion.size:,.2f}")
+
+    window = int(bot_config.APPROVAL_WINDOW_MIN)
+    if offer_id:
+        lines.append(f"Accept within {window} min · offer {offer_id[-8:]}")
+    return "\n".join(lines)
 
 
 def build_rationale_message(suggestion: Suggestion, pnl_footer: str) -> str:
@@ -86,6 +134,8 @@ async def send_photo_with_caption(
     chat_id: int | str,
     chart_path: str,
     caption: str,
+    *,
+    reply_markup=None,
 ) -> None:
     """Send a chart image with caption to a chat."""
     path = Path(chart_path)
@@ -93,7 +143,12 @@ async def send_photo_with_caption(
         raise FileNotFoundError(f"Chart not found: {chart_path}")
 
     with open(path, "rb") as photo:
-        await bot.send_photo(chat_id=chat_id, photo=photo, caption=caption[:1024])
+        await bot.send_photo(
+            chat_id=chat_id,
+            photo=photo,
+            caption=caption[:1024],
+            reply_markup=reply_markup,
+        )
 
 
 async def send_suggestion_to_chat(
@@ -102,15 +157,31 @@ async def send_suggestion_to_chat(
     suggestion: Suggestion,
     chart_paths: list[str] | str,
     pnl_footer: str,
+    *,
+    offer_id: str | None = None,
+    telegram_id: int | None = None,
 ) -> None:
-    paths = [chart_paths] if isinstance(chart_paths, str) else list(chart_paths[:2])
+    paths = [chart_paths] if isinstance(chart_paths, str) else list(chart_paths[:3])
     paths = [p for p in paths if p and p != "watchdog"]
-    caption = build_caption(suggestion)
+    tid = telegram_id
+    if tid is None:
+        try:
+            tid = int(str(chat_id).strip())
+        except ValueError:
+            tid = None
+    caption = build_caption(suggestion, telegram_id=tid, offer_id=offer_id)
     rationale_message = build_rationale_message(suggestion, pnl_footer)
+    keyboard = (
+        telegram_ui.trade_decision_keyboard(offer_id)
+        if offer_id and suggestion.action != "no_trade"
+        else None
+    )
 
     if not paths:
         text = f"{caption}\n\n{rationale_message}" if caption else rationale_message
-        await bot.send_message(chat_id=chat_id, text=text[:4096])
+        await bot.send_message(
+            chat_id=chat_id, text=text[:4096], reply_markup=keyboard
+        )
         return
 
     for i, chart_path in enumerate(paths):
@@ -119,9 +190,15 @@ async def send_suggestion_to_chat(
             raise FileNotFoundError(f"Chart not found: {chart_path}")
 
         photo_caption = caption if i == 0 else f"Chart {i + 1}/{len(paths)}"
+        markup = keyboard if i == 0 else None
         try:
             with open(path, "rb") as photo:
-                await bot.send_photo(chat_id=chat_id, photo=photo, caption=photo_caption[:1024])
+                await bot.send_photo(
+                    chat_id=chat_id,
+                    photo=photo,
+                    caption=photo_caption[:1024],
+                    reply_markup=markup,
+                )
         except Exception:
             logger.exception(
                 "Photo send failed for chat %s (%s), skipping chart",
@@ -174,6 +251,8 @@ async def broadcast_to_subscribers(
     suggestion: Suggestion,
     chart_paths: list[str] | str,
     pnl_footer: str | None = None,
+    *,
+    offer_id: str | None = None,
 ) -> None:
     """DM the suggestion to every registered subscriber (or allowlist if paywall on)."""
     footer = pnl_footer or paper.format_pnl_footer()
@@ -184,7 +263,15 @@ async def broadcast_to_subscribers(
         if user_id in sent:
             continue
         try:
-            await send_suggestion_to_chat(bot, user_id, suggestion, chart_paths, footer)
+            await send_suggestion_to_chat(
+                bot,
+                user_id,
+                suggestion,
+                chart_paths,
+                footer,
+                offer_id=offer_id,
+                telegram_id=user_id,
+            )
             sent.add(user_id)
             logger.info("Sent suggestion to user %s", user_id)
         except Exception:
@@ -198,7 +285,15 @@ async def broadcast_to_subscribers(
             admin_id = None
         if admin_id is not None and admin_id not in sent:
             try:
-                await send_suggestion_to_chat(bot, admin_chat, suggestion, chart_paths, footer)
+                await send_suggestion_to_chat(
+                    bot,
+                    admin_chat,
+                    suggestion,
+                    chart_paths,
+                    footer,
+                    offer_id=offer_id,
+                    telegram_id=admin_id,
+                )
                 logger.info("Sent suggestion to admin chat %s", admin_chat)
             except Exception:
                 logger.exception("Failed to send to admin chat %s", admin_chat)
@@ -360,13 +455,17 @@ def broadcast(
     suggestion: Suggestion,
     chart_paths: list[str] | str,
     pnl_footer: str | None = None,
+    *,
+    offer_id: str | None = None,
 ) -> None:
     """Sync wrapper for standalone agent.py / tests."""
     footer = pnl_footer or paper.format_pnl_footer()
 
     async def _run() -> None:
         bot = Bot(token=config.TELEGRAM_BOT_TOKEN)
-        await broadcast_to_subscribers(bot, suggestion, chart_paths, footer)
+        await broadcast_to_subscribers(
+            bot, suggestion, chart_paths, footer, offer_id=offer_id
+        )
 
     asyncio.run(_run())
 
@@ -374,15 +473,131 @@ def broadcast(
 def broadcast_text(
     suggestion: Suggestion,
     pnl_footer: str | None = None,
+    *,
+    offer_id: str | None = None,
 ) -> None:
     """Broadcast a watchdog / text-only trade signal (no chart images)."""
     footer = pnl_footer or paper.format_pnl_footer()
 
     async def _run() -> None:
         bot = Bot(token=config.TELEGRAM_BOT_TOKEN)
-        await broadcast_to_subscribers(bot, suggestion, [], footer)
+        await broadcast_to_subscribers(
+            bot, suggestion, [], footer, offer_id=offer_id
+        )
 
     asyncio.run(_run())
+
+
+async def broadcast_plain_text_async(text: str) -> None:
+    """DM raw text to every broadcast recipient (alerts that are not trade offers)."""
+    bot = Bot(token=config.TELEGRAM_BOT_TOKEN)
+    recipients = access.broadcast_recipient_ids()
+    sent: set[int] = set()
+    body = text.strip()[:4096]
+    for user_id in recipients:
+        if user_id in sent:
+            continue
+        try:
+            await bot.send_message(chat_id=user_id, text=body)
+            sent.add(user_id)
+        except Exception:
+            logger.exception("Failed to send plain broadcast to user %s", user_id)
+
+    admin_chat = config.TELEGRAM_ADMIN_CHAT_ID or config.TELEGRAM_CHAT_ID
+    if admin_chat:
+        try:
+            admin_id = int(str(admin_chat).strip())
+        except ValueError:
+            admin_id = None
+        if admin_id is not None and admin_id not in sent:
+            try:
+                await bot.send_message(chat_id=admin_id, text=body)
+            except Exception:
+                logger.exception("Failed to send plain broadcast to admin %s", admin_chat)
+
+
+def broadcast_plain_text(text: str) -> None:
+    """Sync wrapper for Z-Move / advisory plain-text subscriber DMs."""
+
+    async def _run() -> None:
+        await broadcast_plain_text_async(text)
+
+    asyncio.run(_run())
+
+
+async def send_missed_connection_async(target: dict) -> None:
+    """DM late-join invite to users who rejected/expired an offer."""
+    offer_id = target["offer_id"]
+    chart = target.get("decision_chart_path")
+    r_mult = float(target.get("r_multiple") or 0)
+    spot = float(target.get("spot") or 0)
+    product = bot_config.product_label(str(target.get("product_id") or "ETH-USD"))
+    text = (
+        f"Missed connection — {product} is running ≈ {r_mult:+.2f}R "
+        f"(mark ${spot:,.2f}).\n\n"
+        "Join at the current mark with the same SL/TP levels, or stay out."
+    )
+    bot = Bot(token=config.TELEGRAM_BOT_TOKEN)
+    keyboard = telegram_ui.missed_connection_keyboard(offer_id)
+    for tid in target.get("telegram_ids") or []:
+        try:
+            if chart and Path(str(chart)).exists():
+                await send_photo_with_caption(
+                    bot, tid, str(chart), text, reply_markup=keyboard
+                )
+            else:
+                await bot.send_message(
+                    chat_id=tid, text=text[:4096], reply_markup=keyboard
+                )
+        except Exception:
+            logger.exception("Missed-connection DM failed for %s", tid)
+    user_books.mark_missed_connection_sent(offer_id)
+
+
+def process_missed_connections(spots: dict[str, float] | None = None) -> int:
+    """Find +0.5R house opens and send one missed-connection DM each. Returns DMs."""
+    targets = user_books.find_missed_connection_targets(spots=spots)
+    if not targets:
+        return 0
+    sent = 0
+    for target in targets:
+        try:
+            asyncio.run(send_missed_connection_async(target))
+            sent += 1
+        except Exception:
+            logger.exception(
+                "Missed-connection processing failed for %s",
+                target.get("offer_id"),
+            )
+    return sent
+
+
+async def send_launch_notice_async() -> None:
+    bot = Bot(token=config.TELEGRAM_BOT_TOKEN)
+    text = user_books.LAUNCH_NOTICE
+    for user_id in access.broadcast_recipient_ids():
+        try:
+            await bot.send_message(
+                chat_id=user_id,
+                text=text[:4096],
+                reply_markup=telegram_ui.main_keyboard(),
+            )
+        except Exception:
+            logger.exception("Launch notice failed for %s", user_id)
+
+
+def maybe_send_launch_notice() -> bool:
+    """Send one-time personal-books launch notice. Returns True if sent."""
+    key = bot_config.LAUNCH_NOTICE_SENT_KEY
+    if user_books.get_meta(key) == "1":
+        return False
+    try:
+        asyncio.run(send_launch_notice_async())
+        user_books.set_meta(key, "1")
+        return True
+    except Exception:
+        logger.exception("Launch notice broadcast failed")
+        return False
 
 
 def send_watchdog_monitor_alert(

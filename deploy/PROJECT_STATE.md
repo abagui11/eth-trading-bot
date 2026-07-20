@@ -3,7 +3,7 @@
 > Single source of truth for architecture and status of the Telegram trading bot.
 > See **Documentation maintenance** below — update this file (and related deploy docs) whenever behaviour changes.
 
-**Last updated:** 2026-07-17
+**Last updated:** 2026-07-19
 
 ---
 
@@ -31,9 +31,9 @@ Related deploy docs: [`CLOUD.md`](CLOUD.md) · `setup.sh` · `update.sh` · `eth
 
 ## 1. What this system is
 
-A Telegram bot that runs an hourly dual-asset LLM trading cycle and a sub-hourly dual-asset programmatic watchdog over Coinbase ETH-USD and BTC-USD data. W1 ETH/BTC relative strength biases asset selection and soft-gates watchdog entries. Every suggestion is validated and audited before broadcast, then applied to one shared paper book. Telegram users can make a one-time fake **Fund $1,000** contribution and track their proportional paper equity. State is persisted to SQLite and surfaced through a FastAPI dashboard and Telegram read-back.
+A Telegram bot that runs an hourly dual-asset LLM trading cycle and a sub-hourly dual-asset programmatic watchdog over Coinbase ETH-USD and BTC-USD data. W1 ETH/BTC relative strength biases asset selection and soft-gates watchdog entries. Every suggestion is validated and audited before broadcast, then applied to a **house/agent paper book** (public journal). Subscribers hold **separate personal demo accounts**; trade DMs include a decision chart plus Accept/Reject — only Accept (or a later missed-connection Join) puts that user's cash into the trade. Personal ledgers are on `/me` (Telegram magic link). State is persisted to SQLite and surfaced through a FastAPI dashboard and Telegram read-back.
 
-Four operator-facing paths (hourly, watchdog, Telegram chat/inline UI, dashboard), one shared data/context layer, and one shared paper book.
+Four operator-facing paths (hourly, watchdog, Telegram chat/inline UI, dashboard), one shared data/context layer, one house paper book, and per-user personal books.
 
 ---
 
@@ -46,15 +46,19 @@ flowchart TD
         HJ[hourly_job<br/>ETH-USD + BTC-USD every 3600s]
         WJ[watchdog_job<br/>ETH-USD + BTC-USD every 60–300s<br/>if WATCHDOG_ENABLED]
         MJ[macro_feed_job<br/>every 300s<br/>if MACRO_CONTEXT_ENABLED]
+        ZJ[zmove_job<br/>every 300s<br/>if ZMOVE_ENABLED]
     end
 
     ENTRY --> DATA[research.py + build_market_context<br/>Coinbase ETH/BTC OHLC → per-product MarketContext]
     DATA --> RS[W1 ETH/BTC ratio<br/>relative-strength bias]
     MJ --> MACRO[macro/ RSS + webhook ingest<br/>keyword score → Haiku classify]
     MACRO --> STORE
+    ZJ --> ZMOVE[zmove.py ETH H1 price/volume z-score]
+    ZMOVE --> TG
 
     TG --> CHAT[Chat Q&A<br/>bot.py on_text]
-    TG --> TGUI[Inline keyboard<br/>Fund · My Metrics · Portfolio · Research]
+    TG --> TGUI[Inline keyboard<br/>Open account · My Metrics · My book · Journal · Research]
+    TG --> RESEARCH["/research grounded SFP studies<br/>ohlc vault + sfp_index"]
     HJ --> HOURLY[Hourly cycle<br/>agent.run_cycle]
     WJ --> WATCH[Watchdog<br/>no LLM, sub-hourly]
     DATA --> HOURLY
@@ -64,6 +68,7 @@ flowchart TD
 
     CHAT --> STORE[(SQLite persistence)]
     TGUI --> STORE
+    RESEARCH --> OHLC[(ohlc.db candles + sfp_events)]
     HOURLY --> STORE
     WATCH --> STORE
     STORE --> READ[FastAPI dashboard +<br/>Telegram read-back]
@@ -135,7 +140,8 @@ flowchart TD
     MON --> MRPT[send_hourly_monitor_report]
     LG --> BC{BROADCAST_ONLY_TRADES<br/>and no_trade?}
     BC -->|skip| SKIP[no subscriber DM]
-    BC -->|send| BDM[notify.broadcast]
+    BC -->|send| OFFER[user_books.create_trade_offer]
+    OFFER --> BDM[notify.broadcast<br/>decision chart + Accept/Reject]
 ```
 
 ---
@@ -172,7 +178,7 @@ flowchart TD
 
 ```mermaid
 flowchart TD
-    TG[Telegram message or /start] --> KB[Inline keyboard<br/>Fund · My Metrics · Portfolio · Research · Refresh]
+    TG[Telegram message or /start] --> KB[Inline keyboard<br/>Open account · My Metrics · My book · Journal · Research · Refresh]
     TG --> QA[chat.answer — Claude<br/>ledger + audit snapshot context]
     QA --> CAR[refine_chat_reply<br/>audit_text + sanitize on critical codes]
     CAR --> CAI[audit.log_chat_audit]
@@ -180,15 +186,18 @@ flowchart TD
     AL -->|yes| MA[send_monitor_alert]
     AL -->|no| REPLY[reply + PnL footer]
     MA --> REPLY
-    KB --> FUND[Fund<br/>one-time fake $1,000 contribution]
-    KB --> METRICS[My Metrics<br/>ownership, equity + PnL]
-    KB --> PORT[Portfolio<br/>DASHBOARD_PUBLIC_URL]
+    KB --> OPEN[Open account<br/>$500 / $1000 / $2500 menu]
+    KB --> METRICS[My Metrics<br/>personal equity + PnL]
+    KB --> ME[My book<br/>magic link to /me]
+    KB --> PORT[Agent journal<br/>DASHBOARD_PUBLIC_URL]
     KB --> RESEARCH[Research help/catalog]
-    FUND --> CONTRIB[(paper_contributions)]
-    METRICS --> BOOK[(shared paper book)]
+    OPEN --> ACCT[(user_accounts)]
+    METRICS --> ACCT
+    TG --> TRADE[trade:yes / trade:no / trade:join]
+    TRADE --> UPOS[(user_positions)]
 ```
 
-`Fund` is explicitly a beta placeholder for future real funding: it does not move real money. `paper.fund_user` accepts one contribution per Telegram ID, adds `$1,000` to shared paper cash/starting equity, and records ownership in `paper_contributions`. `My Metrics` marks the whole shared ETH/BTC book to current spots, then reports the user's proportional equity and P&L.
+`Open account` creates a one-time personal demo book (not real funding). Legacy Funders are migrated to a **$1,000** personal account via `user_books.migrate_funders_to_personal_accounts` (also on `paper.init_db`). The house/agent book in `paper.py` continues to auto-take every validated trade for the public journal; user cash never mixes into house equity. Trade broadcasts include a decision chart (green TP1 / red SL rectangles) and Accept/Reject (15 min window). Rejected/expired users may get one missed-connection Join invite when the house position is ≥ +0.5R.
 
 ---
 
@@ -202,10 +211,11 @@ flowchart LR
         DB3[(audit_snapshots)]
         DB4[(audit_verdicts + chart-read score)]
         DB5[(chat_audits)]
-        DB6[(paper_contributions)]
+        DB6[(paper_contributions — legacy / house seed)]
+        DB7[(user_accounts + user_positions + trade_offers + trade_decisions)]
     end
 
-    STORE --> DASH[FastAPI dashboard]
+    STORE --> DASH[FastAPI dashboard / + /me]
     STORE --> TG[Telegram read-back]
     PNG[charts/ PNGs<br/>structure entry outcome] --> DASH
     PNG --> TG
@@ -217,7 +227,9 @@ Writers → stores:
 |---|---|---|
 | `ledger` | hourly cycle, watchdog | dashboard, Telegram |
 | `paper` | hourly cycle, watchdog | dashboard, Telegram |
-| `paper_contributions` | Telegram Fund callback; house seed on paper init/reset | Telegram Fund/My Metrics; dashboard aggregate contribution total |
+| `paper_contributions` | House seed; legacy Fund rows (migration source) | Migrate script; house seed |
+| `user_accounts` / `user_positions` / `user_trades` | Open account; Accept / late-join | Telegram My Metrics; `/me` |
+| `trade_offers` / `trade_decisions` | Hourly + watchdog after house `paper.update` | Accept/Reject; participation strip; missed-connection |
 | `audit_snapshots` | hourly cycle | dashboard, chat, monitor |
 | `audit_verdicts` | hourly monitor, chat audit | dashboard |
 | `chat_audits` | chat Q&A | — |
@@ -244,14 +256,19 @@ Legend: ✅ done · 🟡 in progress · 🔧 needs work · ⬜ planned · ⚠️
 | Refine / critic loop | `critic.py` | ✅ | pre-broadcast retries; context-conflict ack; thesis + Market context compose; post-cycle monitor |
 | Watchdog | `watchdog.py` | ✅ | loops ETH/BTC; one fire/product/tick; product cooldown; macro + ETH/BTC soft gates |
 | Macro context | `macro/` | ✅ | RSS poll, webhook ingest, keyword→Haiku classify, pulse, dashboard |
+| OHLC history vault | `ohlc_cache.py`, `backfill.py` | ✅ | ETH+BTC H1/D1 cache; W1/H12 derived; `--product` CLI |
+| SFP pattern index | `patterns/sfp_index.py` | ✅ | deterministic `sfp_events` in ohlc.db; rebuild on backfill/study |
 | Chat Q&A | `bot.py`, `chat.py` | ✅ | snapshot-grounded + chat audit |
-| Telegram research | `research_reports/`, `metrics/`, `analytics.py` | ✅ | `/research` catalog; snapshot digests + H12 SFP studies |
-| Persistence | `ledger.py`, `audit.py`, `paper.py` | ✅ | SQLite |
-| Dashboard | `dashboard/` | ✅ | dual ETH/BTC live spots + side-by-side H4 marked structure; shared-book P&L; dollar trade size + qty; paginated cycles/closed trades; chart-read score tooltips; expandable dual H4/M5 charts |
-| Paper trading | `paper.py` | ✅ | multi-asset (ETH/BTC) book, fixed 25% USD-notional deploy, per-product qty caps, user contributions, FIFO cap, epoch archives; staged TP scale-out (1/N per level) with SL trail (BE → prior TP); outcome charts on close |
-| Telegram beta UI | `bot.py`, `telegram_ui.py` | ✅ | inline Fund/My Metrics/Portfolio/Research/Refresh keyboard; one-time fake $1,000 contribution and proportional metrics |
+| Telegram research | `research_reports/`, `metrics/`, `analytics.py` | ✅ | `/research` catalog; d1/w1/h12 SFP + invalidations; ETH/BTC |
+| Z-Move alerts | `zmove.py` | ✅ | ETH H1 \|z\|≥2 price/volume → subscriber broadcast + cooldown |
+| Persistence | `ledger.py`, `audit.py`, `paper.py`, `user_books.py` | ✅ | SQLite |
+| Paper trading | `paper.py` | ✅ | house multi-asset book; fixed 25% deploy; qty caps; FIFO; staged TP scale-out; outcome charts |
+| Personal books | `user_books.py` | ✅ | open-account sizes; offers; Accept/Reject/expire; late-join; user SL/TP; `/me` tokens |
+| Telegram beta UI | `bot.py`, `telegram_ui.py` | ✅ | Open account / My Metrics / My book / Journal / Research; trade Yes/No/Join |
+| Decision chart | `charts.build_decision_chart` | ✅ | clean candles + red SL / green TP1 bands; first broadcast image |
+| Dashboard | `dashboard/` | ✅ | public agent journal + participation aggregates; `/me` personal ledger |
 | Live execution | `execute.py` | ⬜ | shadow/live path not built |
-| OHLC history cache | `ohlc_cache.py` | ✅ | research/backfill only, not hot path |
+| OHLC history cache | `ohlc_cache.py` | ✅ | research/backfill; ETH+BTC H1/D1; not hot path |
 | Legacy scheduler | `scheduler.py` | ⚠️ | deprecated; use `main.py` |
 
 ---
@@ -278,7 +295,12 @@ Defaults from `bot_config.py` (non-secret tunables). Secrets and portfolio size 
 | `PRODUCT_QTY_CAPS` | `{"ETH-USD": (0.25, 2.0), "BTC-USD": (0.005, 0.05)}` | per-product paper size guardrails used by `qty_caps(product_id)` |
 | `MIN_ETH_QTY` / `MAX_ETH_QTY` | `0.25` / `2.0` | legacy aliases for the ETH entries in `PRODUCT_QTY_CAPS` |
 | `RELATIVE_STRENGTH_ENABLED` | `True` | adds W1 ETH/BTC proposal bias and watchdog soft gate |
-| `PAPER_CONTRIBUTION_USD` | `1000.0` | one-time fake Fund deposit per Telegram user |
+| `PAPER_CONTRIBUTION_USD` | `1000.0` | legacy default / migrate amount alias |
+| `PAPER_ACCOUNT_SIZES` | `(500, 1000, 2500)` | Open account menu sizes |
+| `PAPER_ACCOUNT_DEFAULT_USD` | `1000.0` | migrate amount for legacy Funders |
+| `APPROVAL_WINDOW_MIN` | `15` | Accept window before pending → expired |
+| `MISSED_CONNECTION_R` | `0.5` | house unrealized R to trigger late-join DM |
+| `USER_MIN_DEPLOY_USD` | `25.0` | minimum notional to Accept / late-join |
 | `HOUSE_CONTRIBUTION_TELEGRAM_ID` | `0` | reserved Telegram ID for the house seed row in `paper_contributions` |
 | `OB_MIN_WIDTH_PCT` | `1.25` | default / ETH HTF (H4) OB zone width floor (% of mid price) |
 | `PRODUCT_OB_MIN_WIDTH_PCT` | `{"ETH-USD": 1.25, "BTC-USD": 0.60}` | per-product HTF OB/breaker width via `ob_min_width_pct(product_id)` |
@@ -291,6 +313,12 @@ Defaults from `bot_config.py` (non-secret tunables). Secrets and portfolio size 
 | `MACRO_WATCHDOG_GATE_MIN_SEVERITY` | `4` | soft gate conflicting watchdog entries |
 | `MACRO_LLM_PROMOTE_THRESHOLD` | `40` | min keyword_score before Haiku classify |
 | `MACRO_DEFAULT_TTL_HOURS` | `24` | fallback TTL for classified events |
+| `ZMOVE_ENABLED` | `True` | ETH H1 price/volume z-score subscriber alerts |
+| `ZMOVE_INTERVAL_SEC` | `300` | z-move scan cadence |
+| `ZMOVE_THRESHOLD` | `2.0` | \|z\| fire threshold |
+| `ZMOVE_LOOKBACK_H` | `168` | hourly lookback for mean/std |
+| `ZMOVE_COOLDOWN_SEC` | `7200` | per-metric suppress window after fire |
+| `ZMOVE_PRODUCT_ID` | `"ETH-USD"` | product scanned for z-moves |
 | hourly interval | `3600s` | `hourly_job` cadence in `main.py` |
 
 ---
@@ -298,7 +326,6 @@ Defaults from `bot_config.py` (non-secret tunables). Secrets and portfolio size 
 ## 10. Known issues / open questions
 
 - [ ] Live execution path (`execute.py`, `EXECUTION_MODE=shadow|live`) not implemented — paper only
-- [ ] Inline approve/reject on Telegram broadcasts not implemented (`notify.py` TODO)
 - [ ] HTF zone / M5 OB resolver edge cases under active tuning
 
 ---
@@ -307,7 +334,8 @@ Defaults from `bot_config.py` (non-secret tunables). Secrets and portfolio size 
 
 | Date | Change |
 |---|---|
-| 2026-07-17 | Paper TP/SL exit management: scale out ~1/N of remaining size at each TP (not full flat at TP1); after TP1 trail SL to breakeven, after TP2 to TP1, etc. Partial closes pair correctly in closed-trade journal. |
+| 2026-07-19 | History vault + grounded SFP Q&A: multi-product `ohlc_cache` (ETH/BTC H1/D1), `sfp_events` index, `/research d1_sfps` + `w1_invalidations`, clarify/refuse for unindexed patterns; ETH Z-Move broadcasts (`\|z\|≥2` price/volume, 168h lookback, 2h cooldown). |
+| 2026-07-19 | Opt-in personal books: Open account menu ($500/$1k/$2.5k); house book stays public journal; Accept/Reject (15m) + decision chart; `/me` magic-link ledger; missed-connection Join at +0.5R; migrate legacy Funders to $1k accounts. |
 | 2026-07-16 | Per-product HTF OB min-width: BTC uses 0.60% (ETH stays 1.25%) so BTC H4 OB/breaker boxes are not over-filtered by ETH-tuned volatility. |
 | 2026-07-16 | Dashboard H4 structure section shows ETH and BTC marked charts side by side; hourly cycle always persists a per-product decision so both charts stay available. |
 | 2026-07-16 | Trading Guide sizing section aligned to USD-notional contract; added `tests/test_relative_strength.py` (W1 ratio/soft-gate) and `tests/test_contributions.py` (Fund/My Metrics). |

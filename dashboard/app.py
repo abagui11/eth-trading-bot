@@ -1,10 +1,10 @@
-"""FastAPI application — public read-only dashboard."""
+"""FastAPI application — public read-only dashboard + personal /me ledger."""
 
 from __future__ import annotations
 
 from pathlib import Path
 
-from fastapi import FastAPI, HTTPException, Request, Header
+from fastapi import FastAPI, HTTPException, Request, Header, Response
 from fastapi.responses import FileResponse, HTMLResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
@@ -14,6 +14,7 @@ import audit
 import config
 import ledger
 import paper
+import user_books
 from dashboard import data
 from dashboard.charts import (
     VALID_KINDS,
@@ -30,10 +31,10 @@ from dashboard.formatting import (
     trade_title,
 )
 from macro import store as macro_store
-from macro.context import macro_payload_for_dashboard
 from macro.ingest import ingest_headline
 
 _PKG_DIR = Path(__file__).resolve().parent
+_ME_COOKIE = "me_session"
 
 
 class MacroIngestBody(BaseModel):
@@ -52,6 +53,7 @@ def create_app() -> FastAPI:
     paper.init_db()
     audit.init_db()
     macro_store.init_db()
+    user_books.init_db()
 
     templates = Jinja2Templates(directory=str(_PKG_DIR / "templates"))
     templates.env.filters["trade_time"] = format_trade_time
@@ -77,6 +79,55 @@ def create_app() -> FastAPI:
                 "macro": data.get_macro_payload(),
             },
         )
+
+    @app.get("/me", response_class=HTMLResponse)
+    async def me(request: Request) -> Response:
+        telegram_id: int | None = None
+        token = request.query_params.get("t")
+        if token:
+            telegram_id = user_books.verify_me_token(token)
+        if telegram_id is None:
+            cookie = request.cookies.get(_ME_COOKIE)
+            if cookie:
+                telegram_id = user_books.verify_me_token(cookie)
+        if telegram_id is None:
+            return templates.TemplateResponse(
+                request,
+                "me.html",
+                {
+                    "authorized": False,
+                    "me": None,
+                    "error": "Open My book from Telegram for a fresh link.",
+                },
+                status_code=401,
+            )
+
+        payload = data.get_me_payload(telegram_id)
+        if payload is None:
+            return templates.TemplateResponse(
+                request,
+                "me.html",
+                {
+                    "authorized": True,
+                    "me": None,
+                    "error": "No personal paper account yet. Open an account in Telegram first.",
+                },
+            )
+
+        response = templates.TemplateResponse(
+            request,
+            "me.html",
+            {"authorized": True, "me": payload, "error": None},
+        )
+        if token:
+            response.set_cookie(
+                key=_ME_COOKIE,
+                value=user_books.create_session_token(telegram_id),
+                httponly=True,
+                max_age=config.ME_SESSION_TTL_SEC,
+                samesite="lax",
+            )
+        return response
 
     @app.get("/api/spot")
     async def api_spot() -> dict:
@@ -185,7 +236,6 @@ def create_app() -> FastAPI:
         row = ledger.get_suggestion_by_cycle_id(cycle_id)
         ledger_path = (row or {}).get("chart_path") if row else None
 
-        # Default (no query / marked+H4): preserve legacy H4-marked behaviour.
         if kind_n == "marked" and tf_n == "H4":
             path = h4_marked_path(marked)
             if path is None and row:

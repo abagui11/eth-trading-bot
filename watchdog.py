@@ -21,6 +21,7 @@ import ledger
 import notify
 import paper
 import research
+import user_books
 import validate
 from models import Suggestion
 from macro.context import active_posture
@@ -562,7 +563,7 @@ def _render_output_charts(
     key_levels = compute_key_levels(daily_bars)
     product_id = getattr(suggestion, "product_id", None) or "ETH-USD"
     htf_zones = detect_htf_zones(data["H4"], product_id=product_id)
-    return charts.build_output_charts(
+    return charts.build_trade_broadcast_charts(
         suggestion,
         data,
         key_levels,
@@ -690,6 +691,14 @@ def run_watchdog() -> list[Suggestion] | None:
     if not bot_config.WATCHDOG_ENABLED:
         return None
 
+    spots = research.get_spot_prices()
+    try:
+        user_books.expire_pending_decisions()
+        user_books.check_user_sl_tp(spots=spots)
+        notify.process_missed_connections(spots=spots)
+    except Exception:
+        logger.exception("Watchdog user-book maintenance failed")
+
     posture = active_posture()
     rs_bias = "neutral"
     if bot_config.RELATIVE_STRENGTH_ENABLED:
@@ -698,7 +707,6 @@ def run_watchdog() -> list[Suggestion] | None:
         except Exception:
             logger.exception("Watchdog failed to build ETH/BTC relative strength")
 
-    spots = research.get_spot_prices()
     all_positions = paper.get_open_positions(spots=spots)
     fired: list[Suggestion] = []
     for product_id in bot_config.TRADED_PRODUCTS:
@@ -787,15 +795,30 @@ def run_watchdog() -> list[Suggestion] | None:
                 cycle_id=cycle_id,
                 spots=spots,
             )
+            offer_id = None
+            house_pos_id = user_books.find_house_position_id_for_cycle(cycle_id)
+            offer = user_books.create_trade_offer(
+                cycle_id=cycle_id,
+                suggestion=suggestion,
+                chart_paths=output_paths,
+                house_position_id=house_pos_id,
+            )
+            if offer:
+                offer_id = offer["offer_id"]
             pnl_footer = paper.format_pnl_footer(spots=spots)
 
             try:
                 if output_paths:
                     notify.broadcast(
-                        suggestion, output_paths, pnl_footer=pnl_footer
+                        suggestion,
+                        output_paths,
+                        pnl_footer=pnl_footer,
+                        offer_id=offer_id,
                     )
                 else:
-                    notify.broadcast_text(suggestion, pnl_footer=pnl_footer)
+                    notify.broadcast_text(
+                        suggestion, pnl_footer=pnl_footer, offer_id=offer_id
+                    )
             except Exception:
                 logger.exception("Watchdog broadcast failed for %s", cycle_id)
 

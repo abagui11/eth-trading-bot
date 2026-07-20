@@ -46,6 +46,16 @@ PAPER_CONTRIBUTION_USD = 1000.0
 # Telegram user id reserved for the house seed stake in paper_contributions.
 HOUSE_CONTRIBUTION_TELEGRAM_ID = 0
 
+# Personal demo accounts (opt-in Accept/Reject). Separate from the house/agent book.
+PAPER_ACCOUNT_SIZES: tuple[float, ...] = (500.0, 1000.0, 2500.0)
+PAPER_ACCOUNT_DEFAULT_USD = 1000.0  # migration amount for legacy Funders
+APPROVAL_WINDOW_MIN = 15
+MISSED_CONNECTION_R = 0.5
+# Minimum cash required to Accept / late-join a trade.
+USER_MIN_DEPLOY_USD = 25.0
+# One-time launch notice after personal-books migrate (ops may reset).
+LAUNCH_NOTICE_SENT_KEY = "personal_books_launch_v1"
+
 # Minimum OB zone width as % of mid price.
 # HTF (H4) keeps the swing-style filter; M5 entry candles are much thinner.
 # BTC H4 candles are typically narrower in % terms than ETH, so BTC uses a
@@ -73,6 +83,14 @@ MACRO_PULSE_MIN_SEVERITY = 4
 MACRO_WATCHDOG_GATE_MIN_SEVERITY = 4
 MACRO_DEFAULT_TTL_HOURS = 24
 MACRO_LLM_PROMOTE_THRESHOLD = 40  # keyword_score 0-100 before Haiku classify
+
+# Hourly ETH price/volume z-score spike broadcasts.
+ZMOVE_ENABLED = True
+ZMOVE_INTERVAL_SEC = 300  # 5 minutes
+ZMOVE_THRESHOLD = 2.0
+ZMOVE_LOOKBACK_H = 168  # 1 week of hourly bars
+ZMOVE_COOLDOWN_SEC = 2 * 60 * 60  # 2 hours per metric
+ZMOVE_PRODUCT_ID = "ETH-USD"
 
 # W1 ETH/BTC relative-strength bias injected into prompts and watchdog soft-gates.
 RELATIVE_STRENGTH_ENABLED = True

@@ -654,6 +654,80 @@ def _draw_detected_overlays(
       continue
 
 
+def build_decision_chart(
+  suggestion: Suggestion,
+  data: dict[str, list[dict]],
+  cycle_id: str,
+) -> str | None:
+  """Tinder-style profile chart: clean candles + red SL band + green TP1 band."""
+  if suggestion.action == "no_trade":
+    return None
+  if suggestion.entry is None or suggestion.stop_loss is None:
+    return None
+  if not suggestion.take_profits:
+    return None
+
+  entry_tf = suggestion.entry_chart or "M5"
+  valid_tfs = set(research.STRATEGY_TIMEFRAMES)
+  if entry_tf not in valid_tfs:
+    entry_tf = "M5"
+  bars = data.get(entry_tf)
+  if not bars:
+    return None
+
+  # Keep the last ~60 bars for a readable decision frame.
+  window = bars[-60:] if len(bars) > 60 else bars
+  df = _to_mpf_df(window)
+  label = _chart_label(getattr(suggestion, "product_id", None))
+  slug = _product_slug(getattr(suggestion, "product_id", None))
+  fig, ax_price = _render_candlestick_figure(
+    df,
+    f"{label} {entry_tf} — Decision",
+    figsize=(16, 9),
+  )
+
+  entry = float(suggestion.entry)
+  stop = float(suggestion.stop_loss)
+  tp1 = float(suggestion.take_profits[0])
+  x0 = -0.5
+  width = len(df) + 0.5
+
+  downside_low = min(entry, stop)
+  downside_high = max(entry, stop)
+  upside_low = min(entry, tp1)
+  upside_high = max(entry, tp1)
+
+  ax_price.add_patch(
+    Rectangle(
+      (x0, downside_low),
+      width,
+      max(downside_high - downside_low, 1e-9),
+      facecolor="#CC0000",
+      edgecolor="none",
+      alpha=0.22,
+      zorder=2,
+    )
+  )
+  ax_price.add_patch(
+    Rectangle(
+      (x0, upside_low),
+      width,
+      max(upside_high - upside_low, 1e-9),
+      facecolor="#228B22",
+      edgecolor="none",
+      alpha=0.22,
+      zorder=2,
+    )
+  )
+  _draw_price_line(ax_price, entry, "Entry", "#111111", "-", label_side="left")
+  _draw_price_line(ax_price, stop, "SL", "#CC0000", "-", label_side="right")
+  _draw_price_line(ax_price, tp1, "TP1", "#228B22", "-", label_side="right")
+
+  out_dir = _ensure_charts_dir()
+  out_path = out_dir / f"{cycle_id}_{slug}_{entry_tf}_decision.png"
+  return _save_chart_figure(fig, out_path)
+
+
 def build_output_charts(
   suggestion: Suggestion,
   data: dict[str, list[dict]],
@@ -786,6 +860,32 @@ def build_output_charts(
     )
 
   return paths[:2]
+
+
+def build_trade_broadcast_charts(
+  suggestion: Suggestion,
+  data: dict[str, list[dict]],
+  key_levels: list[KeyLevel],
+  htf_zones: list[HTFZone],
+  cycle_id: str,
+  market_context: MarketContext | None = None,
+) -> list[str]:
+  """Decision chart first, then structure/entry proof charts."""
+  paths: list[str] = []
+  decision = build_decision_chart(suggestion, data, cycle_id)
+  if decision:
+    paths.append(decision)
+  paths.extend(
+    build_output_charts(
+      suggestion,
+      data,
+      key_levels,
+      htf_zones,
+      cycle_id,
+      market_context=market_context,
+    )
+  )
+  return paths[:3]
 
 
 def _parse_utc(ts: str | None) -> pd.Timestamp | None:

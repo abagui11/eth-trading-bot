@@ -432,6 +432,11 @@ def init_db() -> None:
         _ensure_house_contribution(conn, float(config.PAPER_PORTFOLIO_VALUE))
         _migrate_legacy_position(conn)
         conn.commit()
+    # Personal books / offers live alongside the house book.
+    import user_books
+
+    user_books.init_db()
+    user_books.migrate_funders_to_personal_accounts()
 
 
 def get_sizing_basis(
@@ -2087,74 +2092,57 @@ def format_pnl_footer(
 
 
 def fund_user(telegram_id: int, username: str | None = None) -> dict:
-    """One-time fake deposit of PAPER_CONTRIBUTION_USD. Returns status dict."""
+    """Deprecated: opens a $1k personal demo account (no longer funds house book)."""
+    import user_books
+
     init_db()
-    amount = float(bot_config.PAPER_CONTRIBUTION_USD)
-    with _connect() as conn:
-        existing = conn.execute(
-            "SELECT * FROM paper_contributions WHERE telegram_id = ?",
-            (int(telegram_id),),
-        ).fetchone()
-        if existing is not None:
-            total = float(
-                conn.execute(
-                    "SELECT total_contributed_usd FROM paper_state WHERE id = 1"
-                ).fetchone()[0]
-                or 0
-            )
-            share = (
-                (float(existing["amount_usd"]) / total * 100) if total > 0 else 0.0
-            )
-            return {
-                "ok": False,
-                "reason": "already_funded",
-                "amount": float(existing["amount_usd"]),
-                "amount_usd": float(existing["amount_usd"]),
-                "share_pct": share,
-                "username": existing["username"],
-            }
-
-        state = dict(conn.execute("SELECT * FROM paper_state WHERE id = 1").fetchone())
-        cash = float(state["cash_usd"]) + amount
-        starting = float(state["starting_usd"]) + amount
-        total = float(state.get("total_contributed_usd") or 0) + amount
-        now = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
-        conn.execute(
-            """
-            INSERT INTO paper_contributions (telegram_id, amount_usd, created_at, username)
-            VALUES (?, ?, ?, ?)
-            """,
-            (int(telegram_id), amount, now, username),
-        )
-        conn.execute(
-            """
-            UPDATE paper_state
-            SET cash_usd = ?, starting_usd = ?, total_contributed_usd = ?
-            WHERE id = 1
-            """,
-            (cash, starting, total),
-        )
-        conn.commit()
-
-    share_pct = (amount / total * 100) if total > 0 else 0.0
-    return {
-        "ok": True,
-        "amount": amount,
-        "amount_usd": amount,
-        "share_pct": share_pct,
-        "cash_usd": cash,
-        "total_contributed_usd": total,
-    }
+    result = user_books.open_paper_account(
+        telegram_id,
+        float(bot_config.PAPER_ACCOUNT_DEFAULT_USD),
+        username=username,
+    )
+    if result.get("ok"):
+        return {
+            "ok": True,
+            "amount": result["amount_usd"],
+            "amount_usd": result["amount_usd"],
+            "share_pct": 100.0,
+            "cash_usd": result["cash_usd"],
+            "total_contributed_usd": result["amount_usd"],
+        }
+    if result.get("reason") == "already_opened":
+        return {
+            "ok": False,
+            "reason": "already_funded",
+            "amount": result.get("amount_usd"),
+            "amount_usd": result.get("amount_usd"),
+            "share_pct": 100.0,
+            "username": username,
+        }
+    return {"ok": False, "reason": result.get("reason") or "failed"}
 
 
 def get_contribution(telegram_id: int) -> dict | None:
+    """Legacy contribution row, or a synthetic row from personal account."""
+    import user_books
+
     init_db()
     with _connect() as conn:
         row = conn.execute(
             "SELECT * FROM paper_contributions WHERE telegram_id = ?",
             (int(telegram_id),),
         ).fetchone()
-    return dict(row) if row else None
+    if row:
+        return dict(row)
+    account = user_books.get_account(telegram_id)
+    if account is None:
+        return None
+    return {
+        "telegram_id": int(telegram_id),
+        "amount_usd": float(account["starting_usd"]),
+        "created_at": account.get("opened_at"),
+        "username": account.get("username"),
+    }
 
 
 def list_contributions() -> list[dict]:
@@ -2181,37 +2169,8 @@ def get_user_metrics(
     telegram_id: int,
     spots: dict[str, float] | None = None,
 ) -> dict:
-    """Ownership %, equity $, pnl $, pnl %. If not funded, ok=False."""
-    init_db()
-    contrib = get_contribution(telegram_id)
-    if contrib is None:
-        return {"ok": False, "reason": "not_funded"}
+    """Personal demo book equity / PnL (not a share of the house book)."""
+    import user_books
 
-    state = get_state()
-    starting = float(state["starting_usd"])
-    cash = float(state["cash_usd"])
-    positions = get_open_positions(spots=spots)
-    resolved = _resolve_spots(None, spots)
-    for pos in positions:
-        pid = _pos_product(pos)
-        if _spot_for(pid, resolved) <= 0:
-            resolved[pid] = float(pos["spot"])
-    equity = _equity(cash, positions, resolved) if resolved else cash
-    total = float(state.get("total_contributed_usd") or total_contributed() or 0)
-    amount = float(contrib["amount_usd"])
-    share = (amount / total) if total > 0 else 0.0
-    user_equity = equity * share
-    user_pnl = user_equity - amount
-    user_pnl_pct = (user_pnl / amount * 100) if amount else 0.0
-    return {
-        "ok": True,
-        "telegram_id": int(telegram_id),
-        "username": contrib.get("username"),
-        "amount_usd": amount,
-        "share_pct": share * 100,
-        "equity_usd": user_equity,
-        "pnl_usd": user_pnl,
-        "pnl_pct": user_pnl_pct,
-        "portfolio_equity_usd": equity,
-        "total_contributed_usd": total,
-    }
+    init_db()
+    return user_books.get_user_metrics(telegram_id, spots=spots)

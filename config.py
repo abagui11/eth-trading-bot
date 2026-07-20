@@ -94,3 +94,8 @@ MACRO_WEBHOOK_SECRET: str | None = _optional("MACRO_WEBHOOK_SECRET")
 # Public dashboard URL shown in Telegram (Portfolio button / welcome copy).
 DASHBOARD_PUBLIC_URL: str | None = _optional("DASHBOARD_PUBLIC_URL")
 DASHBOARD_PORT: int = int(os.getenv("DASHBOARD_PORT", "8080") or "8080")
+
+# HMAC secret for /me magic links (falls back to bot token if unset).
+ME_TOKEN_SECRET: str = _optional("ME_TOKEN_SECRET") or TELEGRAM_BOT_TOKEN
+ME_TOKEN_TTL_SEC: int = int(os.getenv("ME_TOKEN_TTL_SEC", "3600") or "3600")
+ME_SESSION_TTL_SEC: int = int(os.getenv("ME_SESSION_TTL_SEC", "86400") or "86400")

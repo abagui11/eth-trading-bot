@@ -183,6 +183,98 @@ def get_open_positions_payload() -> list[dict[str, Any]]:
     return [enrich_open_position(pos) for pos in paper.get_open_positions(spots=spots)]
 
 
+def _participation(cycle_id: str | None) -> dict[str, Any]:
+    import user_books
+
+    if not cycle_id:
+        return {
+            "accepted": 0,
+            "rejected": 0,
+            "expired": 0,
+            "pending": 0,
+            "allocated_usd": 0.0,
+            "total_sized_usd": 0.0,
+        }
+    return user_books.participation_by_cycle_id(str(cycle_id))
+
+
+def get_me_payload(telegram_id: int) -> dict[str, Any] | None:
+    """Personal ledger payload for /me."""
+    import user_books
+
+    spots = get_live_spots()["spots"]
+    metrics = user_books.get_user_metrics(telegram_id, spots=spots)
+    if not metrics.get("ok"):
+        return None
+    opens = []
+    for pos in user_books.get_user_open_positions(telegram_id, spots=spots):
+        cycle_id = str(pos.get("open_cycle_id") or "")
+        charts = trade_chart_urls(cycle_id or None, closed=False)
+        qty = float(pos.get("qty") or 0)
+        entry = float(pos.get("avg_entry") or 0)
+        pnl = float(pos.get("unrealized_pnl_usd") or 0)
+        notional = entry * qty
+        opens.append(
+            {
+                **pos,
+                "status": "open",
+                "product_label": bot_config.product_label(
+                    str(pos.get("product_id") or "ETH-USD")
+                ),
+                "entry": entry,
+                "exit": None,
+                "pnl_usd": pnl,
+                "pnl_pct": (pnl / notional * 100) if notional else 0.0,
+                "is_winner": pnl >= 0,
+                "size_usd": float(pos.get("suggested_size") or notional),
+                "take_profits": pos.get("take_profits") or [],
+                "opened_at": pos.get("opened_at"),
+                "close_reason": None,
+                "setup_tags": [],
+                "rationale": "",
+                **charts,
+            }
+        )
+    closed_raw = user_books.get_user_closed_trades(telegram_id, limit=25)
+    closed = []
+    for t in closed_raw:
+        qty = float(t.get("qty") or 0)
+        price = float(t.get("price") or 0)
+        # Approximate pnl from equity delta is not stored; show exit only.
+        closed.append(
+            {
+                **t,
+                "status": "closed",
+                "product_label": bot_config.product_label(
+                    str(t.get("product_id") or "ETH-USD")
+                ),
+                "entry": price,
+                "exit": price,
+                "avg_entry": price,
+                "opened_at": t.get("ts"),
+                "closed_at": t.get("ts"),
+                "pnl_usd": 0.0,
+                "pnl_pct": 0.0,
+                "is_winner": True,
+                "take_profits": [],
+                "setup_tags": [],
+                "rationale": "",
+                "size_usd": None,
+                "thumb_chart_url": None,
+                "structure_chart_url": None,
+                "execution_chart_url": None,
+            }
+        )
+    decisions = user_books.get_user_decisions(telegram_id, limit=40)
+    return {
+        "telegram_id": telegram_id,
+        "metrics": metrics,
+        "positions": opens,
+        "closed_trades": closed,
+        "decisions": decisions,
+    }
+
+
 def get_closed_trades_payload(limit: int = 50, offset: int = 0) -> list[dict[str, Any]]:
     trades = paper.get_closed_trades(limit=limit + offset)
     if offset:
@@ -262,6 +354,7 @@ def enrich_open_position(pos: dict[str, Any]) -> dict[str, Any]:
         "close_reason": None,
         "dist_to_sl_pct": _distance_pct(side, spot, stop) if stop else None,
         "dist_to_tp_pct": _distance_to_tp_pct(side, spot, tps),
+        "participation": _participation(cycle_id),
         **charts,
     }
 
@@ -310,6 +403,7 @@ def enrich_closed_trade(
         "is_winner": pnl_usd >= 0,
         "dist_to_sl_pct": None,
         "dist_to_tp_pct": None,
+        "participation": _participation(cycle_id),
         **charts,
     }
 

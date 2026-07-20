@@ -27,6 +27,7 @@ import notify
 import paper
 import research
 import telegram_ui
+import user_books
 from research_reports import catalog as research_catalog
 from research_reports import router as research_router
 
@@ -119,12 +120,17 @@ async def _handle_research(update: Update, context: ContextTypes.DEFAULT_TYPE, t
     if update.message is None:
         return
 
+    refuse = research_router.clarify_or_refuse(text)
     topic_id = research_router.resolve_topic(text)
     if topic_id is None:
+        if refuse:
+            await _reply(update, refuse)
+            return
         await _reply(update, research_router.build_catalog())
         return
 
     years = research_router.parse_years(text)
+    product_id = research_router.parse_product_id(text)
     status_msg = research_router.topic_status_message(topic_id)
     if status_msg:
         await _reply(update, status_msg)
@@ -133,7 +139,12 @@ async def _handle_research(update: Update, context: ContextTypes.DEFAULT_TYPE, t
     try:
         report = await loop.run_in_executor(
             None,
-            lambda: research_router.build_report(topic_id, years=years, text=text),
+            lambda: research_router.build_report(
+                topic_id,
+                years=years,
+                text=text,
+                product_id=product_id,
+            ),
         )
     except Exception:
         logger.exception("Research handler failed for topic %s", topic_id)
@@ -211,11 +222,47 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
     data = query.data or ""
     chat_id = query.message.chat_id if query.message else user_id
 
-    if data == telegram_ui.CB_FUND:
-        result = paper.fund_user(user_id, query.from_user.username)
+    if data == telegram_ui.CB_OPEN or data == telegram_ui.CB_FUND:
+        if user_books.has_account(user_id):
+            account = user_books.get_account(user_id)
+            await context.bot.send_message(
+                chat_id,
+                telegram_ui.format_open_account_result(
+                    {
+                        "ok": False,
+                        "reason": "already_opened",
+                        "amount_usd": (account or {}).get("starting_usd"),
+                        "cash_usd": (account or {}).get("cash_usd"),
+                        "starting_usd": (account or {}).get("starting_usd"),
+                    }
+                ),
+                reply_markup=telegram_ui.main_keyboard(),
+            )
+            return
         await context.bot.send_message(
             chat_id,
-            telegram_ui.format_fund_result(result),
+            telegram_ui.format_open_account_prompt(),
+            reply_markup=telegram_ui.open_account_keyboard(),
+        )
+        return
+
+    if data.startswith(telegram_ui.CB_OPEN_SIZE_PREFIX):
+        raw = data[len(telegram_ui.CB_OPEN_SIZE_PREFIX) :]
+        try:
+            amount = float(raw)
+        except ValueError:
+            await context.bot.send_message(
+                chat_id,
+                "Invalid size.",
+                reply_markup=telegram_ui.main_keyboard(),
+            )
+            return
+        result = user_books.open_paper_account(
+            user_id, amount, username=query.from_user.username
+        )
+        await context.bot.send_message(
+            chat_id,
+            telegram_ui.format_open_account_result(result),
             reply_markup=telegram_ui.main_keyboard(),
         )
         return
@@ -226,6 +273,108 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
         await context.bot.send_message(
             chat_id,
             telegram_ui.format_metrics_message(metrics),
+            reply_markup=telegram_ui.main_keyboard(),
+        )
+        return
+
+    if data == telegram_ui.CB_MY_BOOK:
+        url = user_books.me_url(user_id)
+        if url:
+            text = (
+                "My book — personal demo ledger\n\n"
+                f"Open your ledger: {url}\n"
+                "(Link expires in about an hour; tap My book again for a fresh one.)"
+            )
+        else:
+            text = (
+                "My book needs DASHBOARD_PUBLIC_URL set on the server.\n"
+                "Tap My Metrics for a text summary of your personal demo book."
+            )
+        await context.bot.send_message(
+            chat_id,
+            text,
+            reply_markup=telegram_ui.main_keyboard(),
+        )
+        return
+
+    if data.startswith(telegram_ui.CB_TRADE_YES_PREFIX):
+        offer_id = data[len(telegram_ui.CB_TRADE_YES_PREFIX) :]
+        spots = research.get_spot_prices()
+        result = user_books.accept_offer(offer_id, user_id, spots=spots)
+        if result.get("ok"):
+            text = (
+                f"Accepted.\n\n"
+                f"Opened {result.get('side')} "
+                f"{float(result.get('qty') or 0):.6f} @ "
+                f"${float(result.get('entry') or 0):,.2f}\n"
+                f"Notional: ${float(result.get('notional_usd') or 0):,.2f}\n"
+                f"Cash left: ${float(result.get('cash_usd') or 0):,.2f}"
+            )
+        else:
+            reason = result.get("reason") or "failed"
+            if reason == "no_account":
+                text = "Open a paper account first, then Accept."
+            elif reason == "expired":
+                text = (
+                    "Accept window expired (15 min). "
+                    "If the trade runs well you may get a missed-connection invite."
+                )
+            elif reason == "already_decided":
+                text = f"Already recorded as {result.get('status')}."
+            elif reason == "insufficient_cash":
+                text = "Not enough demo cash to size this trade."
+            else:
+                text = f"Could not Accept ({reason})."
+        await context.bot.send_message(
+            chat_id, text, reply_markup=telegram_ui.main_keyboard()
+        )
+        return
+
+    if data.startswith(telegram_ui.CB_TRADE_NO_PREFIX):
+        offer_id = data[len(telegram_ui.CB_TRADE_NO_PREFIX) :]
+        result = user_books.reject_offer(offer_id, user_id)
+        if result.get("ok"):
+            text = "Rejected — your demo cash stays out of this trade."
+        elif result.get("reason") == "already_decided":
+            text = f"Already recorded as {result.get('status')}."
+        elif result.get("reason") == "no_account":
+            text = "Open a paper account to track Accept/Reject on future cards."
+        else:
+            text = f"Could not Reject ({result.get('reason')})."
+        await context.bot.send_message(
+            chat_id, text, reply_markup=telegram_ui.main_keyboard()
+        )
+        return
+
+    if data.startswith(telegram_ui.CB_TRADE_JOIN_PREFIX):
+        offer_id = data[len(telegram_ui.CB_TRADE_JOIN_PREFIX) :]
+        spots = research.get_spot_prices()
+        offer = user_books.get_offer(offer_id)
+        product = (offer or {}).get("product_id") or "ETH-USD"
+        mark = float(spots.get(product) or 0)
+        result = user_books.late_join_offer(
+            offer_id, user_id, mark_price=mark, spots=spots
+        )
+        if result.get("ok"):
+            text = (
+                f"Joined at mark.\n\n"
+                f"{result.get('side')} {float(result.get('qty') or 0):.6f} @ "
+                f"${float(result.get('entry') or 0):,.2f}\n"
+                f"Notional: ${float(result.get('notional_usd') or 0):,.2f}"
+            )
+        else:
+            text = f"Could not join ({result.get('reason')})."
+        await context.bot.send_message(
+            chat_id, text, reply_markup=telegram_ui.main_keyboard()
+        )
+        return
+
+    if data.startswith(telegram_ui.CB_TRADE_SKIP_PREFIX):
+        offer_id = data[len(telegram_ui.CB_TRADE_SKIP_PREFIX) :]
+        user_books.decline_missed_connection(offer_id, user_id)
+        await context.bot.send_message(
+            chat_id,
+            "Okay — staying out of this trade.",
             reply_markup=telegram_ui.main_keyboard(),
         )
         return
@@ -245,7 +394,7 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
         pnl = paper.format_pnl_footer(spots=spots)
         text = f"{telegram_ui.WELCOME_MESSAGE}\n\n{pnl}"
         if config.DASHBOARD_PUBLIC_URL:
-            text += f"\n\nPortfolio: {config.DASHBOARD_PUBLIC_URL}"
+            text += f"\n\nAgent journal: {config.DASHBOARD_PUBLIC_URL}"
         await context.bot.send_message(
             chat_id,
             text[:4096],
@@ -265,7 +414,7 @@ async def cmd_help(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 
     await update.message.reply_text(
         "Commands:\n"
-        "/start — welcome + menu (Fund, My Metrics, Portfolio, Research)\n"
+        "/start — welcome + menu (Open account, My Metrics, My book, Journal, Research)\n"
         "/status — current suggestion + paper PnL\n"
         "/chart — latest analysis chart + what the bot is watching\n"
         "/research — research topic catalog\n"
@@ -393,13 +542,16 @@ async def cmd_research(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         return
 
     years = 4
+    product_parts: list[str] = []
     for arg in args[1:]:
         match = re.search(r"(\d+)", arg)
-        if match:
+        if match and years == 4 and not re.fullmatch(r"(?i)eth|btc|eth-usd|btc-usd", arg):
             years = max(1, min(int(match.group(1)), 10))
-            break
+        product_parts.append(arg)
 
-    text = f"/research {topic_id} {years} years"
+    product_hint = " ".join(product_parts)
+    product_id = research_router.parse_product_id(product_hint)
+    text = f"/research {topic_id} {years} years {product_id}"
     await _handle_research(update, context, text)
 
 

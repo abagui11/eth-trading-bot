@@ -11,6 +11,7 @@ from agent import run_cycle
 from watchdog import run_watchdog
 import bot_config
 from macro.ingest import poll_feeds
+from zmove import run_zmove_scan
 
 logger = logging.getLogger(__name__)
 
@@ -38,6 +39,17 @@ async def macro_feed_job(context) -> None:
         await loop.run_in_executor(None, poll_feeds)
     except Exception:
         logger.exception("Macro feed job failed")
+
+
+async def zmove_job(context) -> None:
+    """Scan ETH H1 price/volume z-scores and broadcast spikes."""
+    if not bot_config.ZMOVE_ENABLED:
+        return
+    loop = asyncio.get_running_loop()
+    try:
+        await loop.run_in_executor(None, run_zmove_scan)
+    except Exception:
+        logger.exception("Z-Move job failed")
 
 
 async def hourly_job(context) -> None:
@@ -93,6 +105,16 @@ def main() -> None:
             name="macro_feed_poll",
         )
         logger.info("Macro feed poll enabled — every %ss", macro_interval)
+
+    if bot_config.ZMOVE_ENABLED:
+        zmove_interval = max(60, bot_config.ZMOVE_INTERVAL_SEC)
+        app.job_queue.run_repeating(
+            zmove_job,
+            interval=zmove_interval,
+            first=90,
+            name="zmove_scan",
+        )
+        logger.info("Z-Move scan enabled — every %ss", zmove_interval)
 
     logger.info(
         "Starting ETH trading agent (polling + hourly cycle every %ss, first in %ss)",

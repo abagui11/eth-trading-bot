@@ -84,9 +84,11 @@ PAPER_PORTFOLIO_VALUE=5000
 
 **Important:** Leave `TELEGRAM_CHAT_ID` **empty** unless it is a *different* chat from your user ID (avoids duplicate hourly messages).
 
-For the beta, keep `PAYWALL_ENABLED=false`. Anyone with the bot link can send `/start`, use the inline keyboard, and receive bot access without being added to `ALLOWED_TELEGRAM_IDS`. `DASHBOARD_PUBLIC_URL` supplies the Telegram **Portfolio** button; use the final public HTTPS URL with no trailing path.
+For the beta, keep `PAYWALL_ENABLED=false`. Anyone with the bot link can send `/start`, use the inline keyboard, and receive bot access without being added to `ALLOWED_TELEGRAM_IDS`. `DASHBOARD_PUBLIC_URL` supplies the Telegram **Agent journal** button and **My book** magic links; use the final public HTTPS URL with no trailing path.
 
-The **Fund** button is a placeholder for future real funding. It makes no wallet transaction: each Telegram user may add one fake **$1,000 paper deposit** to the shared ETH/BTC book and then view their proportional paper equity with **My Metrics**.
+Optional: set `ME_TOKEN_SECRET` in `.env` for `/me` HMAC links (defaults to `TELEGRAM_BOT_TOKEN` if unset).
+
+**Open account** creates a personal demo paper book ($500 / $1,000 / $2,500 once). Demo capital — not real funding. Legacy users who Funded before are migrated to a $1,000 personal account (`python deploy/migrate_personal_accounts.py`, also runs on `paper.init_db`). Trade suggestions include Accept/Reject; only Accept deploys that user's cash. The public dashboard shows the **agent/house** journal plus participation aggregates; personal equity is on `/me` via **My book**.
 
 ### 6. Start the service
 
@@ -115,7 +117,7 @@ You should get a Telegram DM within a minute of the first cycle.
 1. **You** share the bot link (for example, `https://t.me/YourBotName`).
 2. **They** open it and send **`/start`**.
 3. Their `telegram_id` is saved in `ledger.db` → `subscribers`, and the bot returns the inline keyboard.
-4. They can use **Fund**, **My Metrics**, **Portfolio**, and **Research** immediately.
+4. They can use **Open account**, **My Metrics**, **My book**, **Agent journal**, and **Research** immediately.
 
 No manual approval or @userinfobot lookup is required in beta mode.
 
@@ -296,7 +298,18 @@ dashboard.yourdomain.com {
 sudo systemctl reload caddy
 ```
 
-Your public link: `https://dashboard.yourdomain.com` — open it from any device. Set the same value as `DASHBOARD_PUBLIC_URL` in `/opt/eth-trading-agent/.env`, then restart `eth-agent` so Telegram's **Portfolio** button uses it.
+Your public link: `https://dashboard.yourdomain.com` — open it from any device. Set the same value as `DASHBOARD_PUBLIC_URL` in `/opt/eth-trading-agent/.env`, then restart `eth-agent` so Telegram's **Agent journal** and **My book** links use it.
+
+After deploying personal books, run once (or rely on `paper.init_db` auto-migrate):
+
+```bash
+cd /opt/eth-trading-agent
+source .venv/bin/activate
+python deploy/migrate_personal_accounts.py
+sudo systemctl restart eth-agent eth-dashboard
+```
+
+The first hourly cycle may also send the one-time launch notice to subscribers.
 
 The dashboard includes dual ETH/BTC live spots, shared paper-book performance, paginated trade/cycle history with per-asset labels, chart-read score tooltips, and a **Macro news monitor** section (active classified headlines, recent ingested items, posture gates).
 
@@ -334,13 +347,26 @@ This restarts both `eth-agent` and `eth-dashboard`.
 
 Subscribers can run `/research` for the topic catalog. Snapshot topics need outbound HTTPS to Coinbase, Hyperliquid, Kraken Futures, Gate.io (primary perp/funding on US VPS), CoinGecko, and blockchain.info. Binance/Bybit are tried last but often return 451/403 from US-hosted servers.
 
-SFP pattern studies need historical OHLC in `ohlc.db`:
+SFP pattern studies need historical OHLC in `ohlc.db` (ETH and/or BTC):
 
 ```bash
+# ETH (default) — daily + hourly
 sudo -u ethagent bash -c 'cd /opt/eth-trading-agent && .venv/bin/python backfill.py --all'
+
+# Both products
+sudo -u ethagent bash -c 'cd /opt/eth-trading-agent && .venv/bin/python backfill.py --all --product all'
+
+# BTC only
+sudo -u ethagent bash -c 'cd /opt/eth-trading-agent && .venv/bin/python backfill.py --all --product BTC-USD'
 ```
 
-Run once on a fresh VPS (or after DB wipe). Hourly backfill is required for H12 SFP studies.
+Run once on a fresh VPS (or after DB wipe). Daily history powers `d1_sfps` / `weekly_sfp` / `w1_invalidations`; hourly backfill is required for H12 studies. Backfill also rebuilds the deterministic `sfp_events` index used for grounded counts.
+
+Telegram topics: `/research d1_sfps`, `weekly_sfp`, `h12_sfp`, `w1_invalidations`, `h12_invalidations` (optional `ETH`/`BTC` + years). Ambiguous or unindexed pattern asks (e.g. M5 OB counts) clarify or refuse instead of inventing numbers.
+
+### Z-Move alerts
+
+When `ZMOVE_ENABLED` (default on), the agent scans ETH-USD H1 price returns and volume every `ZMOVE_INTERVAL_SEC` (300s). Spikes with `|z| ≥ ZMOVE_THRESHOLD` (2.0) against a 168h lookback broadcast to all subscribers, with a 2h per-metric cooldown (`zmove_state` in the ledger DB).
 
 ### Backfill chart-read scores (older cycles)
 

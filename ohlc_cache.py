@@ -114,7 +114,11 @@ def get_candles(
     ]
 
 
-def cache_coverage(granularity: str) -> tuple[str | None, str | None, int]:
+def cache_coverage(
+    granularity: str,
+    *,
+    product_id: str = PRODUCT_ID,
+) -> tuple[str | None, str | None, int]:
     """Return (min_ts, max_ts, count) for cached granularity."""
     init_cache()
     with _connect() as conn:
@@ -124,23 +128,26 @@ def cache_coverage(granularity: str) -> tuple[str | None, str | None, int]:
             FROM candles
             WHERE product_id = ? AND granularity = ?
             """,
-            (PRODUCT_ID, granularity),
+            (product_id, granularity),
         ).fetchone()
     if row is None or row["cnt"] == 0:
         return None, None, 0
     return row["min_ts"], row["max_ts"], int(row["cnt"])
 
 
-def backfill_daily(years: int = 4) -> dict:
+def backfill_daily(years: int = 4, *, product_id: str = PRODUCT_ID) -> dict:
     """Fetch and cache daily candles for the past `years` years."""
     init_cache()
     end = int(time.time())
     start = int((datetime.now(timezone.utc) - timedelta(days=365 * years)).timestamp())
 
-    bars = research.fetch_coinbase_candles_range(DAILY_GRANULARITY, start, end)
-    written = upsert_candles(DAILY_GRANULARITY, bars)
-    min_ts, max_ts, count = cache_coverage(DAILY_GRANULARITY)
+    bars = research.fetch_coinbase_candles_range(
+        DAILY_GRANULARITY, start, end, product_id=product_id
+    )
+    written = upsert_candles(DAILY_GRANULARITY, bars, product_id=product_id)
+    min_ts, max_ts, count = cache_coverage(DAILY_GRANULARITY, product_id=product_id)
     return {
+        "product_id": product_id,
         "granularity": DAILY_GRANULARITY,
         "fetched": len(bars),
         "written": written,
@@ -150,29 +157,36 @@ def backfill_daily(years: int = 4) -> dict:
     }
 
 
-def ensure_daily_history(years: int = 4) -> list[dict[str, float | str]]:
+def ensure_daily_history(
+    years: int = 4,
+    *,
+    product_id: str = PRODUCT_ID,
+) -> list[dict[str, float | str]]:
     """Return daily bars for the past `years` years, backfilling cache if needed."""
     min_needed = (
         datetime.now(timezone.utc) - timedelta(days=365 * years)
     ).strftime("%Y-%m-%dT%H:%M:%SZ")
 
-    min_ts, max_ts, count = cache_coverage(DAILY_GRANULARITY)
+    min_ts, max_ts, count = cache_coverage(DAILY_GRANULARITY, product_id=product_id)
     if count == 0 or (min_ts and min_ts > min_needed):
-        backfill_daily(years=years)
+        backfill_daily(years=years, product_id=product_id)
 
-    return get_candles(DAILY_GRANULARITY, start_ts=min_needed)
+    return get_candles(DAILY_GRANULARITY, start_ts=min_needed, product_id=product_id)
 
 
-def backfill_hourly(years: int = 4) -> dict:
+def backfill_hourly(years: int = 4, *, product_id: str = PRODUCT_ID) -> dict:
     """Fetch and cache H1 candles for the past `years` years."""
     init_cache()
     end = int(time.time())
     start = int((datetime.now(timezone.utc) - timedelta(days=365 * years)).timestamp())
 
-    bars = research.fetch_coinbase_candles_range(HOURLY_GRANULARITY, start, end)
-    written = upsert_candles(HOURLY_GRANULARITY, bars)
-    min_ts, max_ts, count = cache_coverage(HOURLY_GRANULARITY)
+    bars = research.fetch_coinbase_candles_range(
+        HOURLY_GRANULARITY, start, end, product_id=product_id
+    )
+    written = upsert_candles(HOURLY_GRANULARITY, bars, product_id=product_id)
+    min_ts, max_ts, count = cache_coverage(HOURLY_GRANULARITY, product_id=product_id)
     return {
+        "product_id": product_id,
         "granularity": HOURLY_GRANULARITY,
         "fetched": len(bars),
         "written": written,
@@ -182,31 +196,52 @@ def backfill_hourly(years: int = 4) -> dict:
     }
 
 
-def ensure_hourly_history(years: int = 4) -> list[dict[str, float | str]]:
+def ensure_hourly_history(
+    years: int = 4,
+    *,
+    product_id: str = PRODUCT_ID,
+) -> list[dict[str, float | str]]:
     """Return H1 bars for the past `years` years, backfilling cache if needed."""
     min_needed = (
         datetime.now(timezone.utc) - timedelta(days=365 * years)
     ).strftime("%Y-%m-%dT%H:%M:%SZ")
 
-    min_ts, max_ts, count = cache_coverage(HOURLY_GRANULARITY)
+    min_ts, max_ts, count = cache_coverage(HOURLY_GRANULARITY, product_id=product_id)
     if count == 0 or (min_ts and min_ts > min_needed):
-        backfill_hourly(years=years)
+        backfill_hourly(years=years, product_id=product_id)
 
-    return get_candles(HOURLY_GRANULARITY, start_ts=min_needed)
+    return get_candles(HOURLY_GRANULARITY, start_ts=min_needed, product_id=product_id)
 
 
-def get_h12_bars(years: int = 4) -> list[dict[str, float | str]]:
+def get_daily_bars(
+    years: int = 4,
+    *,
+    product_id: str = PRODUCT_ID,
+) -> list[dict[str, float | str]]:
+    """Raw daily bars from cache (not resampled)."""
+    return ensure_daily_history(years=years, product_id=product_id)
+
+
+def get_h12_bars(
+    years: int = 4,
+    *,
+    product_id: str = PRODUCT_ID,
+) -> list[dict[str, float | str]]:
     """H1 cache resampled to 12-hour bars."""
-    hourly = ensure_hourly_history(years=years)
+    hourly = ensure_hourly_history(years=years, product_id=product_id)
     if not hourly:
         return []
     # ~2 twelve-hour bars per calendar day.
     return research._resample_h12(hourly, limit=years * 365 * 2 + 8)
 
 
-def get_weekly_bars(years: int = 4) -> list[dict[str, float | str]]:
+def get_weekly_bars(
+    years: int = 4,
+    *,
+    product_id: str = PRODUCT_ID,
+) -> list[dict[str, float | str]]:
     """Daily cache resampled to W-FRI weekly bars."""
-    daily = ensure_daily_history(years=years)
+    daily = ensure_daily_history(years=years, product_id=product_id)
     if not daily:
         return []
     # ~52 weeks per year + buffer

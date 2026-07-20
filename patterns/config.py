@@ -21,6 +21,16 @@ DETECTION: dict[str, dict[str, int | float | bool]] = {
         "require_extreme_pivot": False,
         "extreme_lookback": 8,
     },
+    "D1": {
+        "pivot_left": 3,
+        "pivot_right": 3,
+        "min_sweep_pct": 0.0025,  # 0.25% wick past level
+        "max_pivot_age": 60,  # bars (~2 months)
+        "min_bars_since_pivot": 3,
+        "latest_pivot_only": False,
+        "require_extreme_pivot": False,
+        "extreme_lookback": 10,
+    },
     "H12": {
         "pivot_left": 4,
         "pivot_right": 4,
@@ -73,6 +83,7 @@ MOVE_PCT_B = 0.05  # 5%
 # Outcome A follow-through: min move from event close to count as reversal.
 REVERSAL_MIN_MOVE: dict[str, float] = {
     "W1": 0.02,   # 2%
+    "D1": 0.015,  # 1.5%
     "H12": 0.015,  # 1.5%
     "H4": 0.012,  # 1.2%
     "H1": 0.01,   # 1%

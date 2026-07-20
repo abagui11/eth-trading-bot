@@ -14,6 +14,7 @@ import ledger
 import notify
 import paper
 import research
+import user_books
 from models import Suggestion
 from patterns.htf_structure import detect_htf_zones
 from patterns.key_levels import compute_key_levels
@@ -129,7 +130,7 @@ def run_cycle() -> list[tuple[Suggestion, list[str]]] | None:
             context_block = critic.build_market_context_block(market_context.alerts)
             suggestion.rationale = critic.compose_rationale(llm_body, context_block)
 
-            output_paths = charts.build_output_charts(
+            output_paths = charts.build_trade_broadcast_charts(
                 suggestion,
                 data_by_product[product_id],
                 levels_by_product[product_id],
@@ -152,12 +153,28 @@ def run_cycle() -> list[tuple[Suggestion, list[str]]] | None:
                 setup_tags=setup_tags,
             )
             ledger.require_cycle_recorded(product_cycle_id)
+            # House/agent book only — user books open on Accept.
             paper.update(
                 suggestion,
                 spots.get("ETH-USD", price),
                 cycle_id=product_cycle_id,
                 spots=spots,
             )
+            offer_id = None
+            if suggestion.action != "no_trade":
+                house_pos_id = user_books.find_house_position_id_for_cycle(
+                    product_cycle_id
+                )
+                offer = user_books.create_trade_offer(
+                    cycle_id=product_cycle_id,
+                    suggestion=suggestion,
+                    chart_paths=output_paths,
+                    house_position_id=house_pos_id,
+                )
+                if offer:
+                    offer_id = offer["offer_id"]
+            user_books.expire_pending_decisions()
+            user_books.check_user_sl_tp(spots=spots)
             pnl_footer = paper.format_pnl_footer(spots=spots)
             broadcast_sent = (
                 suggestion.action != "no_trade"
@@ -195,7 +212,10 @@ def run_cycle() -> list[tuple[Suggestion, list[str]]] | None:
             try:
                 if broadcast_sent:
                     notify.broadcast(
-                        suggestion, output_paths, pnl_footer=pnl_footer
+                        suggestion,
+                        output_paths,
+                        pnl_footer=pnl_footer,
+                        offer_id=offer_id,
                     )
                 else:
                     logger.info(
@@ -206,9 +226,14 @@ def run_cycle() -> list[tuple[Suggestion, list[str]]] | None:
             except Exception:
                 logger.exception("Broadcast failed for cycle %s", product_cycle_id)
 
+            try:
+                notify.process_missed_connections(spots=spots)
+            except Exception:
+                logger.exception("Missed-connection sweep failed")
+
             logger.info(
                 "Cycle %s complete: product=%s action=%s ledger_id=%s charts=%s "
-                "sanitized=%s downgraded=%s passes=%s",
+                "sanitized=%s downgraded=%s passes=%s offer=%s",
                 product_cycle_id,
                 product_id,
                 suggestion.action,
@@ -217,9 +242,11 @@ def run_cycle() -> list[tuple[Suggestion, list[str]]] | None:
                 refine.sanitized,
                 refine.downgraded,
                 refine.passes_used,
+                offer_id,
             )
             results.append((suggestion, output_paths))
 
+        notify.maybe_send_launch_notice()
         return results
     except Exception:
         logger.exception("Cycle %s failed", cycle_id)

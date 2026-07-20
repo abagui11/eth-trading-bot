@@ -21,6 +21,7 @@ Direction = Literal["bullish", "bearish"]
 # Expected bar spacing per timeframe (hours) for resample sanity checks.
 _BAR_SPACING_HOURS: dict[str, float] = {
     "W1": 168.0,
+    "D1": 24.0,
     "H12": 12.0,
     "H4": 4.0,
     "H1": 1.0,
