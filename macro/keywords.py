@@ -28,9 +28,14 @@ T1_PHRASES: list[str] = [
     "strait of hormuz", "iran sanctions", "iran oil", "tanker attack", "tanker attacks",
     "oil embargo", "opec cut", "opec+ cut", "missile strike", "declares war",
     "martial law", "ceasefire collapse",
-    # Regulatory hammer
+    # Regulatory hammer (bearish enforcement)
     "sec lawsuit", "sec charges", "doj crypto", "treasury sanctions ethereum",
     "crypto ban", "mining ban", "exchange shutdown", "tornado cash", "ofac crypto",
+    # Regulatory / legislative catalyst (structural — bullish or bearish)
+    "clarity act", "genius act", "market structure bill", "market structure act",
+    "stablecoin bill", "crypto legislation", "crypto market structure",
+    "signed into law", "senate passes", "house passes", "passes the senate",
+    "passes the house", "clears the senate", "clears the house",
 ]
 
 T1_TERMS: list[str] = [
@@ -49,9 +54,10 @@ T2_PHRASES: list[str] = [
     # Macro risk-off
     "debt ceiling", "government shutdown", "bank failure", "bank run",
     "credit crunch", "systemic risk", "margin call", "flash crash", "circuit breaker",
-    # Crypto regulation
-    "stablecoin bill", "crypto regulation", "treasury crypto", "irs crypto",
-    "clarity act", "genius act", "custody rule", "wells notice",
+    # Crypto regulation / legislation
+    "crypto regulation", "treasury crypto", "irs crypto",
+    "custody rule", "wells notice", "market structure", "regulatory clarity",
+    "crypto bill", "treasury secretary",
     # Crypto ecosystem
     "ethereum upgrade", "hard fork", "gas fees", "layer 2", "staking withdrawals",
     "spot flows", "etf inflows", "etf outflows", "blackrock ethereum", "fidelity ethereum",
@@ -76,8 +82,9 @@ T2_TERMS: list[str] = [
     "tariff", "tariffs", "escalation", "conflict", "blockade", "sabotage", "cyberattack",
     # Macro risk-off
     "recession", "stagflation", "default", "deleveraging", "contagion",
-    # Crypto regulation
-    "sec", "gensler", "cftc", "mica", "subpoena",
+    # Crypto regulation / legislation
+    "sec", "gensler", "cftc", "mica", "subpoena", "legislation", "lawmakers",
+    "congress", "senate", "bessent", "regulatory",
     # Crypto ecosystem
     "dencun", "pectra", "staking", "restaking", "eigenlayer", "l2", "blob", "validator",
     "slashing", "merge", "eip", "shanghai", "grayscale",

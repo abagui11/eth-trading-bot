@@ -37,6 +37,21 @@ class TestMacroKeywords(unittest.TestCase):
         score, _ = relevance_score("crypto market rally continues")
         self.assertLess(score, 40)
 
+    def test_clarity_act_promotes(self) -> None:
+        # Bullish legislative catalyst must clear the promote threshold so it
+        # reaches the classifier instead of being filed as ignored noise.
+        title = "U.S. Senator: Clarity Act Is 'Almost There'"
+        score, hits = relevance_score(title)
+        self.assertGreaterEqual(score, 40)
+        self.assertTrue(
+            any(h["rule"] == "T1_PHRASE" and h["term"] == "clarity act" for h in hits)
+        )
+
+    def test_bessent_clarity_headline_promotes(self) -> None:
+        title = "Bitcoin Rallies After Bessent Says Clarity Act at 1-Yard Line"
+        score, _ = relevance_score(title)
+        self.assertGreaterEqual(score, 40)
+
     def test_negative_subtracts(self) -> None:
         score, hits = relevance_score("NBA championship sports betting crypto")
         neg = [h for h in hits if h["rule"].startswith("NEGATIVE")]

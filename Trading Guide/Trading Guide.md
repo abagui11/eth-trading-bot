@@ -89,6 +89,41 @@ Reasons to increase the trade size would be the same as above but inverse.
 
 ---
 
+# Impulse asymmetry (bull vs bear regime)
+
+Bull and bear markets move differently. Classify regime first, then weight trades.
+
+**Regime (required each cycle):**
+1. **Bull regime** — Weekly structure and Monthly structure are both bullish (HH/HL, or price holding above Weekly Open *and* Monthly Open with higher highs/lows).
+2. **Bear regime** — Weekly and Monthly both bearish (LH/LL, or price holding below Weekly Open *and* Monthly Open with lower highs/lows).
+3. **Mixed / undefined** — Week and Month disagree, or structure is unclear → do **not** apply impulse-asymmetry conviction rules; use standard H4/H1/M5 rules only.
+4. State the regime in `rationale` paragraph 1 (`bull` / `bear` / `mixed`) and cite the Weekly + Monthly evidence (opens, prev W/M highs-lows, swing structure).
+
+**Core asymmetry:**
+| Regime | With-trend leg | Against-trend leg |
+|--------|----------------|-------------------|
+| Bull   | Fast, impulsive (few candles, strong displacement) | Slow, corrective (choppy, multi-candle, often overlapping) |
+| Bear   | Fast, impulsive down | Slow, corrective up |
+
+Expect a repeating pattern in **bull regime**: short impulsive up bursts → slower down burst → short up bursts → slower down burst. Invert in **bear regime**.
+
+**Conviction rules (actionable):**
+1. **With-regime trades get priority.** In bull regime, prefer longs on valid M5 OB/SFP fib entries; treat shorts as counter-trend unless a structure-shift rule (below) fires. Invert in bear regime.
+2. **Counter-regime legs are for fade setups, not trend flips.** In bull regime, a multi-candle selloff into demand (H4/M5 bullish OB, key level, SFP) is a **long** opportunity with normal/high conviction — do not treat the slow down-leg as a new bear trend by itself. Invert in bear (fade slow rallies short).
+3. **Do not chase the slow leg.** In bull regime, avoid initiating new shorts mid-grind down unless R/R ≥ 1.5 *and* there is a clear M5 bearish OB/SFP at HTF supply — prefer wait for impulsive reclaim / long. Invert in bear.
+4. **TP/hold bias (conviction, not size):** With-regime trades may target TP2/TP3 and hold through choppy counter-legs that do not break structure. Counter-regime trades prefer TP1 / quicker scale-out and tighter invalidation.
+5. **Sizing stays fixed-fraction** (25% deploy). “Higher conviction” means take the with-regime setup when borderline, keep it open through corrective noise, and deprioritize / skip weak counter-regime ideas — **not** a larger `size`.
+
+**Structure-shift override (expect the impulsive reverse candle):**
+1. A **bull→bear shift** requires Weekly *or* Monthly structure to flip bearish (e.g. close below a defining HL / Weekly or Monthly Open that had been held, or a clear LH/LL sequence replacing HH/HL) **plus** LTF confirmation: H4 or M5 bearish MSB and/or confirmed bearish SFP at the failed swing.
+2. On a confirmed bull→bear shift: expect a **fast impulsive bearish displacement** (large bearish candle / consecutive displacement). Prefer **shorts** into that impulse (M5 bearish OB/SFP after the break); do **not** fade the first impulsive down-leg as a “slow correction.”
+3. Invert for **bear→bull shift**: expect impulsive bullish displacement; prefer longs; do not fade the first impulsive up-leg.
+4. Until the shift is confirmed, stay in the prior regime’s playbook (fade the slow counter-leg).
+
+**Rationale must include:** regime label + whether the current leg looks impulsive or corrective + whether a structure-shift is confirmed, pending, or absent.
+
+---
+
 # Notable Patterns
 
 Reference images are attached in the API request. Match similar structure on the live ETH and BTC charts.
