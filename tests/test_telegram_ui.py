@@ -9,10 +9,13 @@ import bot_config
 import config
 from telegram_ui import (
     CB_OPEN,
+    CB_TRADE_MORE_PREFIX,
+    CB_TRADE_YES_PREFIX,
     format_fund_result,
     format_metrics_message,
     format_open_account_result,
     main_keyboard,
+    trade_decision_keyboard,
 )
 
 
@@ -80,6 +83,35 @@ class TelegramUiTests(unittest.TestCase):
             )
         self.assertIn("not opened a paper account", message)
         self.assertIn("$500", message)
+
+    def test_trade_decision_keyboard_has_see_more(self) -> None:
+        keyboard = trade_decision_keyboard("20260721T120000Z_ETH")
+        labels = [
+            button.text
+            for row in keyboard.inline_keyboard
+            for button in row
+        ]
+        self.assertEqual(labels[:2], ["Accept", "Reject"])
+        self.assertIn("See more", labels)
+        more = next(
+            button
+            for row in keyboard.inline_keyboard
+            for button in row
+            if button.text == "See more"
+        )
+        self.assertEqual(
+            more.callback_data, f"{CB_TRADE_MORE_PREFIX}20260721T120000Z_ETH"
+        )
+        yes = next(
+            button
+            for row in keyboard.inline_keyboard
+            for button in row
+            if button.text == "Accept"
+        )
+        self.assertEqual(
+            yes.callback_data, f"{CB_TRADE_YES_PREFIX}20260721T120000Z_ETH"
+        )
+        self.assertLessEqual(len(more.callback_data.encode("utf-8")), 64)
 
 
 if __name__ == "__main__":

@@ -89,7 +89,8 @@ CREATE TABLE IF NOT EXISTS trade_offers (
     created_at TEXT NOT NULL,
     expires_at TEXT NOT NULL,
     house_position_id INTEGER,
-    missed_connection_sent INTEGER NOT NULL DEFAULT 0
+    missed_connection_sent INTEGER NOT NULL DEFAULT 0,
+    display_summary TEXT
 );
 """
 
@@ -137,6 +138,16 @@ def _parse_ts(raw: str | None) -> datetime | None:
             return None
 
 
+def _ensure_offer_columns(conn: sqlite3.Connection) -> None:
+    """Add new columns to existing trade_offers without a migration framework."""
+    cols = {
+        row[1]
+        for row in conn.execute("PRAGMA table_info(trade_offers)").fetchall()
+    }
+    if "display_summary" not in cols:
+        conn.execute("ALTER TABLE trade_offers ADD COLUMN display_summary TEXT")
+
+
 def init_db() -> None:
     with _connect() as conn:
         conn.execute(_ACCOUNTS_SCHEMA)
@@ -145,6 +156,7 @@ def init_db() -> None:
         conn.execute(_OFFERS_SCHEMA)
         conn.execute(_DECISIONS_SCHEMA)
         conn.execute(_META_SCHEMA)
+        _ensure_offer_columns(conn)
         conn.commit()
 
 
@@ -518,6 +530,7 @@ def create_trade_offer(
     chart_paths: list[str],
     house_position_id: int | None = None,
     expires_at: str | None = None,
+    display_summary: str | None = None,
 ) -> dict | None:
     """Persist a swipeable offer for a trade suggestion. Returns offer row or None."""
     if suggestion.action not in TRADE_ACTIONS:
@@ -559,8 +572,9 @@ def create_trade_offer(
             INSERT OR REPLACE INTO trade_offers (
                 offer_id, cycle_id, product_id, suggestion_json,
                 decision_chart_path, structure_chart_path, entry_chart_path,
-                created_at, expires_at, house_position_id, missed_connection_sent
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0)
+                created_at, expires_at, house_position_id, missed_connection_sent,
+                display_summary
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?)
             """,
             (
                 offer_id,
@@ -573,6 +587,7 @@ def create_trade_offer(
                 created,
                 expires_at,
                 house_position_id,
+                display_summary,
             ),
         )
         # Seed pending decisions for every personal account.

@@ -17,6 +17,7 @@ import bot_config
 import charts
 import config
 import critic
+import display_summary
 import ledger
 import notify
 import paper
@@ -559,6 +560,8 @@ def _render_output_charts(
     ctx: MarketContext,
     cycle_id: str,
     daily_bars: list[dict],
+    *,
+    source_ts: str | None = None,
 ) -> list[str]:
     key_levels = compute_key_levels(daily_bars)
     product_id = getattr(suggestion, "product_id", None) or "ETH-USD"
@@ -570,6 +573,7 @@ def _render_output_charts(
         htf_zones,
         cycle_id,
         market_context=ctx,
+        source_ts=source_ts,
     )
 
 
@@ -776,8 +780,18 @@ def run_watchdog() -> list[Suggestion] | None:
             setup_tags = ",".join(ctx.setup_tags) if ctx.setup_tags else None
             output_paths: list[str] = []
             try:
+                source_ts = None
+                if trigger.sfp_event is not None:
+                    source_ts = trigger.sfp_event.ts
+                elif trigger.ob is not None:
+                    source_ts = trigger.ob.start_ts or trigger.ob.displacement_ts
                 output_paths = _render_output_charts(
-                    suggestion, data, ctx, cycle_id, daily_bars
+                    suggestion,
+                    data,
+                    ctx,
+                    cycle_id,
+                    daily_bars,
+                    source_ts=source_ts,
                 )
             except Exception:
                 logger.exception("Watchdog chart render failed for %s", cycle_id)
@@ -796,12 +810,19 @@ def run_watchdog() -> list[Suggestion] | None:
                 spots=spots,
             )
             offer_id = None
+            card_summary = None
             house_pos_id = user_books.find_house_position_id_for_cycle(cycle_id)
+            try:
+                card_summary = display_summary.generate_display_summary(suggestion)
+            except Exception:
+                logger.exception("Display summary generation failed for %s", cycle_id)
+                card_summary = None
             offer = user_books.create_trade_offer(
                 cycle_id=cycle_id,
                 suggestion=suggestion,
                 chart_paths=output_paths,
                 house_position_id=house_pos_id,
+                display_summary=card_summary,
             )
             if offer:
                 offer_id = offer["offer_id"]
@@ -814,10 +835,14 @@ def run_watchdog() -> list[Suggestion] | None:
                         output_paths,
                         pnl_footer=pnl_footer,
                         offer_id=offer_id,
+                        display_summary_text=card_summary,
                     )
                 else:
                     notify.broadcast_text(
-                        suggestion, pnl_footer=pnl_footer, offer_id=offer_id
+                        suggestion,
+                        pnl_footer=pnl_footer,
+                        offer_id=offer_id,
+                        display_summary_text=card_summary,
                     )
             except Exception:
                 logger.exception("Watchdog broadcast failed for %s", cycle_id)

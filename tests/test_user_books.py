@@ -187,6 +187,25 @@ class UserBooksTests(unittest.TestCase):
         self.assertEqual(metrics["amount_usd"], 2500.0)
         self.assertAlmostEqual(metrics["equity_usd"], 2500.0)
 
+    def test_display_summary_persisted_on_offer(self) -> None:
+        offer = user_books.create_trade_offer(
+            cycle_id="20260721T150000Z_ETH",
+            suggestion=_long_suggestion(
+                rationale="Canonical long thesis with Market context: none"
+            ),
+            chart_paths=["/tmp/decision.png", "/tmp/structure.png", "/tmp/entry.png"],
+            display_summary="Friendly setup blurb without numbers.",
+        )
+        self.assertIsNotNone(offer)
+        assert offer is not None
+        self.assertEqual(
+            offer.get("display_summary"),
+            "Friendly setup blurb without numbers.",
+        )
+        suggestion = user_books.offer_suggestion(offer)
+        self.assertIn("Canonical long thesis", suggestion.rationale)
+        self.assertNotEqual(suggestion.rationale, offer.get("display_summary"))
+
 
 class DecisionChartTests(unittest.TestCase):
     def test_build_decision_chart_long(self) -> None:
@@ -260,6 +279,65 @@ class DecisionChartTests(unittest.TestCase):
             assert path is not None
             self.assertTrue(Path(path).exists())
 
+    def test_decision_window_includes_source_bar(self) -> None:
+        import charts
+
+        bars = []
+        base = datetime(2026, 7, 20, tzinfo=timezone.utc)
+        for i in range(200):
+            ts = (base + timedelta(minutes=5 * i)).strftime("%Y-%m-%dT%H:%M:%SZ")
+            bars.append(
+                {
+                    "ts": ts,
+                    "open": 65000.0,
+                    "high": 65100.0,
+                    "low": 64900.0,
+                    "close": 65050.0,
+                    "volume": 1.0,
+                }
+            )
+        # Source near the end so it fits inside max_bars ending at now.
+        source = bars[150]["ts"]
+        window = charts._decision_window_bars(bars, source_ts=source)
+        self.assertGreaterEqual(len(window), 72)
+        self.assertLessEqual(len(window), 120)
+        self.assertEqual(window[-1]["ts"], bars[-1]["ts"])
+        self.assertIn(source, {b["ts"] for b in window})
+        # Window expands to min_bars when source+buffer would be shorter.
+        self.assertEqual(window[0]["ts"], bars[200 - len(window)]["ts"])
+
+    def test_decision_window_old_source_prefers_recent(self) -> None:
+        import charts
+
+        bars = []
+        base = datetime(2026, 7, 20, tzinfo=timezone.utc)
+        for i in range(200):
+            bars.append(
+                {
+                    "ts": (base + timedelta(minutes=5 * i)).strftime(
+                        "%Y-%m-%dT%H:%M:%SZ"
+                    ),
+                    "open": 1.0,
+                    "high": 2.0,
+                    "low": 0.5,
+                    "close": 1.1,
+                    "volume": 1.0,
+                }
+            )
+        source = bars[20]["ts"]
+        window = charts._decision_window_bars(bars, source_ts=source)
+        self.assertEqual(len(window), 120)
+        self.assertEqual(window[-1]["ts"], bars[-1]["ts"])
+        # Old source is outside the recent max window.
+        self.assertNotIn(source, {b["ts"] for b in window})
+
+    def test_decision_window_default_clamp(self) -> None:
+        import charts
+
+        bars = [{"ts": f"t{i}", "open": 1, "high": 2, "low": 0.5, "close": 1.1, "volume": 1}
+                for i in range(200)]
+        window = charts._decision_window_bars(bars, source_ts=None)
+        self.assertEqual(len(window), 72)
 
 
 if __name__ == "__main__":

@@ -11,6 +11,7 @@ from telegram import Bot
 import access
 import bot_config
 import config
+import display_summary
 import paper
 import telegram_ui
 import user_books
@@ -42,76 +43,29 @@ def format_rationale_text(rationale: str) -> str:
     return "\n\n".join(paragraphs)
 
 
-def _side_label(suggestion: Suggestion) -> str:
-    if suggestion.action in ("spot_buy", "deriv_buy"):
-        return "long"
-    if suggestion.action in ("spot_sell", "deriv_sell"):
-        return "short"
-    return "flat"
-
-
 def build_caption(
     suggestion: Suggestion,
     *,
     telegram_id: int | None = None,
     offer_id: str | None = None,
+    display_summary_text: str | None = None,
 ) -> str:
     """Short caption for the chart photo (Telegram limit: 1024 characters)."""
-    if suggestion.action == "no_trade":
-        return "NO TRADE — rationale in the message below."
-
-    tps = ", ".join(f"{tp:,.2f}" for tp in suggestion.take_profits[:3]) or "n/a"
-    rr = f"{suggestion.risk_reward:.2f}" if suggestion.risk_reward is not None else "n/a"
-    prefix = ""
-    if "[Watchdog" in suggestion.rationale:
-        prefix = "WATCHDOG — "
-
-    lines = [
-        f"{prefix}{suggestion.action.upper()} · {bot_config.product_label(suggestion.product_id)}",
-        f"Entry: {suggestion.entry:,.2f}",
-        f"SL: {suggestion.stop_loss:,.2f}",
-        f"TP: {tps}",
-        f"R/R: {rr}",
-    ]
-
-    if (
-        telegram_id is not None
-        and suggestion.entry is not None
-        and suggestion.stop_loss is not None
-        and suggestion.take_profits
-    ):
-        sizing = user_books.compute_user_notional(
-            telegram_id,
-            float(suggestion.entry),
-            deploy_pct=suggestion.deploy_pct,
-        )
-        if sizing.get("ok"):
-            rr_usd = user_books.prospective_risk_reward_usd(
-                entry=float(suggestion.entry),
-                stop_loss=float(suggestion.stop_loss),
-                take_profit=float(suggestion.take_profits[0]),
-                side=_side_label(suggestion),
-                notional_usd=float(sizing["notional_usd"]),
-            )
-            lines.append(f"Your size ≈ ${float(sizing['notional_usd']):,.0f}")
-            lines.append(
-                f"Downside ≈ ${rr_usd['risk_usd']:,.0f} · "
-                f"Upside (TP1) ≈ ${rr_usd['reward_usd']:,.0f}"
-            )
-        else:
-            lines.append("Open a paper account to Accept with your demo cash.")
-    else:
-        lines.append(f"Agent size: ${suggestion.size:,.2f}")
-
-    window = int(bot_config.APPROVAL_WINDOW_MIN)
-    if offer_id:
-        lines.append(f"Accept within {window} min · offer {offer_id[-8:]}")
-    return "\n".join(lines)
+    return display_summary.build_card_body(
+        suggestion,
+        display_summary=display_summary_text,
+        telegram_id=telegram_id,
+        offer_id=offer_id,
+    )
 
 
 def build_rationale_message(suggestion: Suggestion, pnl_footer: str) -> str:
-    """Full thesis + Market context + PnL as a follow-up text message."""
+    """Full thesis + Market context + PnL as a follow-up text message (See more)."""
     parts: list[str] = []
+    levels = display_summary.build_detail_levels_block(suggestion)
+    if suggestion.action != "no_trade":
+        parts.append(levels)
+
     raw = suggestion.rationale.strip()
     if raw:
         header = "NO TRADE" if suggestion.action == "no_trade" else suggestion.action.upper()
@@ -127,6 +81,15 @@ def build_rationale_message(suggestion: Suggestion, pnl_footer: str) -> str:
         parts.append("\n\n".join(sections))
     parts.append(pnl_footer)
     return "\n\n".join(parts)[:4096]
+
+
+def _decision_chart_only(chart_paths: list[str] | str) -> list[str]:
+    paths = [chart_paths] if isinstance(chart_paths, str) else list(chart_paths)
+    paths = [p for p in paths if p and p != "watchdog"]
+    decision = [p for p in paths if "decision" in str(p).lower()]
+    if decision:
+        return decision[:1]
+    return paths[:1]
 
 
 async def send_photo_with_caption(
@@ -160,8 +123,13 @@ async def send_suggestion_to_chat(
     *,
     offer_id: str | None = None,
     telegram_id: int | None = None,
+    display_summary_text: str | None = None,
+    include_full_rationale: bool = False,
 ) -> None:
-    paths = [chart_paths] if isinstance(chart_paths, str) else list(chart_paths[:3])
+    """Send the concise decision card; optionally include full detail (ops/resend)."""
+    paths = _decision_chart_only(chart_paths) if not include_full_rationale else (
+        [chart_paths] if isinstance(chart_paths, str) else list(chart_paths[:3])
+    )
     paths = [p for p in paths if p and p != "watchdog"]
     tid = telegram_id
     if tid is None:
@@ -169,8 +137,19 @@ async def send_suggestion_to_chat(
             tid = int(str(chat_id).strip())
         except ValueError:
             tid = None
-    caption = build_caption(suggestion, telegram_id=tid, offer_id=offer_id)
-    rationale_message = build_rationale_message(suggestion, pnl_footer)
+
+    summary = display_summary_text
+    if summary is None and offer_id:
+        offer = user_books.get_offer(offer_id)
+        if offer and offer.get("display_summary"):
+            summary = str(offer["display_summary"])
+
+    caption = build_caption(
+        suggestion,
+        telegram_id=tid,
+        offer_id=offer_id,
+        display_summary_text=summary,
+    )
     keyboard = (
         telegram_ui.trade_decision_keyboard(offer_id)
         if offer_id and suggestion.action != "no_trade"
@@ -178,10 +157,13 @@ async def send_suggestion_to_chat(
     )
 
     if not paths:
-        text = f"{caption}\n\n{rationale_message}" if caption else rationale_message
         await bot.send_message(
-            chat_id=chat_id, text=text[:4096], reply_markup=keyboard
+            chat_id=chat_id, text=caption[:4096], reply_markup=keyboard
         )
+        if include_full_rationale:
+            rationale_message = build_rationale_message(suggestion, pnl_footer)
+            if rationale_message:
+                await bot.send_message(chat_id=chat_id, text=rationale_message)
         return
 
     for i, chart_path in enumerate(paths):
@@ -207,8 +189,42 @@ async def send_suggestion_to_chat(
             )
             continue
 
-    if rationale_message:
-        await bot.send_message(chat_id=chat_id, text=rationale_message)
+    if include_full_rationale:
+        rationale_message = build_rationale_message(suggestion, pnl_footer)
+        if rationale_message:
+            await bot.send_message(chat_id=chat_id, text=rationale_message)
+
+
+async def send_offer_details_to_chat(
+    bot: Bot,
+    chat_id: int | str,
+    offer: dict,
+    *,
+    pnl_footer: str | None = None,
+) -> None:
+    """See more: structure/entry charts + exact levels + full canonical rationale."""
+    suggestion = user_books.offer_suggestion(offer)
+    footer = pnl_footer or paper.format_pnl_footer()
+    detail_paths: list[str] = []
+    for key in ("structure_chart_path", "entry_chart_path"):
+        path = offer.get(key)
+        if path and Path(str(path)).exists():
+            detail_paths.append(str(path))
+
+    for i, chart_path in enumerate(detail_paths):
+        caption = (
+            f"{display_summary.friendly_title(suggestion)} — detail "
+            f"{i + 1}/{len(detail_paths)}"
+        )
+        try:
+            await send_photo_with_caption(bot, chat_id, chart_path, caption)
+        except Exception:
+            logger.exception(
+                "See more chart send failed for chat %s (%s)", chat_id, chart_path
+            )
+
+    text = build_rationale_message(suggestion, footer)
+    await bot.send_message(chat_id=chat_id, text=text[:4096])
 
 
 async def send_research_to_chat(
@@ -253,6 +269,7 @@ async def broadcast_to_subscribers(
     pnl_footer: str | None = None,
     *,
     offer_id: str | None = None,
+    display_summary_text: str | None = None,
 ) -> None:
     """DM the suggestion to every registered subscriber (or allowlist if paywall on)."""
     footer = pnl_footer or paper.format_pnl_footer()
@@ -271,6 +288,7 @@ async def broadcast_to_subscribers(
                 footer,
                 offer_id=offer_id,
                 telegram_id=user_id,
+                display_summary_text=display_summary_text,
             )
             sent.add(user_id)
             logger.info("Sent suggestion to user %s", user_id)
@@ -293,6 +311,7 @@ async def broadcast_to_subscribers(
                     footer,
                     offer_id=offer_id,
                     telegram_id=admin_id,
+                    display_summary_text=display_summary_text,
                 )
                 logger.info("Sent suggestion to admin chat %s", admin_chat)
             except Exception:
@@ -457,6 +476,7 @@ def broadcast(
     pnl_footer: str | None = None,
     *,
     offer_id: str | None = None,
+    display_summary_text: str | None = None,
 ) -> None:
     """Sync wrapper for standalone agent.py / tests."""
     footer = pnl_footer or paper.format_pnl_footer()
@@ -464,7 +484,12 @@ def broadcast(
     async def _run() -> None:
         bot = Bot(token=config.TELEGRAM_BOT_TOKEN)
         await broadcast_to_subscribers(
-            bot, suggestion, chart_paths, footer, offer_id=offer_id
+            bot,
+            suggestion,
+            chart_paths,
+            footer,
+            offer_id=offer_id,
+            display_summary_text=display_summary_text,
         )
 
     asyncio.run(_run())
@@ -475,6 +500,7 @@ def broadcast_text(
     pnl_footer: str | None = None,
     *,
     offer_id: str | None = None,
+    display_summary_text: str | None = None,
 ) -> None:
     """Broadcast a watchdog / text-only trade signal (no chart images)."""
     footer = pnl_footer or paper.format_pnl_footer()
@@ -482,7 +508,12 @@ def broadcast_text(
     async def _run() -> None:
         bot = Bot(token=config.TELEGRAM_BOT_TOKEN)
         await broadcast_to_subscribers(
-            bot, suggestion, [], footer, offer_id=offer_id
+            bot,
+            suggestion,
+            [],
+            footer,
+            offer_id=offer_id,
+            display_summary_text=display_summary_text,
         )
 
     asyncio.run(_run())

@@ -3,7 +3,7 @@
 > Single source of truth for architecture and status of the Telegram trading bot.
 > See **Documentation maintenance** below — update this file (and related deploy docs) whenever behaviour changes.
 
-**Last updated:** 2026-07-20
+**Last updated:** 2026-07-21
 
 ---
 
@@ -140,8 +140,9 @@ flowchart TD
     MON --> MRPT[send_hourly_monitor_report]
     LG --> BC{BROADCAST_ONLY_TRADES<br/>and no_trade?}
     BC -->|skip| SKIP[no subscriber DM]
-    BC -->|send| OFFER[user_books.create_trade_offer]
-    OFFER --> BDM[notify.broadcast<br/>decision chart + Accept/Reject]
+    BC -->|send|     OFFER[user_books.create_trade_offer]
+    OFFER --> SUM[display_summary hybrid LLM + fallback]
+    SUM --> BDM[notify.broadcast<br/>decision chart + concise card<br/>Accept/Reject/See more]
 ```
 
 ---
@@ -168,7 +169,8 @@ flowchart TD
     BS --> V2[validate_suggestion<br/>same M5 OB + fib + trade risk]
     V2 --> WCH[render output charts]
     WCH --> WLG[ledger + paper.update]
-    WLG --> WBD[notify.broadcast / broadcast_text]
+    WLG --> SUM2[display_summary]
+    SUM2 --> WBD[notify.broadcast / broadcast_text<br/>concise card + See more]
     WLG --> WAL[send_watchdog_monitor_alert]
 ```
 
@@ -193,11 +195,11 @@ flowchart TD
     KB --> RESEARCH[Research help/catalog]
     OPEN --> ACCT[(user_accounts)]
     METRICS --> ACCT
-    TG --> TRADE[trade:yes / trade:no / trade:join]
-    TRADE --> UPOS[(user_positions)]
+    TG --> TRADE[trade:yes / trade:no / trade:join / trade:more]
+    TRADE --> UPOS[(user_positions + offer details)]
 ```
 
-`Open account` creates a one-time personal demo book (not real funding). Legacy Funders are migrated to a **$1,000** personal account via `user_books.migrate_funders_to_personal_accounts` (also on `paper.init_db`). The house/agent book in `paper.py` continues to auto-take every validated trade for the public journal; user cash never mixes into house equity. Trade broadcasts include a decision chart (green TP1 / red SL rectangles) and Accept/Reject (15 min window). Rejected/expired users may get one missed-connection Join invite when the house position is ≥ +0.5R.
+`Open account` creates a one-time personal demo book (not real funding). Legacy Funders are migrated to a **$1,000** personal account via `user_books.migrate_funders_to_personal_accounts` (also on `paper.init_db`). The house/agent book in `paper.py` continues to auto-take every validated trade for the public journal; user cash never mixes into house equity. Trade broadcasts send a **concise decision card** (decision chart + friendly caption with price-move % to TP1/SL, Accept/Reject/See more). Full canonical rationale and structure/entry charts are deferred to **See more**. Rejected/expired users may get one missed-connection Join invite when the house position is ≥ +0.5R.
 
 ---
 
@@ -229,7 +231,7 @@ Writers → stores:
 | `paper` | hourly cycle, watchdog | dashboard, Telegram |
 | `paper_contributions` | House seed; legacy Fund rows (migration source) | Migrate script; house seed |
 | `user_accounts` / `user_positions` / `user_trades` | Open account; Accept / late-join | Telegram My Metrics; `/me` |
-| `trade_offers` / `trade_decisions` | Hourly + watchdog after house `paper.update` | Accept/Reject; participation strip; missed-connection |
+| `trade_offers` / `trade_decisions` | Hourly + watchdog after house `paper.update`; `display_summary` sibling field | Accept/Reject/See more; participation strip; missed-connection |
 | `audit_snapshots` | hourly cycle | dashboard, chat, monitor |
 | `audit_verdicts` | hourly monitor, chat audit | dashboard |
 | `chat_audits` | chat Q&A | — |
@@ -263,9 +265,9 @@ Legend: ✅ done · 🟡 in progress · 🔧 needs work · ⬜ planned · ⚠️
 | Z-Move alerts | `zmove.py` | ✅ | ETH H1 \|z\|≥2 price/volume → subscriber broadcast + cooldown |
 | Persistence | `ledger.py`, `audit.py`, `paper.py`, `user_books.py` | ✅ | SQLite |
 | Paper trading | `paper.py` | ✅ | house multi-asset book; fixed 25% deploy; qty caps; FIFO; staged TP scale-out; outcome charts |
-| Personal books | `user_books.py` | ✅ | open-account sizes; offers; Accept/Reject/expire; late-join; user SL/TP; `/me` tokens |
-| Telegram beta UI | `bot.py`, `telegram_ui.py` | ✅ | Open account / My Metrics / My book / Journal / Research; trade Yes/No/Join |
-| Decision chart | `charts.build_decision_chart` | ✅ | clean candles + red SL / green TP1 bands; first broadcast image |
+| Personal books | `user_books.py` | ✅ | open-account sizes; offers; Accept/Reject/expire; late-join; user SL/TP; `/me` tokens; `display_summary` on offers |
+| Telegram beta UI | `bot.py`, `telegram_ui.py`, `display_summary.py` | ✅ | Open account / My Metrics / My book / Journal / Research; trade Yes/No/Join/See more; concise cards |
+| Decision chart | `charts.build_decision_chart` | ✅ | clean candles + red SL / green TP1 bands with % annotations; source-aware M5 history |
 | Dashboard | `dashboard/` | ✅ | public agent journal + participation aggregates; `/me` personal ledger |
 | Live execution | `execute.py` | ⬜ | shadow/live path not built |
 | OHLC history cache | `ohlc_cache.py` | ✅ | research/backfill; ETH+BTC H1/D1; not hot path |
@@ -334,6 +336,7 @@ Defaults from `bot_config.py` (non-secret tunables). Secrets and portfolio size 
 
 | Date | Change |
 |---|---|
+| 2026-07-21 | Friendly Telegram trade cards: decision chart + concise caption (price-move % to TP1/SL, hybrid LLM setup blurb with deterministic fallback); Accept/Reject/See more; full rationale + structure/entry charts deferred to See more; `display_summary` on `trade_offers`; source-aware decision-chart history. Canonical rationale/audit unchanged. |
 | 2026-07-20 | Decision chart risk/reward rectangles sit ahead of the last candle (forward runway) instead of overlaying full history. |
 | 2026-07-19 | History vault + grounded SFP Q&A: multi-product `ohlc_cache` (ETH/BTC H1/D1), `sfp_events` index, `/research d1_sfps` + `w1_invalidations`, clarify/refuse for unindexed patterns; ETH Z-Move broadcasts (`\|z\|≥2` price/volume, 168h lookback, 2h cooldown). |
 | 2026-07-19 | Opt-in personal books: Open account menu ($500/$1k/$2.5k); house book stays public journal; Accept/Reject (15m) + decision chart; `/me` magic-link ledger; missed-connection Join at +0.5R; migrate legacy Funders to $1k accounts. |

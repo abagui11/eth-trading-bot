@@ -88,7 +88,7 @@ For the beta, keep `PAYWALL_ENABLED=false`. Anyone with the bot link can send `/
 
 Optional: set `ME_TOKEN_SECRET` in `.env` for `/me` HMAC links (defaults to `TELEGRAM_BOT_TOKEN` if unset).
 
-**Open account** creates a personal demo paper book ($500 / $1,000 / $2,500 once). Demo capital — not real funding. Legacy users who Funded before are migrated to a $1,000 personal account (`python deploy/migrate_personal_accounts.py`, also runs on `paper.init_db`). Trade suggestions include Accept/Reject; only Accept deploys that user's cash. The public dashboard shows the **agent/house** journal plus participation aggregates; personal equity is on `/me` via **My book**.
+**Open account** creates a personal demo paper book ($500 / $1,000 / $2,500 once). Demo capital — not real funding. Legacy users who Funded before are migrated to a $1,000 personal account (`python deploy/migrate_personal_accounts.py`, also runs on `paper.init_db`). Trade suggestions arrive as a **concise card** (decision chart + friendly caption with Accept / Reject / **See more**). Only Accept deploys that user's cash. **See more** loads the detailed charts and full audited rationale. The public dashboard shows the **agent/house** journal plus participation aggregates; personal equity is on `/me` via **My book**.
 
 ### 6. Start the service
 

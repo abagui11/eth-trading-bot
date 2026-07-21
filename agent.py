@@ -10,6 +10,7 @@ import audit
 import bot_config
 import charts
 import critic
+import display_summary
 import ledger
 import notify
 import paper
@@ -161,7 +162,17 @@ def run_cycle() -> list[tuple[Suggestion, list[str]]] | None:
                 spots=spots,
             )
             offer_id = None
+            card_summary = None
             if suggestion.action != "no_trade":
+                try:
+                    card_summary = display_summary.generate_display_summary(
+                        suggestion
+                    )
+                except Exception:
+                    logger.exception(
+                        "Display summary generation failed for %s", product_cycle_id
+                    )
+                    card_summary = None
                 house_pos_id = user_books.find_house_position_id_for_cycle(
                     product_cycle_id
                 )
@@ -170,6 +181,7 @@ def run_cycle() -> list[tuple[Suggestion, list[str]]] | None:
                     suggestion=suggestion,
                     chart_paths=output_paths,
                     house_position_id=house_pos_id,
+                    display_summary=card_summary,
                 )
                 if offer:
                     offer_id = offer["offer_id"]
@@ -216,6 +228,7 @@ def run_cycle() -> list[tuple[Suggestion, list[str]]] | None:
                         output_paths,
                         pnl_footer=pnl_footer,
                         offer_id=offer_id,
+                        display_summary_text=card_summary,
                     )
                 else:
                     logger.info(

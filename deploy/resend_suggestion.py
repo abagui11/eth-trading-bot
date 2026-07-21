@@ -61,7 +61,14 @@ async def _send_full(
         await _send_text(bot, user_id, suggestion, footer)
         return
     try:
-        await notify.send_suggestion_to_chat(bot, user_id, suggestion, chart_path, footer)
+        await notify.send_suggestion_to_chat(
+            bot,
+            user_id,
+            suggestion,
+            chart_path,
+            footer,
+            include_full_rationale=True,
+        )
     except Exception:
         print(f"  photo failed for {user_id}, falling back to text")
         await _send_text(bot, user_id, suggestion, footer)

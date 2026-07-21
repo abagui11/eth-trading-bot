@@ -21,6 +21,7 @@ CB_TRADE_YES_PREFIX = "trade:yes:"
 CB_TRADE_NO_PREFIX = "trade:no:"
 CB_TRADE_JOIN_PREFIX = "trade:join:"
 CB_TRADE_SKIP_PREFIX = "trade:skip:"
+CB_TRADE_MORE_PREFIX = "trade:more:"
 
 WELCOME_MESSAGE = (
     "Welcome to the ETH/BTC Trading Agent (beta).\n\n"
@@ -95,7 +96,12 @@ def trade_decision_keyboard(offer_id: str) -> InlineKeyboardMarkup:
                 InlineKeyboardButton(
                     "Reject", callback_data=f"{CB_TRADE_NO_PREFIX}{offer_id}"
                 ),
-            ]
+            ],
+            [
+                InlineKeyboardButton(
+                    "See more", callback_data=f"{CB_TRADE_MORE_PREFIX}{offer_id}"
+                ),
+            ],
         ]
     )
 

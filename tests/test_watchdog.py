@@ -320,9 +320,16 @@ class WatchdogNotifyTests(unittest.TestCase):
             take_profits=[2500.0],
             risk_reward=2.0,
             rationale="[Watchdog — m5_ob_fib_long]\n\nSetup.",
+            product_id="ETH-USD",
         )
         caption = build_caption(suggestion)
-        self.assertTrue(caption.startswith("WATCHDOG — SPOT_BUY"))
+        self.assertTrue(caption.startswith("ETH Spot Buy"))
+        self.assertIn("Potential entry near $2,400.00", caption)
+        # Detail message (See more) still uses WATCHDOG prefix.
+        from notify import build_rationale_message
+
+        detail = build_rationale_message(suggestion, "PnL")
+        self.assertIn("WATCHDOG — SPOT_BUY", detail)
 
     def test_send_suggestion_handles_empty_paths(self) -> None:
         import asyncio
@@ -346,3 +353,6 @@ class WatchdogNotifyTests(unittest.TestCase):
             send_suggestion_to_chat(bot, 123, suggestion, [], "PnL footer")
         )
         bot.send_message.assert_called_once()
+        text = bot.send_message.call_args.kwargs["text"]
+        self.assertIn("Spot Buy", text)
+        self.assertNotIn("Why this trade", text)

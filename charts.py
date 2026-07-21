@@ -654,10 +654,56 @@ def _draw_detected_overlays(
       continue
 
 
+def _decision_window_bars(
+  bars: list[dict],
+  *,
+  source_ts: str | None = None,
+  min_bars: int = 72,
+  max_bars: int = 120,
+  pre_event_buffer: int = 12,
+) -> list[dict]:
+  """Slice M5 bars so the setup source stays visible when possible.
+
+  Always ends at the latest bar. If the source is older than ``max_bars``,
+  prefer recent price action (HTF proof charts cover older context).
+  """
+  if not bars:
+    return bars
+  n = len(bars)
+  default_n = min(max(min_bars, 60), max_bars, n)
+  end = n
+
+  source_idx = None
+  if source_ts:
+    for i, bar in enumerate(bars):
+      if str(bar.get("ts") or "") == str(source_ts):
+        source_idx = i
+        break
+    if source_idx is None:
+      needle = str(source_ts)[:16]
+      for i, bar in enumerate(bars):
+        if str(bar.get("ts") or "")[:16] == needle:
+          source_idx = i
+          break
+
+  if source_idx is None:
+    return bars[-default_n:]
+
+  start = max(0, source_idx - pre_event_buffer)
+  if end - start < min_bars:
+    start = max(0, end - min_bars)
+  if end - start > max_bars:
+    # Keep the right edge (now); source may fall outside for very old setups.
+    start = end - max_bars
+  return bars[start:end]
+
+
 def build_decision_chart(
   suggestion: Suggestion,
   data: dict[str, list[dict]],
   cycle_id: str,
+  *,
+  source_ts: str | None = None,
 ) -> str | None:
   """Tinder-style profile chart: clean candles + forward SL/TP1 risk bands.
 
@@ -679,8 +725,11 @@ def build_decision_chart(
   if not bars:
     return None
 
-  # Keep the last ~60 bars for a readable decision frame.
-  window = bars[-60:] if len(bars) > 60 else bars
+  src = source_ts
+  if src is None:
+    ob = suggestion.order_block or {}
+    src = ob.get("start_ts") or ob.get("displacement_ts") or ob.get("end_ts")
+  window = _decision_window_bars(bars, source_ts=str(src) if src else None)
   df = _to_mpf_df(window)
   label = _chart_label(getattr(suggestion, "product_id", None))
   slug = _product_slug(getattr(suggestion, "product_id", None))
@@ -761,6 +810,44 @@ def build_decision_chart(
       ),
       clip_on=False,
     )
+
+  # Percentage annotations centered in the SL / TP rectangles.
+  side = suggestion.action
+  if side in ("spot_buy", "deriv_buy"):
+    tp_pct = (tp1 - entry) / entry * 100.0
+    sl_pct = (entry - stop) / entry * 100.0
+  else:
+    tp_pct = (entry - tp1) / entry * 100.0
+    sl_pct = (stop - entry) / entry * 100.0
+
+  sl_mid_y = (downside_low + downside_high) / 2.0
+  tp_mid_y = (upside_low + upside_high) / 2.0
+  ax_price.text(
+    x_mid,
+    sl_mid_y,
+    f"{-abs(sl_pct):+.2f}% to SL",
+    color="#7A0000",
+    fontsize=FONT_SIZE,
+    fontweight="bold",
+    va="center",
+    ha="center",
+    zorder=5,
+    alpha=0.95,
+    clip_on=False,
+  )
+  ax_price.text(
+    x_mid,
+    tp_mid_y,
+    f"{abs(tp_pct):+.2f}% to TP1",
+    color="#0F5A0F",
+    fontsize=FONT_SIZE,
+    fontweight="bold",
+    va="center",
+    ha="center",
+    zorder=5,
+    alpha=0.95,
+    clip_on=False,
+  )
 
   _fwd_level(entry, f"Entry {entry:,.2f}", "#111111")
   _fwd_level(stop, f"SL {stop:,.2f}", "#CC0000")
@@ -924,10 +1011,18 @@ def build_trade_broadcast_charts(
   htf_zones: list[HTFZone],
   cycle_id: str,
   market_context: MarketContext | None = None,
+  *,
+  source_ts: str | None = None,
 ) -> list[str]:
   """Decision chart first, then structure/entry proof charts."""
   paths: list[str] = []
-  decision = build_decision_chart(suggestion, data, cycle_id)
+  src = source_ts
+  if src is None:
+    ob = suggestion.order_block or {}
+    src = ob.get("start_ts") or ob.get("displacement_ts") or ob.get("end_ts")
+  decision = build_decision_chart(
+    suggestion, data, cycle_id, source_ts=str(src) if src else None
+  )
   if decision:
     paths.append(decision)
   paths.extend(

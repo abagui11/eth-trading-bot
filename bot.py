@@ -379,6 +379,31 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
         )
         return
 
+    if data.startswith(telegram_ui.CB_TRADE_MORE_PREFIX):
+        offer_id = data[len(telegram_ui.CB_TRADE_MORE_PREFIX) :]
+        offer = user_books.get_offer(offer_id)
+        if offer is None:
+            await context.bot.send_message(
+                chat_id,
+                "Could not find that trade offer.",
+                reply_markup=telegram_ui.main_keyboard(),
+            )
+            return
+        try:
+            spots = research.get_spot_prices()
+            footer = paper.format_pnl_footer(spots=spots)
+            await notify.send_offer_details_to_chat(
+                context.bot, chat_id, offer, pnl_footer=footer
+            )
+        except Exception:
+            logger.exception("See more failed for offer %s", offer_id)
+            await context.bot.send_message(
+                chat_id,
+                "Could not load trade details right now.",
+                reply_markup=telegram_ui.main_keyboard(),
+            )
+        return
+
     if data == telegram_ui.CB_RESEARCH:
         catalog = research_router.build_catalog()
         text = f"{telegram_ui.RESEARCH_HELP}\n\n{catalog}"
