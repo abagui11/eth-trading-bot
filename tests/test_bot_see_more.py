@@ -96,14 +96,6 @@ class SeeMoreCallbackTests(unittest.TestCase):
         with (
             patch.object(bot_mod.access, "register_user"),
             patch.object(bot_mod.access, "is_allowed", return_value=True),
-            patch.object(
-                bot_mod.research,
-                "get_spot_prices",
-                return_value={"ETH-USD": 1900.0, "BTC-USD": 65000.0},
-            ),
-            patch.object(
-                bot_mod.paper, "format_pnl_footer", return_value="Paper PnL: n/a"
-            ),
         ):
             asyncio.run(bot_mod.on_callback(update, context))
 
@@ -114,6 +106,8 @@ class SeeMoreCallbackTests(unittest.TestCase):
         self.assertIn("Why this trade", text)
         self.assertIn("Market context", text)
         self.assertIn("Entry: 65,087.87", text)
+        self.assertIn("BTC", text)
+        self.assertNotIn("Paper PnL", text)
         # Original Accept window / decision is untouched — See more only reads.
         decision = user_books.get_offer(offer["offer_id"])
         self.assertEqual(decision["display_summary"], "Friendly blurb.")

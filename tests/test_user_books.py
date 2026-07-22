@@ -206,6 +206,80 @@ class UserBooksTests(unittest.TestCase):
         self.assertIn("Canonical long thesis", suggestion.rationale)
         self.assertNotEqual(suggestion.rationale, offer.get("display_summary"))
 
+    def test_create_trade_offer_is_immutable(self) -> None:
+        """See more reads the live offer row — overwriting it shows the wrong trade."""
+        first = user_books.create_trade_offer(
+            cycle_id="20260722T100000Z_BTC",
+            suggestion=_long_suggestion(
+                rationale="First BTC thesis",
+                entry=65000.0,
+                stop_loss=64000.0,
+                product_id="BTC-USD",
+            ),
+            chart_paths=[
+                "/charts/a_M5_decision.png",
+                "/charts/a_H4_structure.png",
+                "/charts/a_M5_entry.png",
+            ],
+            display_summary="First blurb.",
+        )
+        assert first is not None
+        second_suggestion = Suggestion(
+            action="spot_sell",
+            size=250.0,
+            entry=66000.0,
+            stop_loss=67000.0,
+            take_profits=[64000.0],
+            risk_reward=1.5,
+            rationale="Second overwritten thesis",
+            product_id="BTC-USD",
+        )
+        second = user_books.create_trade_offer(
+            cycle_id="20260722T100000Z_BTC",
+            suggestion=second_suggestion,
+            chart_paths=[
+                "/charts/b_M5_decision.png",
+                "/charts/b_H4_structure.png",
+                "/charts/b_M5_entry.png",
+            ],
+            display_summary="Second blurb.",
+        )
+        assert second is not None
+        self.assertEqual(second["offer_id"], first["offer_id"])
+        self.assertEqual(second.get("display_summary"), "First blurb.")
+        suggestion = user_books.offer_suggestion(second)
+        self.assertIn("First BTC thesis", suggestion.rationale)
+        self.assertAlmostEqual(float(suggestion.entry or 0), 65000.0)
+        self.assertEqual(second.get("structure_chart_path"), "/charts/a_H4_structure.png")
+        self.assertEqual(second.get("entry_chart_path"), "/charts/a_M5_entry.png")
+
+    def test_classify_offer_chart_paths_uses_basename_suffix(self) -> None:
+        decision, structure, entry = user_books._classify_offer_chart_paths(
+            [
+                r"C:\repo\entry_backup\20260722T100000Z_BTC_BTC_USD_M5_decision.png",
+                r"C:\repo\entry_backup\20260722T100000Z_BTC_BTC_USD_H4_structure.png",
+                r"C:\repo\entry_backup\20260722T100000Z_BTC_BTC_USD_M5_entry.png",
+            ]
+        )
+        self.assertTrue(str(decision).endswith("_M5_decision.png"))
+        self.assertTrue(str(structure).endswith("_H4_structure.png"))
+        self.assertTrue(str(entry).endswith("_M5_entry.png"))
+
+    def test_offer_suggestion_falls_back_to_offer_product_id(self) -> None:
+        offer = {
+            "product_id": "BTC-USD",
+            "suggestion": {
+                "action": "spot_sell",
+                "size": 100.0,
+                "entry": 65000.0,
+                "stop_loss": 66000.0,
+                "take_profits": [64000.0],
+                "rationale": "btc short",
+            },
+        }
+        suggestion = user_books.offer_suggestion(offer)
+        self.assertEqual(suggestion.product_id, "BTC-USD")
+
 
 class DecisionChartTests(unittest.TestCase):
     def test_build_decision_chart_long(self) -> None:

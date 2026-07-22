@@ -231,7 +231,7 @@ Writers → stores:
 | `paper` | hourly cycle, watchdog | dashboard, Telegram |
 | `paper_contributions` | House seed; legacy Fund rows (migration source) | Migrate script; house seed |
 | `user_accounts` / `user_positions` / `user_trades` | Open account; Accept / late-join | Telegram My Metrics; `/me` |
-| `trade_offers` / `trade_decisions` | Hourly + watchdog after house `paper.update`; `display_summary` sibling field | Accept/Reject/See more; participation strip; missed-connection |
+| `trade_offers` / `trade_decisions` | Hourly + watchdog after house `paper.update`; `display_summary` sibling field; offers immutable after create | Accept/Reject/See more; participation strip; missed-connection |
 | `audit_snapshots` | hourly cycle | dashboard, chat, monitor |
 | `audit_verdicts` | hourly monitor, chat audit | dashboard |
 | `chat_audits` | chat Q&A | — |
@@ -336,6 +336,7 @@ Defaults from `bot_config.py` (non-secret tunables). Secrets and portfolio size 
 
 | Date | Change |
 |---|---|
+| 2026-07-22 | Fix Telegram See more wrong-trade: trade offers are immutable after create (no `INSERT OR REPLACE`), chart roles classified by basename suffix, See more omits house PnL footer that could describe another product, and dashboard convention resolver accepts `{cycle}_{PRODUCT_USD}_{tf}_{kind}` broadcast filenames. |
 | 2026-07-21 | `deploy/rescore_macro_events.py`: one-off backfill that re-scores recent `ignored` macro headlines with the current keyword set and classifies any that now clear `MACRO_LLM_PROMOTE_THRESHOLD`. Fixes CLARITY Act headlines staying invisible because keyword edits are not retroactive and the 7-day URL-hash dedup blocks re-ingest. Documented in `CLOUD.md` (run after any `macro/keywords.py` change). |
 | 2026-07-21 | Trading Guide: impulse asymmetry (bull vs bear regime) — Week∩Month structure defines regime; with-trend legs impulsive / counter-legs corrective; conviction favors with-regime M5 OB/SFP entries and fade-the-slow-leg; confirmed structure-shift expects impulsive reverse displacement (trade with it, don’t fade first leg). Sizing unchanged (fixed-fraction). |
 | 2026-07-21 | Macro keyword rebalance (`macro/keywords.py`): promoted bullish legislative/regulatory catalysts to Tier 1 (`clarity act`, `genius act`, `stablecoin bill`, `market structure bill/act`, `crypto legislation`, `signed into law`, `senate/house passes`) so pro-crypto catalysts clear `MACRO_LLM_PROMOTE_THRESHOLD` at the same weight as bearish enforcement; added legislative T2 terms (`legislation`, `lawmakers`, `congress`, `senate`, `bessent`, `regulatory`) and phrases (`market structure`, `regulatory clarity`, `crypto bill`, `treasury secretary`). Fixes CLARITY Act headlines scoring ~20–25 (ignored) while the classifier stayed geopolitics/Iran-skewed. Thresholds unchanged. |

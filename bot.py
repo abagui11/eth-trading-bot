@@ -390,11 +390,7 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
             )
             return
         try:
-            spots = research.get_spot_prices()
-            footer = paper.format_pnl_footer(spots=spots)
-            await notify.send_offer_details_to_chat(
-                context.bot, chat_id, offer, pnl_footer=footer
-            )
+            await notify.send_offer_details_to_chat(context.bot, chat_id, offer)
         except Exception:
             logger.exception("See more failed for offer %s", offer_id)
             await context.bot.send_message(

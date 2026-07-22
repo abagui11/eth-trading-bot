@@ -88,6 +88,13 @@ class DashboardChartResolveTests(unittest.TestCase):
             f"/api/chart/{cycle}?kind=entry&tf=M5",
         )
 
+    def test_convention_chart_path_accepts_broadcast_slug(self) -> None:
+        cycle = "20260722T110000Z_BTC"
+        path = self._charts / f"{cycle}_BTC_USD_M5_entry.png"
+        path.write_bytes(b"\x89PNG\r\n")
+        resolved = convention_chart_path(cycle, "M5", "entry")
+        self.assertEqual(resolved, path.resolve())
+
 
 class DashboardEnrichmentTests(unittest.TestCase):
     def setUp(self) -> None:

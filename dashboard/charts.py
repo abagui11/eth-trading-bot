@@ -29,10 +29,27 @@ def resolve_chart_path(raw: str | None) -> Path | None:
 
 
 def convention_chart_path(cycle_id: str, tf: str, kind: str) -> Path | None:
-    """Resolve `{cycle_id}_{tf}_{kind}.png` under CHARTS_DIR."""
+    """Resolve trade chart under CHARTS_DIR.
+
+    Tries both naming schemes:
+      - `{cycle_id}_{tf}_{kind}.png` (legacy / outcome)
+      - `{cycle_id}_{PRODUCT_USD}_{tf}_{kind}.png` (broadcast charts)
+    """
     if not cycle_id or tf not in VALID_TFS or kind not in VALID_KINDS:
         return None
-    return resolve_chart_path(str(config.CHARTS_DIR / f"{cycle_id}_{tf}_{kind}.png"))
+    root = config.CHARTS_DIR
+    candidates = [root / f"{cycle_id}_{tf}_{kind}.png"]
+    # Broadcast charts insert a product slug between cycle_id and timeframe.
+    upper = cycle_id.upper()
+    if upper.endswith("_ETH"):
+        candidates.append(root / f"{cycle_id}_ETH_USD_{tf}_{kind}.png")
+    elif upper.endswith("_BTC"):
+        candidates.append(root / f"{cycle_id}_BTC_USD_{tf}_{kind}.png")
+    for candidate in candidates:
+        path = resolve_chart_path(str(candidate))
+        if path is not None:
+            return path
+    return None
 
 
 def latest_marked_h4_path(product_id: str) -> Path | None:

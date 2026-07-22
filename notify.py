@@ -79,7 +79,8 @@ def build_rationale_message(suggestion: Suggestion, pnl_footer: str) -> str:
         elif not body:
             sections.append(f"{why_label}\n{format_rationale_text(raw)}")
         parts.append("\n\n".join(sections))
-    parts.append(pnl_footer)
+    if pnl_footer and str(pnl_footer).strip():
+        parts.append(str(pnl_footer).strip())
     return "\n\n".join(parts)[:4096]
 
 
@@ -202,20 +203,23 @@ async def send_offer_details_to_chat(
     *,
     pnl_footer: str | None = None,
 ) -> None:
-    """See more: structure/entry charts + exact levels + full canonical rationale."""
+    """See more: structure/entry charts + exact levels + full canonical rationale.
+
+    House-book PnL is omitted — it can describe a different open product and look
+    like the wrong trade under the cover card. ``pnl_footer`` is accepted for
+    call-site compatibility but ignored.
+    """
+    del pnl_footer  # See more is offer-scoped only.
     suggestion = user_books.offer_suggestion(offer)
-    footer = pnl_footer or paper.format_pnl_footer()
     detail_paths: list[str] = []
     for key in ("structure_chart_path", "entry_chart_path"):
         path = offer.get(key)
         if path and Path(str(path)).exists():
             detail_paths.append(str(path))
 
+    title = display_summary.friendly_title(suggestion)
     for i, chart_path in enumerate(detail_paths):
-        caption = (
-            f"{display_summary.friendly_title(suggestion)} — detail "
-            f"{i + 1}/{len(detail_paths)}"
-        )
+        caption = f"{title} — detail {i + 1}/{len(detail_paths)}"
         try:
             await send_photo_with_caption(bot, chat_id, chart_path, caption)
         except Exception:
@@ -223,7 +227,7 @@ async def send_offer_details_to_chat(
                 "See more chart send failed for chat %s (%s)", chat_id, chart_path
             )
 
-    text = build_rationale_message(suggestion, footer)
+    text = build_rationale_message(suggestion, pnl_footer="")
     await bot.send_message(chat_id=chat_id, text=text[:4096])
 
 

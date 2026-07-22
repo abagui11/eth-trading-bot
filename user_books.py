@@ -12,6 +12,7 @@ import logging
 import sqlite3
 import time
 from datetime import datetime, timedelta, timezone
+from pathlib import Path
 from typing import Any
 from urllib.parse import urlencode
 
@@ -523,6 +524,35 @@ def suggestion_to_snapshot(suggestion: Suggestion) -> dict:
     }
 
 
+def _classify_offer_chart_paths(
+    chart_paths: list[str],
+) -> tuple[str | None, str | None, str | None]:
+    """Map broadcast chart paths to decision / structure / entry roles.
+
+    Classifies on the basename suffix only so directory names cannot steal a
+    match, and so ``..._M5_decision.png`` is never treated as an entry chart.
+    """
+    decision = None
+    structure = None
+    entry_chart = None
+    paths = [str(p) for p in chart_paths if p and str(p) != "watchdog"]
+    for path in paths:
+        name = Path(path).name.lower()
+        if name.endswith("_decision.png") and decision is None:
+            decision = path
+        elif name.endswith("_structure.png") and structure is None:
+            structure = path
+        elif name.endswith("_entry.png") and entry_chart is None:
+            entry_chart = path
+    if decision is None and paths:
+        decision = paths[0]
+    if structure is None and len(paths) > 1:
+        structure = paths[1]
+    if entry_chart is None and len(paths) > 2:
+        entry_chart = paths[2]
+    return decision, structure, entry_chart
+
+
 def create_trade_offer(
     *,
     cycle_id: str,
@@ -532,7 +562,12 @@ def create_trade_offer(
     expires_at: str | None = None,
     display_summary: str | None = None,
 ) -> dict | None:
-    """Persist a swipeable offer for a trade suggestion. Returns offer row or None."""
+    """Persist a swipeable offer for a trade suggestion. Returns offer row or None.
+
+    Offers are immutable once created: Telegram cover cards embed ``offer_id`` in
+    See more / Accept callbacks, so replacing the row would make those buttons
+    return a different trade's charts and rationale.
+    """
     if suggestion.action not in TRADE_ACTIONS:
         return None
     if suggestion.entry is None or suggestion.stop_loss is None:
@@ -540,6 +575,14 @@ def create_trade_offer(
 
     init_db()
     offer_id = str(cycle_id)
+    existing = get_offer(offer_id)
+    if existing is not None:
+        logger.warning(
+            "Trade offer %s already exists — keeping original (immutable for See more)",
+            offer_id,
+        )
+        return existing
+
     created = _now()
     if expires_at is None:
         exp_dt = datetime.now(timezone.utc) + timedelta(
@@ -547,29 +590,13 @@ def create_trade_offer(
         )
         expires_at = exp_dt.strftime("%Y-%m-%dT%H:%M:%SZ")
 
-    decision = None
-    structure = None
-    entry_chart = None
-    for path in chart_paths:
-        name = str(path).lower()
-        if "decision" in name and decision is None:
-            decision = path
-        elif "structure" in name and structure is None:
-            structure = path
-        elif "entry" in name and entry_chart is None:
-            entry_chart = path
-    if decision is None and chart_paths:
-        decision = chart_paths[0]
-    if structure is None and len(chart_paths) > 1:
-        structure = chart_paths[1]
-    if entry_chart is None and len(chart_paths) > 2:
-        entry_chart = chart_paths[2]
+    decision, structure, entry_chart = _classify_offer_chart_paths(list(chart_paths))
 
     snap = suggestion_to_snapshot(suggestion)
     with _connect() as conn:
         conn.execute(
             """
-            INSERT OR REPLACE INTO trade_offers (
+            INSERT INTO trade_offers (
                 offer_id, cycle_id, product_id, suggestion_json,
                 decision_chart_path, structure_chart_path, entry_chart_path,
                 created_at, expires_at, house_position_id, missed_connection_sent,
@@ -621,8 +648,11 @@ def get_offer(offer_id: str) -> dict | None:
 
 
 def offer_suggestion(offer: dict) -> Suggestion:
-    return Suggestion.from_dict(offer.get("suggestion") or {})
-
+    data = dict(offer.get("suggestion") or {})
+    # Prefer the offer row's product when the snapshot omitted it (defaults to ETH).
+    if not data.get("product_id") and offer.get("product_id"):
+        data["product_id"] = offer["product_id"]
+    return Suggestion.from_dict(data)
 
 def _offer_expired(offer: dict) -> bool:
     exp = _parse_ts(offer.get("expires_at"))
