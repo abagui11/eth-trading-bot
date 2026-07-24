@@ -3,7 +3,7 @@
 > Single source of truth for architecture and status of the Telegram trading bot.
 > See **Documentation maintenance** below — update this file (and related deploy docs) whenever behaviour changes.
 
-**Last updated:** 2026-07-22
+**Last updated:** 2026-07-23
 
 ---
 
@@ -58,7 +58,7 @@ flowchart TD
 
     TG --> CHAT[Chat Q&A<br/>bot.py on_text]
     TG --> TGUI[Inline keyboard<br/>Open account · My Metrics · My book · Journal · Research]
-    TG --> RESEARCH["/research grounded SFP studies<br/>ohlc vault + sfp_index"]
+    TG --> RESEARCH["/research grounded studies<br/>snapshots + SFP + asian_session"]
     HJ --> HOURLY[Hourly cycle<br/>agent.run_cycle]
     WJ --> WATCH[Watchdog<br/>no LLM, sub-hourly]
     DATA --> HOURLY
@@ -266,7 +266,7 @@ Legend: ✅ done · 🟡 in progress · 🔧 needs work · ⬜ planned · ⚠️
 | OHLC history vault | `ohlc_cache.py`, `backfill.py` | ✅ | ETH+BTC H1/D1 cache; W1/H12 derived; `--product` CLI |
 | SFP pattern index | `patterns/sfp_index.py` | ✅ | deterministic `sfp_events` in ohlc.db; rebuild on backfill/study |
 | Chat Q&A | `bot.py`, `chat.py` | ✅ | snapshot-grounded + chat audit |
-| Telegram research | `research_reports/`, `metrics/`, `analytics.py` | ✅ | `/research` catalog; d1/w1/h12 SFP + invalidations; ETH/BTC |
+| Telegram research | `research_reports/`, `metrics/`, `analytics.py` | ✅ | `/research` catalog; snapshots + asian_session; d1/w1/h12 SFP + invalidations; ETH/BTC |
 | Z-Move alerts | `zmove.py` | ✅ | ETH H1 \|z\|≥2 price/volume → subscriber broadcast + cooldown |
 | Persistence | `ledger.py`, `audit.py`, `paper.py`, `user_books.py` | ✅ | SQLite |
 | Paper trading | `paper.py` | ✅ | house multi-asset book; fixed 25% deploy; qty caps; FIFO; staged TP scale-out; outcome charts |
@@ -346,6 +346,7 @@ Defaults from `bot_config.py` (non-secret tunables). Secrets and portfolio size 
 
 | Date | Change |
 |---|---|
+| 2026-07-23 | `/research asian_session` — BTC/ETH Asian session (21:00–04:00 ET) net-change windows for 2 weeks / 4 weeks / 2 months from live Coinbase H1; NL keywords route “asian session” asks out of freeform chat; default product BTC. |
 | 2026-07-22 | Paper-audit strategy guards: watchdog paper execute default **off** (scan/shadow + dashboard/`/watchdog` toggle); `WATCHDOG_ALLOW_SHORTS=False`; underwater scale-ins blocked (< +0.5R); stop floor 0.8%; hard audit block on remaining critical findings; ledger `executed`/`trigger_name`/`macro_json`; LLM `macro_note` required when macro injected; macro `tighten_sl` ratchets house stops; MFE/MAE + HTF regime tags (`htf_bull`/`htf_bear`/`htf_mixed`); gate-tag pollution fixed. |
 | 2026-07-22 | Fix Telegram See more wrong-trade: trade offers are immutable after create (no `INSERT OR REPLACE`), chart roles classified by basename suffix, See more omits house PnL footer that could describe another product, and dashboard convention resolver accepts `{cycle}_{PRODUCT_USD}_{tf}_{kind}` broadcast filenames. |
 | 2026-07-21 | `deploy/rescore_macro_events.py`: one-off backfill that re-scores recent `ignored` macro headlines with the current keyword set and classifies any that now clear `MACRO_LLM_PROMOTE_THRESHOLD`. Fixes CLARITY Act headlines staying invisible because keyword edits are not retroactive and the 7-day URL-hash dedup blocks re-ingest. Documented in `CLOUD.md` (run after any `macro/keywords.py` change). |

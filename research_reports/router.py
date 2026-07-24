@@ -17,7 +17,15 @@ from research_reports.catalog import (
     not_indexed_message,
 )
 from research_reports.format import ResearchReport
-from research_reports.topics import digest, dominance, funding, macro, miner, volume
+from research_reports.topics import (
+    asian_session,
+    digest,
+    dominance,
+    funding,
+    macro,
+    miner,
+    volume,
+)
 
 ReportBuilder = Callable[[], ResearchReport]
 
@@ -29,6 +37,8 @@ _SNAPSHOT_BUILDERS: dict[str, ReportBuilder] = {
     "dominance": dominance.build_dominance_report,
     "miner": miner.build_miner_report,
 }
+
+_ASIAN_SESSION_DEFAULT_PRODUCT = "BTC-USD"
 
 
 def resolve_topic(text: str) -> str | None:
@@ -89,6 +99,12 @@ def build_report(
             ],
             sources=["Trading Guide backlog"],
         )
+
+    if topic_id == "asian_session":
+        product = product_id or parse_product_id(
+            text, default=_ASIAN_SESSION_DEFAULT_PRODUCT
+        )
+        return asian_session.build_asian_session_report(product_id=product)
 
     if topic_id in _SNAPSHOT_BUILDERS:
         return _SNAPSHOT_BUILDERS[topic_id]()

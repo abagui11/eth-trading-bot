@@ -65,6 +65,24 @@ TOPICS: dict[str, TopicSpec] = {
         aliases=("miner_breakeven", "hashprice", "breakeven"),
         keywords=("miner breakeven", "hashprice", "mining breakeven", "miner cost"),
     ),
+    "asian_session": TopicSpec(
+        topic_id="asian_session",
+        label="Asian session",
+        description="Asian session (9pm–4am ET) net change — 2w / 4w / 2m",
+        category="snapshot",
+        aliases=("asia_session", "asian", "tokyo_session", "asia"),
+        keywords=(
+            "asian session",
+            "asia session",
+            "tokyo session",
+            "asian range",
+            "asia range",
+            "overnight session",
+            "9pm-4am",
+            "9pm–4am",
+            "21:00-04:00",
+        ),
+    ),
     "h12_sfp": TopicSpec(
         topic_id="h12_sfp",
         label="H12 SFP study",
@@ -157,12 +175,13 @@ def format_catalog() -> str:
             "Examples:",
             '  "What\'s ETH funding right now?"',
             '  "BTC dominance and USDT dominance"',
+            '  "Asian session net change on BTC"',
             '  "What % of H12 SFPs reversed in 4 years?"',
             '  "/research d1_sfps 5 BTC"',
             '  "Last 10 times an H12 SFP was invalidated"',
             "",
-            "Product: add ETH or BTC (default ETH). Studies use the SFP index.",
-            "Not financial advice.",
+            "Product: add ETH or BTC (default ETH; asian_session defaults BTC).",
+            "Studies use the SFP index. Not financial advice.",
         ]
     )
     return "\n".join(lines)

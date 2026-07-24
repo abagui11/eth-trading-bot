@@ -37,9 +37,9 @@ WELCOME_MESSAGE = (
 
 RESEARCH_HELP = (
     "Research — how to use it\n\n"
-    "• /research — topic catalog (digest, funding, volume, dominance, macro, SFP studies)\n"
+    "• /research — topic catalog (digest, funding, volume, dominance, macro, asian_session, SFP studies)\n"
     "• /research funding — run a specific topic\n"
-    "• Or ask in plain English: \"What's ETH funding?\" / \"weekly SFP study\"\n\n"
+    "• Or ask in plain English: \"What's ETH funding?\" / \"Asian session BTC\" / \"weekly SFP study\"\n\n"
     "Research is read-only context for the paper strategy; it does not move the portfolio."
 )
 

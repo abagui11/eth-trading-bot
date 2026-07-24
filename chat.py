@@ -46,6 +46,7 @@ Be concise and practical. For market context digests and historical pattern rese
 direct users to /research (topic catalog). Examples:
 - /research digest — full market snapshot
 - /research macro, funding, volume, dominance, miner — individual topics
+- /research asian_session — Asian session (9pm–4am ET) net change 2w/4w/2m (default BTC)
 - /research h12_sfp, weekly_sfp, d1_sfps — SFP studies with charts
 - /research h12_invalidations, w1_invalidations — invalidation follow-ups
 - Add ETH or BTC (default ETH); e.g. /research d1_sfps 5 BTC
