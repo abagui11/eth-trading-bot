@@ -9,6 +9,7 @@ import anthropic
 
 import bot_config
 import config
+from analyze import log_anthropic_usage
 from critic import split_rationale
 from models import Suggestion
 
@@ -168,11 +169,12 @@ def generate_llm_setup_blurb(suggestion: Suggestion) -> str | None:
     try:
         client = anthropic.Anthropic(api_key=config.ANTHROPIC_API_KEY)
         response = client.messages.create(
-            model=config.ANTHROPIC_MODEL,
+            model=config.ANTHROPIC_MODEL_FAST,
             max_tokens=220,
             system=SUMMARY_SYSTEM,
             messages=[{"role": "user", "content": user_prompt}],
         )
+        log_anthropic_usage(response, "display_summary")
     except Exception:
         logger.exception("Display summary LLM call failed")
         return None
@@ -186,9 +188,10 @@ def generate_llm_setup_blurb(suggestion: Suggestion) -> str | None:
 
 def generate_display_summary(suggestion: Suggestion) -> str:
     """Return friendly setup prose; never mutates suggestion.rationale."""
-    llm = generate_llm_setup_blurb(suggestion)
-    if llm:
-        return llm
+    if bot_config.USE_LLM_DISPLAY_SUMMARY:
+        llm = generate_llm_setup_blurb(suggestion)
+        if llm:
+            return llm
     return deterministic_setup_blurb(suggestion)
 
 

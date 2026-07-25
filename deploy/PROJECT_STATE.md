@@ -3,7 +3,7 @@
 > Single source of truth for architecture and status of the Telegram trading bot.
 > See **Documentation maintenance** below — update this file (and related deploy docs) whenever behaviour changes.
 
-**Last updated:** 2026-07-23
+**Last updated:** 2026-07-25
 
 ---
 
@@ -141,7 +141,7 @@ flowchart TD
     LG --> BC{BROADCAST_ONLY_TRADES<br/>and no_trade?}
     BC -->|skip| SKIP[no subscriber DM]
     BC -->|send|     OFFER[user_books.create_trade_offer]
-    OFFER --> SUM[display_summary hybrid LLM + fallback]
+    OFFER --> SUM[display_summary deterministic blurb<br/>optional LLM if USE_LLM_DISPLAY_SUMMARY]
     SUM --> BDM[notify.broadcast<br/>decision chart + concise card<br/>Accept/Reject/See more]
 ```
 
@@ -258,11 +258,11 @@ Legend: ✅ done · 🟡 in progress · 🔧 needs work · ⬜ planned · ⚠️
 | 24h range | `patterns/range_24h.py` | ✅ | computed on H1 bars |
 | Bearish retest state | `patterns/setup_state.py` | ✅ | |
 | Hourly cycle | `agent.py` | ✅ | dual ETH/BTC contexts, charts, per-product persistence/broadcast |
-| Trade proposal (LLM) | `analyze.py` | ✅ | one 0–2 trade multi-asset call; single-product critic retries |
+| Trade proposal (LLM) | `analyze.py` | ✅ | one 0–2 trade multi-asset call; single-product critic retries; pattern PNGs off by default |
 | Trade risk validation | `validate.py` | ✅ | stop dist, R/R, USD-notional sizing |
 | Refine / critic loop | `critic.py` | ✅ | pre-broadcast retries; context-conflict ack; thesis + Market context compose; post-cycle monitor |
 | Watchdog | `watchdog.py` | ✅ | loops ETH/BTC; one fire/product/tick; product cooldown; macro + ETH/BTC soft gates |
-| Macro context | `macro/` | ✅ | RSS poll, webhook ingest, keyword→Haiku classify, pulse, dashboard |
+| Macro context | `macro/` | ✅ | RSS poll, webhook ingest, keyword→`ANTHROPIC_MODEL_FAST` classify/pulse, dashboard |
 | OHLC history vault | `ohlc_cache.py`, `backfill.py` | ✅ | ETH+BTC H1/D1 cache; W1/H12 derived; `--product` CLI |
 | SFP pattern index | `patterns/sfp_index.py` | ✅ | deterministic `sfp_events` in ohlc.db; rebuild on backfill/study |
 | Chat Q&A | `bot.py`, `chat.py` | ✅ | snapshot-grounded + chat audit |
@@ -271,7 +271,7 @@ Legend: ✅ done · 🟡 in progress · 🔧 needs work · ⬜ planned · ⚠️
 | Persistence | `ledger.py`, `audit.py`, `paper.py`, `user_books.py` | ✅ | SQLite |
 | Paper trading | `paper.py` | ✅ | house multi-asset book; fixed 25% deploy; qty caps; FIFO; staged TP scale-out; outcome charts |
 | Personal books | `user_books.py` | ✅ | open-account sizes; offers; Accept/Reject/expire; late-join; user SL/TP; `/me` tokens; `display_summary` on offers |
-| Telegram beta UI | `bot.py`, `telegram_ui.py`, `display_summary.py` | ✅ | Open account / My Metrics / My book / Journal / Research; trade Yes/No/Join/See more; concise cards |
+| Telegram beta UI | `bot.py`, `telegram_ui.py`, `display_summary.py` | ✅ | Open account / My Metrics / My book / Journal / Research; trade Yes/No/Join/See more; concise cards (deterministic blurb by default) |
 | Decision chart | `charts.build_decision_chart` | ✅ | clean candles + red SL / green TP1 bands with % annotations; source/SL/TP-reference-aware M5 history (up to 300 bars) |
 | Dashboard | `dashboard/` | ✅ | public agent journal + participation aggregates; `/me` personal ledger |
 | Live execution | `execute.py` | ⬜ | shadow/live path not built |
@@ -293,8 +293,10 @@ Defaults from `bot_config.py` (non-secret tunables). Secrets and portfolio size 
 | `WATCHDOG_INTERVAL_SEC` | `60` | scan cadence (clamped 60–300s in `main.py`) |
 | `WATCHDOG_COOLDOWN_SEC` | `1800` (30m) | suppress repeat fire on same M5 OB |
 | `BROADCAST_ONLY_TRADES` | `True` | suppress `no_trade` subscriber DMs |
-| `RUN_LLM_CRITIC_PRE_BROADCAST` | `True` | run LLM critic in refine loop |
-| `MAX_REFINE_PASSES` | `3` | audit retry budget before downgrade |
+| `RUN_LLM_CRITIC_PRE_BROADCAST` | `False` | run LLM critic in refine loop (deterministic critic always runs) |
+| `MAX_REFINE_PASSES` | `1` | audit retry budget before downgrade |
+| `INCLUDE_PATTERN_IMAGES` | `False` | attach Trading Guide reference PNGs to vision calls |
+| `USE_LLM_DISPLAY_SUMMARY` | `False` | LLM trade-card blurbs; else deterministic setup blurb |
 | `MAX_OPEN_TRADES` | `20` | paper FIFO cap |
 | `ENTRY_FIB_LOW` / `ENTRY_FIB_HIGH` | `0.25` / `0.50` | M5 OB entry band; watchdog tranches at each level |
 | `ADD_FIB_LEVEL` | `0.718` | scale-in adds another `TRADE_DEPLOY_PCT` (1.25× max base exposure) |
@@ -346,6 +348,7 @@ Defaults from `bot_config.py` (non-secret tunables). Secrets and portfolio size 
 
 | Date | Change |
 |---|---|
+| 2026-07-25 | Token-cost controls: `INCLUDE_PATTERN_IMAGES=False` (no reference PNGs on vision calls); `ANTHROPIC_MODEL_FAST` (Haiku) for macro classify/pulse, display summary, and LLM critic; `RUN_LLM_CRITIC_PRE_BROADCAST=False`, `MAX_REFINE_PASSES=1`; `USE_LLM_DISPLAY_SUMMARY=False`; overlay legend moved into cached system prompt; `anthropic_usage` log lines on Claude calls. |
 | 2026-07-23 | `/research asian_session` — BTC/ETH Asian session (21:00–04:00 ET) net-change windows for 2 weeks / 4 weeks / 2 months from live Coinbase H1; NL keywords route “asian session” asks out of freeform chat; default product BTC. |
 | 2026-07-22 | Paper-audit strategy guards: watchdog paper execute default **off** (scan/shadow + dashboard/`/watchdog` toggle); `WATCHDOG_ALLOW_SHORTS=False`; underwater scale-ins blocked (< +0.5R); stop floor 0.8%; hard audit block on remaining critical findings; ledger `executed`/`trigger_name`/`macro_json`; LLM `macro_note` required when macro injected; macro `tighten_sl` ratchets house stops; MFE/MAE + HTF regime tags (`htf_bull`/`htf_bear`/`htf_mixed`); gate-tag pollution fixed. |
 | 2026-07-22 | Fix Telegram See more wrong-trade: trade offers are immutable after create (no `INSERT OR REPLACE`), chart roles classified by basename suffix, See more omits house PnL footer that could describe another product, and dashboard convention resolver accepts `{cycle}_{PRODUCT_USD}_{tf}_{kind}` broadcast filenames. |

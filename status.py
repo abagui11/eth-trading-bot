@@ -36,6 +36,7 @@ def main() -> None:
 
     print("=== Pre-flight check ===\n")
     print(f"ANTHROPIC_MODEL:       {config.ANTHROPIC_MODEL}")
+    print(f"ANTHROPIC_MODEL_FAST:  {config.ANTHROPIC_MODEL_FAST}")
     print(f"Anthropic API key:     {'OK (set)' if api_ok else 'CHECK .env'}")
     print(f"Telegram bot token:    {'OK (set)' if tg_ok else 'CHECK .env'}")
     print(f"Paywall enabled:       {config.PAYWALL_ENABLED}")

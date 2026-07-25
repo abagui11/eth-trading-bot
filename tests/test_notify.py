@@ -196,6 +196,50 @@ def test_display_summary_fallback_never_mutates_rationale():
     assert summary != original
 
 
+def test_display_summary_skips_llm_when_disabled(monkeypatch):
+    import bot_config
+
+    monkeypatch.setattr(bot_config, "USE_LLM_DISPLAY_SUMMARY", False)
+    suggestion = Suggestion(
+        action="spot_buy",
+        size=100.0,
+        entry=2000.0,
+        stop_loss=1900.0,
+        take_profits=[2200.0],
+        rationale="Thesis.",
+        product_id="ETH-USD",
+    )
+    with patch.object(
+        display_summary, "generate_llm_setup_blurb", return_value="Should not be used."
+    ) as mock_llm:
+        summary = display_summary.generate_display_summary(suggestion)
+    mock_llm.assert_not_called()
+    assert "Should not be used." not in summary
+
+
+def test_display_summary_uses_llm_when_enabled(monkeypatch):
+    import bot_config
+
+    monkeypatch.setattr(bot_config, "USE_LLM_DISPLAY_SUMMARY", True)
+    suggestion = Suggestion(
+        action="spot_buy",
+        size=100.0,
+        entry=2000.0,
+        stop_loss=1900.0,
+        take_profits=[2200.0],
+        rationale="Thesis.",
+        product_id="ETH-USD",
+    )
+    with patch.object(
+        display_summary,
+        "generate_llm_setup_blurb",
+        return_value="Friendly setup lines up with structure.",
+    ) as mock_llm:
+        summary = display_summary.generate_display_summary(suggestion)
+    mock_llm.assert_called_once()
+    assert summary == "Friendly setup lines up with structure."
+
+
 def test_validate_llm_summary_rejects_numbers():
     assert display_summary._validate_llm_summary("Looks good at 65000.") is None
     ok = display_summary._validate_llm_summary(

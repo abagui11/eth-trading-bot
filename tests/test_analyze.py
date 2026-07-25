@@ -107,3 +107,60 @@ def test_propose_trade_retries_on_json_decode_error():
     assert suggestion.action == "no_trade"
     assert client.messages.create.call_count == 2
     assert MAX_SUGGESTION_TOKENS == 1536
+    system = client.messages.create.call_args_list[0].kwargs["system"]
+    assert isinstance(system, list)
+    assert "How to read the marked live charts" in system[0]["text"]
+    assert system[0].get("cache_control", {}).get("type") == "ephemeral"
+
+
+def test_build_user_content_skips_pattern_images_by_default(tmp_path, monkeypatch):
+    import bot_config
+    from analyze import _build_user_content
+
+    monkeypatch.setattr(bot_config, "INCLUDE_PATTERN_IMAGES", False)
+    chart = tmp_path / "h4.png"
+    chart.write_bytes(b"\x89PNG\r\n\x1a\n" + b"\x00" * 32)
+    paths = {"H4": str(chart), "H1": str(chart), "M5": str(chart)}
+
+    with patch("analyze.load_pattern_images") as mock_patterns:
+        content = _build_user_content(paths)
+        mock_patterns.assert_not_called()
+
+    texts = [b["text"] for b in content if b.get("type") == "text"]
+    assert not any("Reference pattern examples" in t for t in texts)
+    assert not any(b.get("type") == "image" and "Reference" in str(b) for b in content)
+    assert sum(1 for b in content if b.get("type") == "image") == 3
+
+
+def test_build_user_content_includes_patterns_when_enabled(tmp_path, monkeypatch):
+    import bot_config
+    from analyze import _build_user_content
+    from pathlib import Path
+
+    monkeypatch.setattr(bot_config, "INCLUDE_PATTERN_IMAGES", True)
+    chart = tmp_path / "h4.png"
+    chart.write_bytes(b"\x89PNG\r\n\x1a\n" + b"\x00" * 32)
+    pattern = tmp_path / "pattern.png"
+    pattern.write_bytes(b"\x89PNG\r\n\x1a\n" + b"\x00" * 16)
+    paths = {"H4": str(chart), "H1": str(chart), "M5": str(chart)}
+
+    with patch(
+        "analyze.load_pattern_images",
+        return_value=[("example (pattern.png)", Path(pattern))],
+    ):
+        content = _build_user_content(paths)
+
+    texts = [b["text"] for b in content if b.get("type") == "text"]
+    assert any("Reference pattern examples" in t for t in texts)
+    assert sum(1 for b in content if b.get("type") == "image") == 4
+
+
+def test_build_vision_content_defaults_to_config(monkeypatch):
+    import bot_config
+    from analyze import build_vision_content
+
+    monkeypatch.setattr(bot_config, "INCLUDE_PATTERN_IMAGES", False)
+    with patch("analyze.load_pattern_images") as mock_patterns:
+        content = build_vision_content(include_live_charts=False, include_patterns=None)
+        mock_patterns.assert_not_called()
+    assert content == []

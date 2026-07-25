@@ -14,8 +14,15 @@ MAX_OPEN_TRADES = 20
 BROADCAST_ONLY_TRADES = True
 
 # Pre-broadcast audit refine loop (propose_trade retries after fact-check failures).
-MAX_REFINE_PASSES = 3
-RUN_LLM_CRITIC_PRE_BROADCAST = True
+MAX_REFINE_PASSES = 1
+RUN_LLM_CRITIC_PRE_BROADCAST = False
+
+# Attach Trading Guide/*.png reference examples to Claude vision calls.
+# Off by default — live marked charts + guide text are enough and cut ~5 images/call.
+INCLUDE_PATTERN_IMAGES = False
+
+# LLM rewrite of trade-card blurbs (else deterministic_setup_blurb).
+USE_LLM_DISPLAY_SUMMARY = False
 
 # Fixed-fraction position sizing: each trade deploys this fraction of live paper
 # equity as notional (cash + open positions marked to spot). R/R, stop, and

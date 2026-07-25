@@ -965,11 +965,12 @@ def verify_llm(
     client = anthropic.Anthropic(api_key=config.ANTHROPIC_API_KEY)
     try:
         response = client.messages.create(
-            model=config.ANTHROPIC_MODEL,
+            model=config.ANTHROPIC_MODEL_FAST,
             max_tokens=1024,
             system=[{"type": "text", "text": _LLM_SYSTEM}],
             messages=[{"role": "user", "content": user_content}],
         )
+        analyze.log_anthropic_usage(response, "verify_llm")
     except Exception as exc:
         logger.exception("LLM critic call failed")
         return [

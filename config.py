@@ -46,6 +46,10 @@ def _optional_bool(key: str, default: bool = False) -> bool:
 
 ANTHROPIC_API_KEY: str = _require("ANTHROPIC_API_KEY")
 ANTHROPIC_MODEL: str = _require("ANTHROPIC_MODEL")
+# Cheap model for macro classify/pulse, display summary, and LLM critic.
+ANTHROPIC_MODEL_FAST: str = (
+    _optional("ANTHROPIC_MODEL_FAST") or "claude-haiku-4-5"
+)
 TELEGRAM_BOT_TOKEN: str = _require("TELEGRAM_BOT_TOKEN")
 MARKET_DATA_API: str = _require("MARKET_DATA_API").rstrip("/")
 PORTFOLIO_VALUE: float = float(_require("PORTFOLIO_VALUE"))

@@ -242,7 +242,6 @@ def answer(user_message: str) -> str:
             else None
         ),
         include_live_charts=bool(live_chart_paths),
-        include_patterns=True,
     )
 
     user_content: list[dict] = [{"type": "text", "text": text_context}]
@@ -253,15 +252,10 @@ def answer(user_message: str) -> str:
         response = client.messages.create(
             model=config.ANTHROPIC_MODEL,
             max_tokens=1024,
-            system=[
-                {
-                    "type": "text",
-                    "text": guide + "\n\n" + _SYSTEM_SUFFIX,
-                    "cache_control": {"type": "ephemeral"},
-                }
-            ],
+            system=analyze._cached_system_blocks(guide, extra_suffix=_SYSTEM_SUFFIX),
             messages=[{"role": "user", "content": user_content}],
         )
+        analyze.log_anthropic_usage(response, "chat")
     except Exception as exc:
         logger.exception("Chat Claude API call failed")
         return f"Sorry, I could not reach the analysis service right now. ({exc})"

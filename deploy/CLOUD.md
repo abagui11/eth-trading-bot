@@ -69,6 +69,8 @@ Required keys (see `.env.example`):
 ```env
 ANTHROPIC_API_KEY=...
 ANTHROPIC_MODEL=claude-sonnet-4-6
+# Optional: cheap model for macro classify/pulse, display summary, LLM critic
+# ANTHROPIC_MODEL_FAST=claude-haiku-4-5
 TELEGRAM_BOT_TOKEN=...
 PAYWALL_ENABLED=false
 ALLOWED_TELEGRAM_IDS=YOUR_TELEGRAM_ID

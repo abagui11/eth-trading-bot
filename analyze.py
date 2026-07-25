@@ -60,6 +60,52 @@ def load_pattern_images() -> list[tuple[str, Path]]:
     return images
 
 
+def _append_pattern_images(content: list[dict], *, enabled: bool | None = None) -> None:
+    """Optionally attach Trading Guide reference PNGs (off by default to save tokens)."""
+    if enabled is None:
+        enabled = bot_config.INCLUDE_PATTERN_IMAGES
+    if not enabled:
+        return
+    content.append(
+        {
+            "type": "text",
+            "text": "--- Reference pattern examples (match similar structure on live charts) ---",
+        }
+    )
+    for label, path in load_pattern_images():
+        content.append({"type": "text", "text": f"--- {label} ---"})
+        content.append(_image_block(path))
+
+
+def log_anthropic_usage(response: object, label: str) -> None:
+    """Log input/output/cache token counts when the API returns usage."""
+    usage = getattr(response, "usage", None)
+    if usage is None:
+        return
+    logger.info(
+        "anthropic_usage %s input=%s output=%s cache_read=%s cache_create=%s",
+        label,
+        getattr(usage, "input_tokens", None),
+        getattr(usage, "output_tokens", None),
+        getattr(usage, "cache_read_input_tokens", None),
+        getattr(usage, "cache_creation_input_tokens", None),
+    )
+
+
+def _cached_system_blocks(guide_text: str, *, extra_suffix: str = "") -> list[dict]:
+    """Trading Guide + overlay legend as one ephemeral-cached system block."""
+    text = f"{guide_text}\n\n{OVERLAY_LEGEND}"
+    if extra_suffix:
+        text = f"{text}\n\n{extra_suffix}"
+    return [
+        {
+            "type": "text",
+            "text": text,
+            "cache_control": {"type": "ephemeral"},
+        }
+    ]
+
+
 def _image_block(path: str | Path) -> dict:
     return {
         "type": "image",
@@ -137,7 +183,6 @@ def _build_user_content(
             "type": "text",
             "text": (
                 f"Analyze live {product_id} marked charts and apply the Trading Guide strategy. "
-                "Compare live structure to all reference pattern images below. "
                 "Cite H4 OB/BRKR for HTF context and M5 OB (with fib zone) for entries — "
                 "never label an H4 box as 'M5 OB'. HTF is advisory, not a hard veto on M5 setups. "
                 "Structure rationale as short paragraphs (HTF structure, H4 supply/demand, "
@@ -151,7 +196,6 @@ def _build_user_content(
                 "Return one JSON trade suggestion. JSON only."
             ),
         },
-        {"type": "text", "text": OVERLAY_LEGEND},
     ]
     if audit_feedback:
         content.append(
@@ -177,16 +221,7 @@ def _build_user_content(
         content.append({"type": "text", "text": f"--- Live {tf} marked chart ---"})
         content.append(_image_block(path))
 
-    content.append(
-        {
-            "type": "text",
-            "text": "--- Reference pattern examples (match similar structure on live charts) ---",
-        }
-    )
-    for label, path in load_pattern_images():
-        content.append({"type": "text", "text": f"--- {label} ---"})
-        content.append(_image_block(path))
-
+    _append_pattern_images(content)
     return content
 
 
@@ -226,7 +261,6 @@ def _build_multi_user_content(
                 "validation will overwrite it with the configured dollar deployment."
             ),
         },
-        {"type": "text", "text": OVERLAY_LEGEND},
         {
             "type": "text",
             "text": f"=== Authoritative relative-strength context ===\n{relative_strength}",
@@ -264,15 +298,7 @@ def _build_multi_user_content(
             )
             content.append(_image_block(path))
 
-    content.append(
-        {
-            "type": "text",
-            "text": "--- Reference pattern examples (apply identically to both assets) ---",
-        }
-    )
-    for label, path in load_pattern_images():
-        content.append({"type": "text", "text": f"--- {label} ---"})
-        content.append(_image_block(path))
+    _append_pattern_images(content)
     return content
 
 
@@ -280,10 +306,12 @@ def build_vision_content(
     chart_paths: dict[str, str] | None = None,
     annotated_h1_path: str | Path | None = None,
     include_live_charts: bool = True,
-    include_patterns: bool = True,
+    include_patterns: bool | None = None,
 ) -> list[dict]:
     """Build Claude vision content blocks for analyze or chat."""
     content: list[dict] = []
+    if include_patterns is None:
+        include_patterns = bot_config.INCLUDE_PATTERN_IMAGES
 
     if include_live_charts and chart_paths:
         for tf in CHART_ORDER:
@@ -297,16 +325,7 @@ def build_vision_content(
         content.append({"type": "text", "text": "--- Latest annotated M5 suggestion chart ---"})
         content.append(_image_block(annotated_h1_path))
 
-    if include_patterns:
-        content.append(
-            {
-                "type": "text",
-                "text": "--- Reference pattern examples ---",
-            }
-        )
-        for label, path in load_pattern_images():
-            content.append({"type": "text", "text": f"--- {label} ---"})
-            content.append(_image_block(path))
+    _append_pattern_images(content, enabled=include_patterns)
 
     return content
 
@@ -489,13 +508,7 @@ def propose_trade(
             response = client.messages.create(
                 model=config.ANTHROPIC_MODEL,
                 max_tokens=MAX_SUGGESTION_TOKENS,
-                system=[
-                    {
-                        "type": "text",
-                        "text": guide_text,
-                        "cache_control": {"type": "ephemeral"},
-                    }
-                ],
+                system=_cached_system_blocks(guide_text),
                 messages=[
                     {
                         "role": "user",
@@ -508,6 +521,7 @@ def propose_trade(
                     }
                 ],
             )
+            log_anthropic_usage(response, f"propose_trade:{product_id}")
         except Exception as exc:
             logger.exception("Claude API call failed")
             return Suggestion.no_trade(f"api_error: {exc}", product_id=product_id)
@@ -554,13 +568,7 @@ def propose_trades_multi(
             response = client.messages.create(
                 model=config.ANTHROPIC_MODEL,
                 max_tokens=MAX_MULTI_SUGGESTION_TOKENS,
-                system=[
-                    {
-                        "type": "text",
-                        "text": guide_text,
-                        "cache_control": {"type": "ephemeral"},
-                    }
-                ],
+                system=_cached_system_blocks(guide_text),
                 messages=[
                     {
                         "role": "user",
@@ -574,6 +582,7 @@ def propose_trades_multi(
                     }
                 ],
             )
+            log_anthropic_usage(response, "propose_trades_multi")
         except Exception as exc:
             logger.exception("Claude multi-asset API call failed")
             return [

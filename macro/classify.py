@@ -11,6 +11,7 @@ from typing import Any
 import anthropic
 import bot_config
 import config
+from analyze import log_anthropic_usage
 
 logger = logging.getLogger(__name__)
 
@@ -55,7 +56,7 @@ def classify_headline(
     client = anthropic.Anthropic(api_key=config.ANTHROPIC_API_KEY)
     try:
         response = client.messages.create(
-            model=config.ANTHROPIC_MODEL,
+            model=config.ANTHROPIC_MODEL_FAST,
             max_tokens=512,
             system=CLASSIFIER_SYSTEM,
             messages=[{"role": "user", "content": "\n".join(parts)}],
@@ -70,6 +71,8 @@ def classify_headline(
             "ttl_hours": bot_config.MACRO_DEFAULT_TTL_HOURS,
             "posture_hints": [],
         }
+
+    log_anthropic_usage(response, "macro_classify")
 
     raw = ""
     for block in response.content:

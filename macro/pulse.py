@@ -14,6 +14,7 @@ import config
 import notify
 import paper
 import research
+from analyze import log_anthropic_usage
 from macro import store
 
 logger = logging.getLogger(__name__)
@@ -70,7 +71,7 @@ def run_macro_pulse(event: dict[str, Any]) -> dict[str, Any] | None:
     client = anthropic.Anthropic(api_key=config.ANTHROPIC_API_KEY)
     try:
         response = client.messages.create(
-            model=config.ANTHROPIC_MODEL,
+            model=config.ANTHROPIC_MODEL_FAST,
             max_tokens=768,
             system=PULSE_SYSTEM,
             messages=[{"role": "user", "content": "\n".join(parts)}],
@@ -78,6 +79,8 @@ def run_macro_pulse(event: dict[str, Any]) -> dict[str, Any] | None:
     except Exception:
         logger.exception("Macro pulse API failed")
         return None
+
+    log_anthropic_usage(response, "macro_pulse")
 
     raw = ""
     for block in response.content:
