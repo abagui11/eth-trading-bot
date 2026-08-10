@@ -82,6 +82,16 @@ PAPER_PORTFOLIO_VALUE=5000
 # MACRO_FEED_URLS=https://search.cnbc.com/rs/search/combinedcms/view.xml?partnerId=wrss01&id=100003114,https://www.coindesk.com/arc/outboundfeeds/rss/
 # MACRO_KEYWORD_EXTRA=fusaka
 # MACRO_WEBHOOK_SECRET=your-random-secret
+
+# --- Republic Intelligence layer ---
+# HQ (abstention-first ICT) cards DM only these IDs. Ledger + house paper book
+# still record every HQ idea, so dashboard quality tracking is unaffected.
+INTERNAL_TELEGRAM_IDS=YOUR_TELEGRAM_ID
+# Bearer tokens for /api/v1 consumers (yield_gen_bot, trade_ideas mill).
+# REQUIRED: every /api/v1 route is token-only and returns 503 when unset.
+SERVICE_API_TOKENS=token_for_yield,token_for_mill
+# Colocated trade_ideas mill DB — this process records its Accept/Reject.
+IDEAS_DB=/opt/trade-ideas/ideas.db
 ```
 
 **Important:** Leave `TELEGRAM_CHAT_ID` **empty** unless it is a *different* chat from your user ID (avoids duplicate hourly messages).
@@ -377,6 +387,51 @@ curl -X POST "https://dashboard.yourdomain.com/api/ops/watchdog-execute" \
 Runtime override is stored in SQLite meta (`watchdog_execute_enabled`); config default remains `WATCHDOG_EXECUTE_ENABLED=False`.
 
 **Ops note:** if an oversized watchdog BTC short is still open after deploy, flatten or hard-cap it manually before re-enabling execute.
+
+### Republic Intelligence API (`/api/v1`)
+
+The dashboard also serves the intelligence layer consumed by `yield_gen_bot`
+and the `trade_ideas` mill. **Every route is token-only** (`SERVICE_API_TOKENS`,
+comma-separated) and returns **503** when no tokens are configured — the public
+dashboard routes (`/api/status`, `/api/performance`, `/api/macro`) are
+unaffected.
+
+| Route | Purpose |
+|---|---|
+| `/api/v1/intelligence/latest` · `/history` | H4/H1/M15 BTC/ETH stances, medium summary, funding regimes, long thesis |
+| `/api/v1/signals/macro` · `/zmove` · `/funding` | signal feeds for the mill |
+| `/api/v1/subscribers` | broadcast recipients (mill fan-out; paywall logic stays here) |
+| `/api/v1/ideas/hq` | gated HQ ICT ideas |
+| `/api/v1/charts/cycle` | BTC 4-year-cycle PNG |
+
+```bash
+curl -H "Authorization: Bearer $SERVICE_TOKEN" \
+  http://127.0.0.1:8080/api/v1/intelligence/latest
+```
+
+Artifacts populate fast after a restart: stances ~10s (bootstrap cycle),
+funding ~20s, long thesis ~2min; then hourly on the wall clock.
+
+### trade_ideas mill (colocated volume lane)
+
+The mill runs on **this same box** so it reaches the API over localhost (the
+service token never crosses the network) and shares one SQLite with the agent.
+
+It uses the **agent's own bot token, send-only**. Telegram allows a single
+`getUpdates` consumer per token and that is `eth-agent`; the mill must never
+poll, and the agent's dispatcher records the `idea:accept|reject` callbacks via
+`trade_ideas_bridge`. Set the **same** `IDEAS_DB` path in both `.env` files.
+
+```bash
+sudo git clone <trade_ideas repo> /opt/trade-ideas
+sudo bash /opt/trade-ideas/deploy/install.sh
+sudo nano /opt/trade-ideas/.env      # SERVICE_TOKEN + the agent's TELEGRAM_BOT_TOKEN
+sudo systemctl start trade-ideas
+journalctl -u trade-ideas -f
+```
+
+Leave `TELEGRAM_CHAT_IDS` empty in production so recipients resolve from
+`/api/v1/subscribers`; set it to your own ID for a private dry run.
 
 ### Deploy dashboard updates
 

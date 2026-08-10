@@ -274,6 +274,24 @@ def run_zmove_scan() -> list[ZMoveSignal]:
             logger.exception("Z-Move broadcast failed for %s %s", product_id, signal.metric)
             continue
         _record_fire(product_id, signal.metric, signal.bar_ts, signal.z)
+        try:
+            from intelligence import store as intel_store
+
+            intel_store.insert_zmove_event(
+                product_id,
+                signal.metric,
+                signal.z,
+                signal.bar_ts,
+                detail={
+                    "value": signal.value,
+                    "mean": signal.mean,
+                    "std": signal.std,
+                    "pct_move": signal.pct_move,
+                    "volume_multiple": signal.volume_multiple,
+                },
+            )
+        except Exception:
+            logger.exception("Failed to persist z-move event")
         fired.append(signal)
         logger.info(
             "Z-Move fired %s %s z=%.2f bar=%s",

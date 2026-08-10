@@ -274,10 +274,19 @@ async def broadcast_to_subscribers(
     *,
     offer_id: str | None = None,
     display_summary_text: str | None = None,
+    internal_only: bool = False,
 ) -> None:
-    """DM the suggestion to every registered subscriber (or allowlist if paywall on)."""
+    """DM the suggestion to every registered subscriber (or allowlist if paywall on).
+
+    internal_only gates the HQ (abstention-first) trade cards to the internal
+    ops allowlist instead of the public subscriber list.
+    """
     footer = pnl_footer or paper.format_pnl_footer()
-    recipients = access.broadcast_recipient_ids()
+    recipients = (
+        access.internal_recipient_ids()
+        if internal_only
+        else access.broadcast_recipient_ids()
+    )
     sent: set[int] = set()
 
     for user_id in recipients:
@@ -481,6 +490,7 @@ def broadcast(
     *,
     offer_id: str | None = None,
     display_summary_text: str | None = None,
+    internal_only: bool = False,
 ) -> None:
     """Sync wrapper for standalone agent.py / tests."""
     footer = pnl_footer or paper.format_pnl_footer()
@@ -494,6 +504,7 @@ def broadcast(
             footer,
             offer_id=offer_id,
             display_summary_text=display_summary_text,
+            internal_only=internal_only,
         )
 
     asyncio.run(_run())

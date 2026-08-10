@@ -331,8 +331,16 @@ Defaults from `bot_config.py` (non-secret tunables). Secrets and portfolio size 
 | `ZMOVE_LOOKBACK_H` | `168` | hourly lookback for mean/std |
 | `ZMOVE_COOLDOWN_SEC` | `7200` | per-metric suppress window after fire |
 | `ZMOVE_PRODUCT_ID` | `"ETH-USD"` | product scanned for z-moves |
-| hourly interval | `3600s` | `hourly_job` cadence in `main.py` |
+| hourly interval | `3600s` | `hourly_job` cadence in `main.py` (wall-clock aligned to the top of the hour) |
 | `validate.MIN_STOP_DISTANCE_PCT` | `0.008` (0.8%) | hard floor on stop distance (LLM + watchdog) |
+| `INTELLIGENCE_ENABLED` | `True` | hourly BTC/ETH stance batch (H4/H1/M15) persisted + served on `/api/v1` |
+| `HQ_IDEAS_INTERNAL_ONLY` | `True` | HQ (abstention-first ICT) cards DM only `INTERNAL_TELEGRAM_IDS`; ledger + house paper book still record every idea, so dashboard quality tracking is unchanged |
+| `FUNDING_ENABLED` | `True` | perp funding regime tracker (Binance prints for BTC/ETH) |
+| `FUNDING_INTERVAL_SEC` | `3600` | funding refresh cadence (prints land every 8h) |
+| `FUNDING_PERSIST_PERIODS` | see `bot_config` | prints required before a regime counts as persistent |
+| `FUNDING_SWITCH_CONFIRM_PERIODS` | see `bot_config` | prints required to confirm a first switch (chop is suppressed) |
+| `LONG_THESIS_ENABLED` | `True` | daily BTC 4-year-cycle thesis + annotated chart |
+| `LONG_THESIS_INTERVAL_SEC` | `86400` | long thesis refresh cadence |
 
 ---
 
@@ -348,6 +356,7 @@ Defaults from `bot_config.py` (non-secret tunables). Secrets and portfolio size 
 
 | Date | Change |
 |---|---|
+| 2026-08-10 | **Republic Intelligence layer.** This service becomes the always-on intelligence hub feeding two consumers. New `intelligence/` package: wall-clock hourly BTC/ETH stances on H4/H1/M15 (Claude with a deterministic fallback so an artifact always lands), perp funding regime tracker (persistent bull/bear vs chop, first-switch cue), and a daily BTC 4-year-cycle thesis with annotated log chart + gold ratio. New versioned `/api/v1` router (`dashboard/intel_api.py`): stances, history, macro/zmove/funding signals, subscribers, gated HQ ideas, cycle chart — **token-only via `SERVICE_API_TOKENS`, fails closed with 503 when unset**. HQ ICT cards gated to `INTERNAL_TELEGRAM_IDS` (`HQ_IDEAS_INTERNAL_ONLY`); the ICT propose/validate/critic/audit logic and all ledger/paper writes are unchanged, so dashboard performance tracking still sees every HQ idea. New `trade_ideas_bridge.py` + `idea:accept|reject` branch in `bot.py` records the colocated mill's card decisions (the mill shares this bot's token send-only; this process owns `getUpdates`). Consumers: `yield_gen_bot` (HTF posture panel) and the `trade_ideas` mill (public volume lane). |
 | 2026-07-25 | Token-cost controls: `INCLUDE_PATTERN_IMAGES=False` (no reference PNGs on vision calls); `ANTHROPIC_MODEL_FAST` (Haiku) for macro classify/pulse, display summary, and LLM critic; `RUN_LLM_CRITIC_PRE_BROADCAST=False`, `MAX_REFINE_PASSES=1`; `USE_LLM_DISPLAY_SUMMARY=False`; overlay legend moved into cached system prompt; `anthropic_usage` log lines on Claude calls. |
 | 2026-07-23 | `/research asian_session` — BTC/ETH Asian session (21:00–04:00 ET) net-change windows for 2 weeks / 4 weeks / 2 months from live Coinbase H1; NL keywords route “asian session” asks out of freeform chat; default product BTC. |
 | 2026-07-22 | Paper-audit strategy guards: watchdog paper execute default **off** (scan/shadow + dashboard/`/watchdog` toggle); `WATCHDOG_ALLOW_SHORTS=False`; underwater scale-ins blocked (< +0.5R); stop floor 0.8%; hard audit block on remaining critical findings; ledger `executed`/`trigger_name`/`macro_json`; LLM `macro_note` required when macro injected; macro `tighten_sl` ratchets house stops; MFE/MAE + HTF regime tags (`htf_bull`/`htf_bear`/`htf_mixed`); gate-tag pollution fixed. |

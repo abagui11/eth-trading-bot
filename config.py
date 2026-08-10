@@ -95,6 +95,21 @@ MACRO_KEYWORD_EXTRA: list[str] = [k.strip().lower() for k in _macro_extra_raw.sp
 
 MACRO_WEBHOOK_SECRET: str | None = _optional("MACRO_WEBHOOK_SECRET")
 
+# Internal ops allowlist: Telegram IDs that receive gated HQ trade cards when
+# bot_config.HQ_IDEAS_INTERNAL_ONLY is on. Falls back to ALLOWED_TELEGRAM_IDS,
+# then the admin chat.
+_internal_raw = os.getenv("INTERNAL_TELEGRAM_IDS", "")
+INTERNAL_TELEGRAM_IDS: list[int] = [
+    int(x.strip()) for x in _internal_raw.split(",") if x.strip()
+]
+
+# Bearer tokens for service consumers (yield_gen_bot, trade_ideas) hitting the
+# authed /api/v1 endpoints. Comma-separated. MACRO_WEBHOOK_SECRET also works.
+_service_tokens_raw = os.getenv("SERVICE_API_TOKENS", "")
+SERVICE_API_TOKENS: list[str] = [
+    t.strip() for t in _service_tokens_raw.split(",") if t.strip()
+]
+
 # Public dashboard URL shown in Telegram (Portfolio button / welcome copy).
 DASHBOARD_PUBLIC_URL: str | None = _optional("DASHBOARD_PUBLIC_URL")
 DASHBOARD_PORT: int = int(os.getenv("DASHBOARD_PORT", "8080") or "8080")

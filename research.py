@@ -20,6 +20,8 @@ _MAX_CANDLES = 350  # Coinbase hard cap per request
 # Spec timeframes -> Coinbase granularity and default bar counts.
 _TIMEFRAME_CONFIG: dict[str, dict[str, Any]] = {
     "M5": {"granularity": "FIVE_MINUTE", "seconds": 300, "limit": 350},
+    # M15: intelligence-layer stance timeframe (24h of context).
+    "M15": {"granularity": "FIFTEEN_MINUTE", "seconds": 900, "limit": 96},
     "H1": {"granularity": "ONE_HOUR", "seconds": 3600, "limit": 120},
     "H4": {"granularity": "FOUR_HOUR", "seconds": 14400, "limit": 90},
     "D1": {"granularity": "ONE_DAY", "seconds": 86400, "limit": 90},
@@ -45,6 +47,7 @@ STRATEGY_TIMEFRAMES = ("H4", "H1", "M5")
 
 _GRANULARITY_SECONDS = {
     "FIVE_MINUTE": 300,
+    "FIFTEEN_MINUTE": 900,
     "ONE_HOUR": 3600,
     "FOUR_HOUR": 14400,
     "ONE_DAY": 86400,

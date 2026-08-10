@@ -27,6 +27,7 @@ import notify
 import paper
 import research
 import telegram_ui
+import trade_ideas_bridge
 import user_books
 from research_reports import catalog as research_catalog
 from research_reports import router as research_router
@@ -37,6 +38,9 @@ PAYWALL_MESSAGE = (
     "Access required to receive hourly trade suggestions.\n\n"
     "Contact us to subscribe. Once approved, your Telegram ID will be added to the allowlist."
 )
+
+# Callback prefix for trade_ideas mill cards (idea:accept:<id> / idea:reject:<id>).
+_CB_IDEA_PREFIX = "idea:"
 
 # Kept for any external imports; live copy lives in telegram_ui.
 WELCOME_MESSAGE = telegram_ui.WELCOME_MESSAGE
@@ -221,6 +225,26 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
 
     data = query.data or ""
     chat_id = query.message.chat_id if query.message else user_id
+
+    # Volume-lane idea cards are sent by the trade_ideas mill through this
+    # bot's token; this process owns the update stream, so their Accept/Reject
+    # callbacks are recorded here.
+    if data.startswith(_CB_IDEA_PREFIX):
+        parts = data.split(":")
+        if len(parts) != 3 or parts[1] not in ("accept", "reject"):
+            return
+        decision = parts[1]
+        try:
+            idea_id = int(parts[2])
+        except ValueError:
+            return
+        status = trade_ideas_bridge.record_decision(idea_id, user_id, decision)
+        await context.bot.send_message(
+            chat_id,
+            trade_ideas_bridge.format_decision_reply(status, decision, idea_id),
+            reply_markup=telegram_ui.main_keyboard(),
+        )
+        return
 
     if data == telegram_ui.CB_OPEN or data == telegram_ui.CB_FUND:
         if user_books.has_account(user_id):

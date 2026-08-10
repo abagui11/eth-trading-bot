@@ -255,6 +255,9 @@ def run_cycle() -> list[tuple[Suggestion, list[str]]] | None:
                         pnl_footer=pnl_footer,
                         offer_id=offer_id,
                         display_summary_text=card_summary,
+                        # HQ abstention-first cards are internal-only; the
+                        # public volume lane lives in the trade_ideas product.
+                        internal_only=bot_config.HQ_IDEAS_INTERNAL_ONLY,
                     )
                 else:
                     logger.info(

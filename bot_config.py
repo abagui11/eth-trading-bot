@@ -110,6 +110,32 @@ ZMOVE_PRODUCT_ID = "ETH-USD"
 # W1 ETH/BTC relative-strength bias injected into prompts and watchdog soft-gates.
 RELATIVE_STRENGTH_ENABLED = True
 
+# --- Republic Intelligence layer ---------------------------------------------
+# Hourly BTC/ETH stance batch (H4/H1/M15) persisted + served on /api/v1.
+INTELLIGENCE_ENABLED = True
+# Gate high-quality (abstention-first ICT) trade cards to the internal
+# allowlist (config.INTERNAL_TELEGRAM_IDS). Public volume ideas live in the
+# separate trade_ideas product.
+HQ_IDEAS_INTERNAL_ONLY = True
+
+# Perp funding regime tracker (Binance public funding prints for BTC/ETH).
+FUNDING_ENABLED = True
+FUNDING_INTERVAL_SEC = 3600  # refresh once per hour (prints land every 8h)
+FUNDING_PRODUCTS: dict[str, str] = {
+    "BTC-USD": "BTCUSDT",
+    "ETH-USD": "ETHUSDT",
+}
+# A persistence regime requires this many consecutive same-sign prints (8h
+# prints -> 9 periods = 3 days).
+FUNDING_PERSIST_PERIODS = 9
+# A switch only counts once the new sign holds for this many prints; anything
+# flippier than that is chop/noise.
+FUNDING_SWITCH_CONFIRM_PERIODS = 3
+
+# Long-horizon (4-year cycle) thesis: refreshed daily.
+LONG_THESIS_ENABLED = True
+LONG_THESIS_INTERVAL_SEC = 24 * 3600
+
 
 def qty_caps(product_id: str) -> tuple[float, float]:
     """Return (min_qty, max_qty) for a product; fall back to ETH caps."""

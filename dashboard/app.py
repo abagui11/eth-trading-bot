@@ -31,6 +31,8 @@ from dashboard.formatting import (
     tag_tooltip,
     trade_title,
 )
+from dashboard.intel_api import router as intel_router
+from intelligence import store as intel_store
 from macro import store as macro_store
 from macro.ingest import ingest_headline
 
@@ -59,6 +61,9 @@ def create_app() -> FastAPI:
     audit.init_db()
     macro_store.init_db()
     user_books.init_db()
+    intel_store.init_db()
+
+    app.include_router(intel_router)
 
     templates = Jinja2Templates(directory=str(_PKG_DIR / "templates"))
     templates.env.filters["trade_time"] = format_trade_time

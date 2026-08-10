@@ -63,6 +63,25 @@ def broadcast_recipient_ids() -> list[int]:
     return _drop_truncated_id_typos(set(load_allowed_ids()))
 
 
+def internal_recipient_ids() -> list[int]:
+    """Internal ops allowlist for gated HQ trade cards.
+
+    Falls back to ALLOWED_TELEGRAM_IDS, then the admin chat, so the HQ lane
+    never silently broadcasts to the public subscriber list.
+    """
+    if config.INTERNAL_TELEGRAM_IDS:
+        return _drop_truncated_id_typos(set(config.INTERNAL_TELEGRAM_IDS))
+    if config.ALLOWED_TELEGRAM_IDS:
+        return _drop_truncated_id_typos(set(config.ALLOWED_TELEGRAM_IDS))
+    admin = config.TELEGRAM_ADMIN_CHAT_ID or config.TELEGRAM_CHAT_ID
+    if admin:
+        try:
+            return [int(str(admin).strip())]
+        except ValueError:
+            return []
+    return []
+
+
 def register_user(user_id: int, username: str | None = None) -> None:
     """Record a user who messaged the bot."""
     init_db()

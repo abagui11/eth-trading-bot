@@ -1,0 +1,193 @@
+"""Tests for the /api/v1 intelligence endpoints (token-only, fail closed)."""
+
+from __future__ import annotations
+
+import tempfile
+import unittest
+from pathlib import Path
+from unittest import mock
+
+from fastapi.testclient import TestClient
+
+import config
+from intelligence import store
+
+_TOKEN = "svc-token"
+
+_ALL_ROUTES = (
+    "/api/v1/intelligence/latest",
+    "/api/v1/intelligence/history",
+    "/api/v1/signals/macro",
+    "/api/v1/signals/zmove",
+    "/api/v1/signals/funding",
+    "/api/v1/ideas/hq",
+    "/api/v1/charts/cycle",
+)
+
+
+class IntelApiTests(unittest.TestCase):
+    def setUp(self) -> None:
+        self._tmp = tempfile.TemporaryDirectory(ignore_cleanup_errors=True)
+        root = Path(self._tmp.name)
+        self._orig_db = config.LEDGER_DB
+        config.LEDGER_DB = root / "ledger.db"
+        store.init_db()
+
+        self._tokens_patch = mock.patch.object(
+            config, "SERVICE_API_TOKENS", [_TOKEN]
+        )
+        self._tokens_patch.start()
+        self.auth = {"Authorization": f"Bearer {_TOKEN}"}
+
+        from dashboard.app import create_app
+
+        self.client = TestClient(create_app())
+
+    def tearDown(self) -> None:
+        self._tokens_patch.stop()
+        config.LEDGER_DB = self._orig_db
+        try:
+            self._tmp.cleanup()
+        except PermissionError:
+            pass
+
+    def test_all_routes_reject_missing_or_bad_token(self) -> None:
+        for path in _ALL_ROUTES:
+            with self.subTest(path=path):
+                self.assertEqual(self.client.get(path).status_code, 401)
+                self.assertEqual(
+                    self.client.get(
+                        path, headers={"Authorization": "Bearer wrong"}
+                    ).status_code,
+                    401,
+                )
+                self.assertEqual(
+                    self.client.get(
+                        path, headers={"Authorization": _TOKEN}
+                    ).status_code,
+                    401,
+                    "non-Bearer scheme must be rejected",
+                )
+
+    def test_unconfigured_tokens_fail_closed_with_503(self) -> None:
+        with mock.patch.object(config, "SERVICE_API_TOKENS", []), mock.patch.object(
+            config, "MACRO_WEBHOOK_SECRET", None
+        ):
+            for path in _ALL_ROUTES:
+                with self.subTest(path=path):
+                    response = self.client.get(path, headers=self.auth)
+                    self.assertEqual(response.status_code, 503)
+
+    def test_macro_webhook_secret_also_accepted(self) -> None:
+        with mock.patch.object(config, "SERVICE_API_TOKENS", []), mock.patch.object(
+            config, "MACRO_WEBHOOK_SECRET", "hook-secret"
+        ):
+            response = self.client.get(
+                "/api/v1/intelligence/latest",
+                headers={"Authorization": "Bearer hook-secret"},
+            )
+            self.assertEqual(response.status_code, 200)
+
+    def test_latest_empty_ok(self) -> None:
+        response = self.client.get("/api/v1/intelligence/latest", headers=self.auth)
+        self.assertEqual(response.status_code, 200)
+        payload = response.json()
+        self.assertIn("stances", payload)
+        self.assertEqual(payload["stances"], [])
+        self.assertIsNone(payload["long_thesis"])
+
+    def test_latest_returns_stances_and_funding(self) -> None:
+        store.insert_stances(
+            "2026-08-10T15:00:00Z",
+            [
+                {
+                    "product_id": "BTC-USD",
+                    "timeframe": "H4",
+                    "stance": "bullish",
+                    "confidence": 0.8,
+                    "rationale": "structure up",
+                },
+                {
+                    "product_id": "ETH-USD",
+                    "timeframe": "H1",
+                    "stance": "neutral",
+                    "confidence": 0.5,
+                    "rationale": "chop",
+                },
+            ],
+        )
+        store.insert_medium_summary(
+            "2026-08-10T15:00:00Z", "BTC leads.", btc_eth_note="ETH lags."
+        )
+        store.insert_funding_regime(
+            "BTC-USD", "bull_persist", streak_periods=12, as_of_ts="2026-08-10T08:00:00Z"
+        )
+
+        response = self.client.get("/api/v1/intelligence/latest", headers=self.auth)
+        payload = response.json()
+        self.assertEqual(len(payload["stances"]), 2)
+        self.assertEqual(payload["medium"]["summary"], "BTC leads.")
+        self.assertEqual(
+            payload["funding_regimes"]["BTC-USD"]["regime"], "bull_persist"
+        )
+
+    def test_history_pagination(self) -> None:
+        for hour in (14, 15):
+            store.insert_stances(
+                f"2026-08-10T{hour}:00:00Z",
+                [
+                    {
+                        "product_id": "BTC-USD",
+                        "timeframe": "H4",
+                        "stance": "neutral",
+                    }
+                ],
+            )
+        response = self.client.get(
+            "/api/v1/intelligence/history?limit=1", headers=self.auth
+        )
+        self.assertEqual(len(response.json()), 1)
+
+    def test_signals_zmove(self) -> None:
+        store.insert_zmove_event("ETH-USD", "price", -2.7, "2026-08-10T13:00:00Z")
+        response = self.client.get("/api/v1/signals/zmove", headers=self.auth)
+        payload = response.json()
+        self.assertEqual(len(payload["events"]), 1)
+        self.assertEqual(payload["events"][0]["metric"], "price")
+
+    def test_signals_funding(self) -> None:
+        store.upsert_funding_rates(
+            "ETH-USD", [{"ts": "2026-08-10T08:00:00Z", "rate": -0.005}]
+        )
+        store.insert_funding_regime(
+            "ETH-USD", "chop", streak_periods=1, as_of_ts="2026-08-10T08:00:00Z"
+        )
+        response = self.client.get("/api/v1/signals/funding", headers=self.auth)
+        payload = response.json()
+        self.assertEqual(payload["products"]["ETH-USD"]["regime"]["regime"], "chop")
+        self.assertEqual(len(payload["products"]["ETH-USD"]["series"]), 1)
+
+    def test_signals_macro_shape(self) -> None:
+        response = self.client.get("/api/v1/signals/macro", headers=self.auth)
+        payload = response.json()
+        self.assertIn("active", payload)
+        self.assertIn("recent", payload)
+
+    def test_ideas_hq_returns_list_when_authed(self) -> None:
+        response = self.client.get("/api/v1/ideas/hq", headers=self.auth)
+        self.assertEqual(response.status_code, 200)
+        self.assertIsInstance(response.json(), list)
+
+    def test_cycle_chart_404_when_absent(self) -> None:
+        response = self.client.get("/api/v1/charts/cycle", headers=self.auth)
+        self.assertEqual(response.status_code, 404)
+
+    def test_public_dashboard_routes_stay_open(self) -> None:
+        """The /api/v1 lockdown must not leak onto the public dashboard."""
+        for path in ("/api/status", "/api/performance", "/api/macro"):
+            with self.subTest(path=path):
+                self.assertEqual(self.client.get(path).status_code, 200)
+
+
+if __name__ == "__main__":
+    unittest.main()
