@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import tempfile
 import unittest
 from pathlib import Path
@@ -27,6 +28,7 @@ from intelligence.stance import (
     compute_timeframe_features,
     run_stance_cycle,
 )
+import main
 from main import seconds_until_next_hour
 
 
@@ -314,6 +316,45 @@ class TestStore(TempDbTestCase):
         thesis = store.latest_long_thesis()
         self.assertEqual(thesis["cycle_phase"], "bull_expansion")
         self.assertEqual(thesis["thesis"]["bias"], "bullish")
+
+
+class TestHourlyJobOrdering(unittest.TestCase):
+    """The trade cycle must run before the intelligence work, not after."""
+
+    def _run_hourly(self, *, cycle_side_effect=None) -> list[str]:
+        calls: list[str] = []
+
+        def fake_run_cycle():
+            calls.append("run_cycle")
+            if cycle_side_effect is not None:
+                raise cycle_side_effect
+
+        def fake_stance_cycle():
+            calls.append("stance")
+            return {}
+
+        def fake_bias_refine():
+            calls.append("bias")
+            return 0
+
+        with mock.patch.object(bot_config, "INTELLIGENCE_ENABLED", True), \
+                mock.patch.object(bot_config, "MACRO_CONTEXT_ENABLED", True), \
+                mock.patch.object(main, "run_cycle", fake_run_cycle), \
+                mock.patch(
+                    "intelligence.stance.run_stance_cycle", fake_stance_cycle
+                ), \
+                mock.patch(
+                    "macro.bias_score.run_hourly_bias_refine", fake_bias_refine
+                ):
+            asyncio.run(main.hourly_job(None))
+        return calls
+
+    def test_trade_cycle_runs_first(self) -> None:
+        self.assertEqual(self._run_hourly(), ["run_cycle", "stance", "bias"])
+
+    def test_cycle_failure_still_runs_intelligence(self) -> None:
+        calls = self._run_hourly(cycle_side_effect=RuntimeError("boom"))
+        self.assertEqual(calls, ["run_cycle", "stance", "bias"])
 
 
 class TestWallClockScheduling(unittest.TestCase):
