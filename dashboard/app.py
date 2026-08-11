@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 from pathlib import Path
 
 from fastapi import FastAPI, HTTPException, Request, Header, Response
@@ -17,6 +18,7 @@ import ledger
 import paper
 import user_books
 from dashboard import data
+from dashboard.brain import get_brain_payload
 from dashboard.charts import (
     VALID_KINDS,
     VALID_TFS,
@@ -24,10 +26,15 @@ from dashboard.charts import (
     latest_marked_h4_path,
     resolve_chart_path,
     resolve_trade_chart,
+    stance_chart_path,
 )
 from dashboard.formatting import (
+    format_news_age,
+    format_news_iso,
+    format_news_when,
     format_trade_date,
     format_trade_time,
+    news_source_label,
     tag_tooltip,
     trade_title,
 )
@@ -69,6 +76,10 @@ def create_app() -> FastAPI:
     templates.env.filters["trade_time"] = format_trade_time
     templates.env.filters["trade_date"] = format_trade_date
     templates.env.filters["tag_tip"] = tag_tooltip
+    templates.env.filters["news_when"] = format_news_when
+    templates.env.filters["news_iso"] = format_news_iso
+    templates.env.filters["news_age"] = format_news_age
+    templates.env.filters["news_source"] = news_source_label
     templates.env.globals["trade_title"] = trade_title
     static_dir = _PKG_DIR / "static"
     if static_dir.is_dir():
@@ -87,7 +98,58 @@ def create_app() -> FastAPI:
                 "closed_trades": data.get_closed_trades_payload(limit=15),
                 "archived_trades": data.get_archived_trades_payload(limit=15),
                 "macro": data.get_macro_payload(),
+                "brain": get_brain_payload(),
             },
+        )
+
+    @app.get("/api/brain")
+    async def api_brain() -> dict:
+        """Public intelligence hub snapshot (no HQ ideas, no service token)."""
+        return get_brain_payload()
+
+    @app.get("/api/brain/cycle-chart")
+    async def api_brain_cycle_chart() -> FileResponse:
+        thesis = intel_store.latest_long_thesis()
+        path = (thesis or {}).get("chart_path")
+        if not path or not Path(str(path)).exists():
+            raise HTTPException(status_code=404, detail="No cycle chart")
+        resolved = Path(str(path)).resolve()
+        charts_root = Path(config.CHARTS_DIR).resolve()
+        if charts_root not in resolved.parents and resolved != charts_root:
+            raise HTTPException(status_code=404, detail="No cycle chart")
+        return FileResponse(str(resolved), media_type="image/png")
+
+    @app.get("/api/brain/structure/{product_id}/{timeframe}")
+    async def api_brain_structure(product_id: str, timeframe: str) -> FileResponse:
+        """Marked stance-board chart for a product/timeframe (public)."""
+        path = stance_chart_path(product_id, timeframe)
+        if path is None:
+            raise HTTPException(status_code=404, detail="No structure chart")
+        return FileResponse(path, media_type="image/png")
+
+    @app.get("/api/brain/cycle-figure")
+    async def api_brain_cycle_figure() -> dict:
+        """Plotly spec for the interactive 4-year cycle chart (public)."""
+        thesis = intel_store.latest_long_thesis() or {}
+        path = ((thesis.get("thesis") or {}).get("cycle_figure_path")) or ""
+        if not path:
+            raise HTTPException(status_code=404, detail="No cycle figure")
+        resolved = Path(str(path)).resolve()
+        charts_root = Path(config.CHARTS_DIR).resolve()
+        if charts_root not in resolved.parents or not resolved.is_file():
+            raise HTTPException(status_code=404, detail="No cycle figure")
+        return json.loads(resolved.read_text(encoding="utf-8"))
+
+    @app.get("/volume", response_class=HTMLResponse)
+    async def volume_book(request: Request) -> HTMLResponse:
+        """Hidden paper book for every public-lane idea (no hub link)."""
+        import trade_ideas_bridge
+
+        book = trade_ideas_bridge.volume_book_payload(limit=150)
+        return templates.TemplateResponse(
+            request,
+            "volume.html",
+            {"book": book or {"available": False}},
         )
 
     @app.get("/me", response_class=HTMLResponse)

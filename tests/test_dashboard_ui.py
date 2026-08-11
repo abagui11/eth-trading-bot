@@ -137,11 +137,24 @@ class DashboardUiSmokeTests(unittest.TestCase):
                             "severity": 4,
                             "eth_bias": "bearish",
                             "title": "Test macro",
-                            "url": None,
+                            "url": "https://www.cnbc.com/2026/08/10/test.html",
+                            "published_at": "2026-08-10T10:45:43Z",
+                            "ingested_at": "2026-08-10T10:50:00Z",
                             "eth_impact_summary": "Impact",
                         }
                     ],
-                    "recent": [],
+                    "recent": [
+                        {
+                            "severity": 2,
+                            "eth_bias": "neutral",
+                            "title": "Quiet wire story",
+                            "url": None,
+                            "source": "Reuters: Business News",
+                            "keyword_score": 3,
+                            "status": "ignored",
+                            "ingested_at": "Mon, 10 Aug 2026 09:00:00 +0000",
+                        }
+                    ],
                 },
             ),
         ]
@@ -188,17 +201,18 @@ class DashboardUiSmokeTests(unittest.TestCase):
         self.assertEqual(n_buttons, 2)
         self.assertEqual(n_bodies, 2)
 
-    def test_css_image_caps_and_macro_scroll(self) -> None:
+    def test_css_image_caps_and_news_feed(self) -> None:
         css = self.client.get("/static/style.css").text
         self.assertIn(".trade-body[hidden]", css)
         self.assertIn(".trade-summary-main", css)
         self.assertIn("max-height: 280px", css)
         self.assertIn("max-width: 100%", css)
-        self.assertIn(".macro-scroll", css)
-        self.assertRegex(css, r"\.macro-scroll\s*\{[^}]*aspect-ratio:\s*1\s*/\s*1")
-        self.assertRegex(
-            css, r"\.macro-scroll\s*\{[^}]*width:\s*min\(100%,\s*640px\)"
-        )
+        # The macro monitor shares the news desk styles; the old narrow square
+        # box and its list rules are gone.
+        self.assertIn(".news-feed", css)
+        self.assertIn(".news-section", css)
+        for dead in (".macro-scroll", ".macro-item", ".macro-list", ".macro-impact"):
+            self.assertNotIn(dead, css)
         self.assertIn(".trade-thumb-wrap", css)
         self.assertIn(".trade-chart .chart-img", css)
         self.assertIn("height: 200px", css)
@@ -208,11 +222,44 @@ class DashboardUiSmokeTests(unittest.TestCase):
         self.assertIn("cursor: zoom-in", css)
         self.assertNotIn("<details", self.client.get("/").text)
         html = self.client.get("/").text
-        self.assertEqual(html.count('class="macro-scroll"'), 1)
-        self.assertIn('id="macro-feed"', html)
+        self.assertNotIn("macro-scroll", html)
+        self.assertIn('<div class="news-feed" id="macro-feed">', html)
         self.assertIn("h4-charts", html)
         self.assertIn("ETH-USD · H4", html)
         self.assertIn("BTC-USD · H4", html)
+
+    def test_macro_monitor_renders_as_news_desk(self) -> None:
+        html = self.client.get("/").text
+        macro_card = html.split('id="macro-card"', 1)[1].split("</section>", 1)[0]
+        # Same component as the Brain tab's news desk.
+        self.assertIn('<div class="news-feed" id="macro-feed">', macro_card)
+        self.assertIn('<ul class="news-list" id="macro-active">', macro_card)
+        self.assertIn('<ul class="news-list" id="macro-recent">', macro_card)
+        self.assertIn('class="news-item', macro_card)
+        self.assertIn('class="news-meta"', macro_card)
+        self.assertNotIn("macro-item", macro_card)
+        # Datelines — absent from the old markup.
+        self.assertIn('<time class="news-when" datetime="2026-08-10T10:45:43+00:00">', macro_card)
+        self.assertIn("Aug 10 · 10:45 UTC", macro_card)
+        self.assertIn("Aug 10 · 09:00 UTC", macro_card)
+        self.assertIn('class="news-source">cnbc.com<', macro_card)
+        self.assertIn('class="news-source">Reuters<', macro_card)
+        self.assertIn('class="news-age"', macro_card)
+        # Trading-Log-only information survives the redesign.
+        self.assertIn("Active (injected into agent)", macro_card)
+        self.assertIn("Recent ingested", macro_card)
+        self.assertIn("kw 3", macro_card)
+        self.assertIn('class="macro-status">ignored<', macro_card)
+        self.assertIn('class="news-item macro-ignored"', macro_card)
+        self.assertIn('class="news-blurb">Impact<', macro_card)
+        self.assertIn('id="macro-posture"', macro_card)
+        self.assertIn("Sources:", macro_card)
+
+    def test_brain_news_desk_unchanged(self) -> None:
+        html = self.client.get("/").text
+        brain_card = html.split('id="brain-news"', 1)[1].split("</section>", 1)[0]
+        self.assertIn('<div class="news-feed" id="brain-news-feed">', brain_card)
+        self.assertIn("News desk", brain_card)
 
 
 if __name__ == "__main__":

@@ -105,3 +105,79 @@ def format_decision_reply(status: DecisionStatus, decision: str, idea_id: int) -
     if status == "unknown_idea":
         return f"Idea #{idea_id} is no longer available."
     return "Idea decisions are unavailable right now — try again shortly."
+
+
+def volume_book_payload(*, limit: int = 100) -> dict[str, Any] | None:
+    """Hidden /volume page data: every paper trade + idea metadata."""
+    conn = _connect()
+    if conn is None:
+        return None
+    try:
+        with conn:
+            # paper_trades may not exist yet on older DBs
+            tables = {
+                str(r[0])
+                for r in conn.execute(
+                    "SELECT name FROM sqlite_master WHERE type='table'"
+                ).fetchall()
+            }
+            if "paper_trades" not in tables:
+                ideas = conn.execute(
+                    """
+                    SELECT id, source, product_id, direction, title, confidence,
+                           status, entry, stop_loss, take_profits_json, created_at, sent_at
+                    FROM ideas
+                    ORDER BY id DESC
+                    LIMIT ?
+                    """,
+                    (limit,),
+                ).fetchall()
+                return {
+                    "available": True,
+                    "summary": {"open": 0, "closed": 0, "win_rate": None, "pnl_pct_sum": 0.0},
+                    "trades": [],
+                    "ideas": [dict(r) for r in ideas],
+                }
+
+            trades = conn.execute(
+                """
+                SELECT p.*, i.title, i.source, i.confidence, i.status AS idea_status,
+                       i.sent_at, i.blurb
+                FROM paper_trades p
+                LEFT JOIN ideas i ON i.id = p.idea_id
+                ORDER BY p.id DESC
+                LIMIT ?
+                """,
+                (limit,),
+            ).fetchall()
+            status_rows = conn.execute(
+                """
+                SELECT status, COUNT(*) AS n, COALESCE(SUM(pnl_pct), 0) AS pnl
+                FROM paper_trades GROUP BY status
+                """
+            ).fetchall()
+        by_status = {
+            str(r["status"]): {"count": int(r["n"]), "pnl_pct_sum": float(r["pnl"])}
+            for r in status_rows
+        }
+        closed = by_status.get("hit_tp", {"count": 0})["count"] + by_status.get(
+            "hit_sl", {"count": 0}
+        )["count"]
+        wins = by_status.get("hit_tp", {"count": 0})["count"]
+        return {
+            "available": True,
+            "summary": {
+                "by_status": by_status,
+                "open": by_status.get("open", {"count": 0})["count"],
+                "closed": closed,
+                "win_rate": (wins / closed) if closed else None,
+                "pnl_pct_sum": sum(v["pnl_pct_sum"] for v in by_status.values()),
+            },
+            "trades": [dict(r) for r in trades],
+            "ideas": [],
+        }
+    except sqlite3.Error:
+        logger.exception("volume book read failed")
+        return None
+    finally:
+        conn.close()

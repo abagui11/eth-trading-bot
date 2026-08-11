@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 from datetime import datetime, timezone
+from email.utils import parsedate_to_datetime
+from urllib.parse import urlparse
 
 # Hard-coded glossary for setup tags / badges shown in the journal.
 # Wording follows Trading Guide/Trading Guide.md (24h range, SFP, OB/fib stack).
@@ -116,6 +118,65 @@ def parse_ts(value: str | None) -> datetime | None:
     if dt.tzinfo is None:
         dt = dt.replace(tzinfo=timezone.utc)
     return dt
+
+
+def parse_news_ts(value: str | None) -> datetime | None:
+    """Headline timestamps arrive as ISO (ingest) or RFC 2822 (RSS pubDate)."""
+    dt = parse_ts(value)
+    if dt is not None:
+        return dt
+    if not value:
+        return None
+    try:
+        dt = parsedate_to_datetime(str(value).strip())
+    except (TypeError, ValueError):
+        return None
+    if dt is None:
+        return None
+    return dt if dt.tzinfo else dt.replace(tzinfo=timezone.utc)
+
+
+def format_news_age(value: str | None, *, now: datetime | None = None) -> str:
+    """Relative age of a headline: ``just now``, ``12m ago``, ``3d ago``."""
+    dt = parse_news_ts(value)
+    if dt is None:
+        return ""
+    delta = (now or datetime.now(timezone.utc)) - dt
+    minutes = int(delta.total_seconds() // 60)
+    if minutes < 1:
+        return "just now"
+    if minutes < 60:
+        return f"{minutes}m ago"
+    hours = minutes // 60
+    if hours < 24:
+        return f"{hours}h ago"
+    return f"{hours // 24}d ago"
+
+
+def format_news_when(value: str | None) -> str:
+    """Dateline for a headline, e.g. ``Aug 10 · 10:45 UTC``."""
+    dt = parse_news_ts(value)
+    if dt is None:
+        return ""
+    return f"{dt.strftime('%b')} {dt.day} · {dt.hour:02d}:{dt.minute:02d} UTC"
+
+
+def format_news_iso(value: str | None) -> str:
+    """Machine-readable stamp for ``<time datetime=...>`` (RSS gives RFC 2822)."""
+    dt = parse_news_ts(value)
+    return dt.isoformat() if dt else ""
+
+
+def news_source_label(item: dict | None) -> str:
+    """Short publisher label — the URL host beats the verbose RSS feed title."""
+    if not item:
+        return ""
+    url = str(item.get("url") or "")
+    host = urlparse(url).netloc.lower()
+    if host:
+        return host[4:] if host.startswith("www.") else host
+    source = str(item.get("source") or "").strip()
+    return source.split(":", 1)[0][:28]
 
 
 def format_trade_time(value: str | None) -> str:

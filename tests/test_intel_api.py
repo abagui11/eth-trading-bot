@@ -10,6 +10,7 @@ from unittest import mock
 from fastapi.testclient import TestClient
 
 import config
+from dashboard import data
 from intelligence import store
 
 _TOKEN = "svc-token"
@@ -39,11 +40,22 @@ class IntelApiTests(unittest.TestCase):
         self._tokens_patch.start()
         self.auth = {"Authorization": f"Bearer {_TOKEN}"}
 
+        # Keep the suite off the network: the spot quotes are memoized module
+        # side, so a live fetch here would leak into later tests.
+        self._spot_patch = mock.patch(
+            "dashboard.data.research.get_spot_prices",
+            return_value={"ETH-USD": 2000.0, "BTC-USD": 60000.0},
+        )
+        self._spot_patch.start()
+        data.reset_spot_cache()
+
         from dashboard.app import create_app
 
         self.client = TestClient(create_app())
 
     def tearDown(self) -> None:
+        data.reset_spot_cache()
+        self._spot_patch.stop()
         self._tokens_patch.stop()
         config.LEDGER_DB = self._orig_db
         try:

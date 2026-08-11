@@ -3,12 +3,31 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
-  <title>ETH/BTC Trading Agent</title>
-  <link rel="stylesheet" href="/static/style.css?v=journal11">
+  <title>Republic Technologies Intelligence</title>
+  <link rel="stylesheet" href="/static/style.css?v=news2">
 </head>
 <body>
   {% macro tip_badge(label, class_name='badge-none') -%}
   <span class="badge {{ class_name }}" title="{{ label|tag_tip }}">{{ label }}</span>
+  {%- endmacro %}
+
+  {% macro bias_badge(side, pct, source) -%}
+  {% set cls = 'badge-good' if side == 'bullish' else ('badge-bad' if side == 'bearish' else 'badge-none') %}
+  <span class="badge {{ cls }}" title="{{ source or 'deterministic' }}">{{ side }} {{ pct }}%</span>
+  {%- endmacro %}
+
+  {% macro stance_cell(stances, product_id, timeframe) -%}
+  {% set ns = namespace(found=none) %}
+  {% for s in stances %}
+    {% if s.product_id == product_id and s.timeframe == timeframe %}
+      {% set ns.found = s %}
+    {% endif %}
+  {% endfor %}
+  {% if ns.found %}
+  <span class="stance-pill stance-{{ ns.found.stance }}" title="{{ ns.found.rationale or '' }}">{{ ns.found.stance }}{% if ns.found.confidence is not none %} · {{ (ns.found.confidence * 100)|int }}%{% endif %}</span>
+  {% else %}
+  <span class="stance-pill stance-none">—</span>
+  {% endif %}
   {%- endmacro %}
 
   {% macro score_badge(score, badge, tip) -%}
@@ -174,10 +193,248 @@
 
   <div class="wrap">
     <header>
-      <h1>ETH/BTC Trading Agent</h1>
-      <p class="sub">Public agent journal — charts, relative strength, and house-book trades. Personal demo books live under My book in Telegram.</p>
+      <h1>Republic Technologies Intelligence</h1>
+      <p class="sub">What the brain is ingesting — multi-horizon posture, cycle thesis, ranked news, and live tape. HQ trade logic is unchanged.</p>
     </header>
 
+    <nav class="hub-tabs" role="tablist">
+      <button type="button" class="hub-tab is-active" data-tab="brain" role="tab" aria-selected="true">Brain</button>
+      <button type="button" class="hub-tab" data-tab="trading" role="tab" aria-selected="false">Trading Log</button>
+    </nav>
+
+    <div id="tab-brain" class="hub-panel" role="tabpanel">
+      <section class="card" id="brain-tape">
+        <h2>Live tape</h2>
+        <div class="metrics">
+          <div class="metric">
+            <div class="label">BTC-USD</div>
+            <div class="value" id="brain-spot-btc">${{ "%.2f"|format(brain.spots.get('BTC-USD', 0) or 0) }}</div>
+          </div>
+          <div class="metric">
+            <div class="label">ETH-USD</div>
+            <div class="value" id="brain-spot-eth">${{ "%.2f"|format(brain.spots.get('ETH-USD', 0) or 0) }}</div>
+          </div>
+          <div class="metric">
+            <div class="label">Stance cycle</div>
+            <div class="value" style="font-size:0.85rem" id="brain-cycle-ts">{{ brain.cycle_ts or '—' }}</div>
+          </div>
+        </div>
+      </section>
+
+      <section class="card" id="brain-stances">
+        <h2>Multi-horizon posture</h2>
+        <p class="sub" style="margin-bottom:10px">H4 / H1 / M15 stances for BTC and ETH. Click a pill for the rationale.</p>
+        <div class="table-scroll">
+          <table class="stance-table">
+            <thead>
+              <tr><th></th><th>H4</th><th>H1</th><th>M15</th></tr>
+            </thead>
+            <tbody id="brain-stance-body">
+              <tr>
+                <td>BTC</td>
+                <td>{{ stance_cell(brain.stances, 'BTC-USD', 'H4') }}</td>
+                <td>{{ stance_cell(brain.stances, 'BTC-USD', 'H1') }}</td>
+                <td>{{ stance_cell(brain.stances, 'BTC-USD', 'M15') }}</td>
+              </tr>
+              <tr>
+                <td>ETH</td>
+                <td>{{ stance_cell(brain.stances, 'ETH-USD', 'H4') }}</td>
+                <td>{{ stance_cell(brain.stances, 'ETH-USD', 'H1') }}</td>
+                <td>{{ stance_cell(brain.stances, 'ETH-USD', 'M15') }}</td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+        {% if brain.medium.summary %}
+        <p class="sub" style="margin-top:10px" id="brain-medium">{{ brain.medium.summary }}</p>
+        {% endif %}
+        <div class="funding-row" id="brain-funding" style="margin-top:10px">
+          {% for pid, f in brain.funding.items() %}
+          <span class="badge badge-none">{{ pid|replace('-USD','') }} funding: {{ f.regime or '—' }}</span>
+          {% endfor %}
+        </div>
+      </section>
+
+      {% if brain.structure_charts %}
+      <section class="card" id="brain-structure">
+        <h2>Marked structure · H4 / H1 / M15</h2>
+        <p class="sub" style="margin-bottom:10px">
+          What each posture is reading: EMA12/26, the 40-bar range behind range position, and the
+          10-bar vs prior-10-bar swings behind HH/HL/LH/LL. Rebuilt every stance cycle.
+        </p>
+        {% for row in brain.structure_charts %}
+        <div class="structure-row">
+          <h3 class="structure-product">{{ row.product_label }}</h3>
+          <div class="structure-grid">
+            {% for c in row.charts %}
+            <figure class="structure-chart">
+              <figcaption>
+                <span class="structure-tf">{{ c.timeframe }}</span>
+                <span class="stance-pill stance-{{ c.stance or 'none' }}"
+                      {% if c.rationale %}title="{{ c.rationale }}"{% endif %}>
+                  {{ c.stance or '—' }}{% if c.confidence is not none %} {{ (c.confidence * 100)|round|int }}%{% endif %}
+                </span>
+              </figcaption>
+              <img class="chart-img zoomable" src="{{ c.url }}"
+                   alt="{{ row.product_label }} {{ c.timeframe }} marked structure" loading="lazy">
+            </figure>
+            {% endfor %}
+          </div>
+        </div>
+        {% endfor %}
+      </section>
+      {% endif %}
+
+      <section class="card" id="brain-cycle">
+        <h2>Long-horizon · 4-year cycle</h2>
+        {% if brain.long_thesis %}
+        <p class="sub">
+          Phase <strong>{{ brain.long_thesis.cycle_phase or '—' }}</strong>
+          · Bias <strong>{{ brain.long_thesis.bias or '—' }}</strong>
+          · As of {{ brain.long_thesis.as_of_date or '—' }}
+        </p>
+        {% if brain.long_thesis.btc_thesis %}
+        <p id="brain-btc-thesis">{{ brain.long_thesis.btc_thesis }}</p>
+        {% endif %}
+        {% if brain.long_thesis.eth_conduit %}
+        <p class="sub" id="brain-eth-conduit"><strong>ETH conduit:</strong> {{ brain.long_thesis.eth_conduit }}</p>
+        {% endif %}
+        {% if brain.long_thesis.gold_note %}
+        <p class="sub" id="brain-gold"><strong>Gold:</strong> {{ brain.long_thesis.gold_note }}</p>
+        {% endif %}
+
+        {% set pos = brain.long_thesis.cycle_position %}
+        {% if pos %}
+        <div class="metric-grid" id="brain-cycle-metrics">
+          <div class="metric">
+            <div class="label">Since halving</div>
+            <div class="value">{{ pos.months_since_halving }}m<span class="sub"> · {{ pos.days_since_halving }}d</span></div>
+          </div>
+          <div class="metric">
+            <div class="label">Cycle progress</div>
+            <div class="value">{{ pos.cycle_progress_pct }}%</div>
+          </div>
+          <div class="metric">
+            <div class="label">From ATH</div>
+            <div class="value">{{ pos.drawdown_from_ath_pct if pos.drawdown_from_ath_pct is not none else '—' }}%</div>
+          </div>
+          <div class="metric">
+            <div class="label">Next projected pivot</div>
+            <div class="value" style="font-size:0.85rem">
+              {% if pos.next_projected_pivot %}
+              {{ pos.next_projected_pivot.kind }} · {{ pos.next_projected_pivot.date }}
+              <span class="sub">({{ pos.days_to_next_pivot }}d)</span>
+              {% else %}—{% endif %}
+            </div>
+          </div>
+        </div>
+        {% endif %}
+
+        {% if brain.long_thesis.figure_url %}
+        <div class="cycle-plot-wrap">
+          <div id="brain-cycle-plot" data-figure-url="{{ brain.long_thesis.figure_url }}"></div>
+          <p class="sub cycle-plot-hint">Drag to pan · scroll or box-select to zoom · double-click to reset. Green = expansion leg, red = drawdown leg, dotted = projected.</p>
+        </div>
+        {% endif %}
+
+        {% if brain.long_thesis.cycle_segments %}
+        <details class="cycle-phases">
+          <summary>Phase table — every leg with its move and duration</summary>
+          <div class="table-scroll">
+            <table>
+              <thead>
+                <tr><th>Leg</th><th>From</th><th>To</th><th>Move</th><th>Bars</th><th>Status</th></tr>
+              </thead>
+              <tbody>
+                {% for seg in brain.long_thesis.cycle_segments %}
+                <tr>
+                  <td class="{{ 'seg-up' if seg.kind == 'expansion' else 'seg-down' }}">{{ seg.kind }}</td>
+                  <td>{{ seg.start_date }}</td>
+                  <td>{{ seg.end_date }}</td>
+                  <td class="{{ 'seg-up' if (seg.change_pct or 0) >= 0 else 'seg-down' }}">
+                    {% if seg.change_pct is not none %}{{ '%+.2f'|format(seg.change_pct) }}%{% else %}—{% endif %}
+                  </td>
+                  <td>{{ seg.months }}</td>
+                  <td>{% if seg.projected %}projected{% elif seg.in_progress %}in progress{% else %}closed{% endif %}</td>
+                </tr>
+                {% endfor %}
+              </tbody>
+            </table>
+          </div>
+        </details>
+        {% endif %}
+
+        {% if brain.long_thesis.chart_url %}
+        <details class="cycle-static">
+          <summary>Static cycle chart (Telegram artifact)</summary>
+          <figure class="trade-chart" style="margin-top:12px">
+            <figcaption>BTC 4-year cycle (log)</figcaption>
+            <img class="chart-img zoomable" id="brain-cycle-img" src="{{ brain.long_thesis.chart_url }}" alt="BTC four-year cycle chart" loading="lazy">
+          </figure>
+        </details>
+        {% endif %}
+        {% else %}
+        <p class="sub">Long thesis not ready yet — refreshes shortly after agent start, then daily.</p>
+        {% endif %}
+      </section>
+
+      <section class="card" id="brain-news">
+        <h2>News desk</h2>
+        <p class="sub" style="margin-bottom:10px">
+          Ranked bullish/bearish with conviction %. Deterministic score shows first; hourly batched LLM refine updates it (one Claude call).
+        </p>
+        <div class="news-feed" id="brain-news-feed">
+          {% set news_items = brain.macro.active or brain.macro.recent %}
+          {% if news_items %}
+          <ul class="news-list" id="brain-news-list">
+            {% for item in news_items %}
+            {% set when = item.published_at or item.ingested_at %}
+            <li class="news-item">
+              <div class="news-meta">
+                {% if item.bias_side and item.bias_pct is not none %}
+                {{ bias_badge(item.bias_side, item.bias_pct, item.bias_source) }}
+                {% endif %}
+                {% if item.severity %}
+                <span class="badge badge-macro-sev-{{ item.severity }}">SEV {{ item.severity }}</span>
+                {% endif %}
+                <span class="news-source">{{ item | news_source }}</span>
+                <time class="news-when" datetime="{{ when | news_iso }}">{{ when | news_when }}</time>
+                {% if when | news_age %}
+                <span class="news-age">{{ when | news_age }}</span>
+                {% endif %}
+              </div>
+              {% if item.url %}
+              <a class="news-title" href="{{ item.url }}" target="_blank" rel="noopener">{{ item.title }}</a>
+              {% else %}
+              <span class="news-title">{{ item.title }}</span>
+              {% endif %}
+              {% if item.bias_one_liner or item.eth_impact_summary %}
+              <p class="news-blurb">{{ item.bias_one_liner or item.eth_impact_summary }}</p>
+              {% endif %}
+            </li>
+            {% endfor %}
+          </ul>
+          {% else %}
+          <p class="sub">No headlines yet.</p>
+          {% endif %}
+        </div>
+      </section>
+
+      <section class="card" id="brain-zmove">
+        <h2>Recent z-moves</h2>
+        {% if brain.zmoves %}
+        <ul class="plain" id="brain-zmove-list">
+          {% for z in brain.zmoves %}
+          <li>{{ z.product_id }} {{ z.metric }} z={{ "%.1f"|format(z.z) }} · {{ z.bar_ts or z.created_at }}</li>
+          {% endfor %}
+        </ul>
+        {% else %}
+        <p class="sub">No recent z-move events.</p>
+        {% endif %}
+      </section>
+    </div>
+
+    <div id="tab-trading" class="hub-panel" role="tabpanel" hidden>
     <section class="card" id="status-card">
       <h2>Agent status</h2>
       <div class="metrics" style="margin-bottom:12px">
@@ -254,40 +511,58 @@
       <p class="sub" style="margin-bottom:10px">
         Sources: {{ macro.monitored_sources | join(', ') }}
       </p>
-      <div class="macro-scroll" id="macro-feed">
+      <div class="news-feed" id="macro-feed">
         {% if macro.active %}
-        <p class="sub macro-scroll-label">Active (injected into agent)</p>
-        <ul class="macro-list" id="macro-active">
+        <p class="sub news-section">Active (injected into agent)</p>
+        <ul class="news-list" id="macro-active">
           {% for item in macro.active %}
-          <li class="macro-item macro-active-item">
-            <span class="badge badge-macro-sev-{{ item.severity }}">SEV {{ item.severity }}</span>
-            <span class="badge badge-none">{{ item.eth_bias or 'neutral' }}</span>
+          {% set when = item.published_at or item.ingested_at %}
+          <li class="news-item">
+            <div class="news-meta">
+              {% if item.severity %}
+              <span class="badge badge-macro-sev-{{ item.severity }}">SEV {{ item.severity }}</span>
+              {% endif %}
+              <span class="badge badge-none">{{ item.eth_bias or 'neutral' }}</span>
+              <span class="news-source">{{ item | news_source }}</span>
+              <time class="news-when" datetime="{{ when | news_iso }}">{{ when | news_when }}</time>
+              {% if when | news_age %}
+              <span class="news-age">{{ when | news_age }}</span>
+              {% endif %}
+            </div>
             {% if item.url %}
-            <a href="{{ item.url }}" target="_blank" rel="noopener">{{ item.title }}</a>
+            <a class="news-title" href="{{ item.url }}" target="_blank" rel="noopener">{{ item.title }}</a>
             {% else %}
-            {{ item.title }}
+            <span class="news-title">{{ item.title }}</span>
             {% endif %}
             {% if item.eth_impact_summary %}
-            <p class="macro-impact">{{ item.eth_impact_summary }}</p>
+            <p class="news-blurb">{{ item.eth_impact_summary }}</p>
             {% endif %}
           </li>
           {% endfor %}
         </ul>
         {% else %}
-        <p class="sub" id="macro-active-empty">No active macro events (severity ≥ 3).</p>
+        <p class="sub news-empty" id="macro-active-empty">No active macro events (severity ≥ 3).</p>
         {% endif %}
         {% if macro.recent %}
-        <p class="sub macro-scroll-label">Recent ingested</p>
-        <ul class="macro-list" id="macro-recent">
+        <p class="sub news-section">Recent ingested</p>
+        <ul class="news-list" id="macro-recent">
           {% for item in macro.recent[:15] %}
-          <li class="macro-item {% if item.status == 'ignored' %}macro-ignored{% endif %}">
-            <span class="badge badge-none">kw {{ item.keyword_score }}</span>
-            {% if item.severity %}<span class="badge badge-macro-sev-{{ item.severity }}">SEV {{ item.severity }}</span>{% endif %}
-            <span class="macro-status">{{ item.status }}</span>
+          {% set when = item.published_at or item.ingested_at %}
+          <li class="news-item {% if item.status == 'ignored' %}macro-ignored{% endif %}">
+            <div class="news-meta">
+              <span class="badge badge-none">kw {{ item.keyword_score }}</span>
+              {% if item.severity %}<span class="badge badge-macro-sev-{{ item.severity }}">SEV {{ item.severity }}</span>{% endif %}
+              <span class="macro-status">{{ item.status }}</span>
+              <span class="news-source">{{ item | news_source }}</span>
+              <time class="news-when" datetime="{{ when | news_iso }}">{{ when | news_when }}</time>
+              {% if when | news_age %}
+              <span class="news-age">{{ when | news_age }}</span>
+              {% endif %}
+            </div>
             {% if item.url %}
-            <a href="{{ item.url }}" target="_blank" rel="noopener">{{ item.title }}</a>
+            <a class="news-title" href="{{ item.url }}" target="_blank" rel="noopener">{{ item.title }}</a>
             {% else %}
-            {{ item.title }}
+            <span class="news-title">{{ item.title }}</span>
             {% endif %}
           </li>
           {% endfor %}
@@ -435,9 +710,10 @@
       </div>
       <button type="button" class="load-more" id="load-more-cycles" data-offset="{{ cycles|length }}">Load more cycles</button>
     </section>
+    </div><!-- /tab-trading -->
 
     <footer>
-      Paper trading only — not financial advice. Data refreshes every 60s.
+      Paper trading only — not financial advice. Brain + tape refresh every 60s.
     </footer>
   </div>
 
@@ -446,7 +722,163 @@
     <img class="chart-lightbox-img" alt="">
   </div>
 
+  <script src="https://cdn.plot.ly/plotly-2.35.2.min.js" charset="utf-8" defer></script>
   <script>
+    (function initCyclePlot() {
+      var host = document.getElementById('brain-cycle-plot');
+      if (!host) return;
+
+      function render() {
+        if (!window.Plotly) return;
+        fetch(host.dataset.figureUrl)
+          .then(function (res) {
+            if (!res.ok) throw new Error('cycle figure unavailable');
+            return res.json();
+          })
+          .then(function (spec) {
+            window.Plotly.newPlot(host, spec.data, spec.layout, {
+              responsive: true,
+              displaylogo: false,
+              scrollZoom: true,
+              modeBarButtonsToRemove: ['lasso2d', 'select2d'],
+            });
+          })
+          .catch(function () {
+            host.innerHTML = '<p class="sub">Interactive cycle chart unavailable — see the static chart below.</p>';
+          });
+      }
+
+      // plotly.js is deferred; wait for it if the parser hasn't run it yet.
+      if (window.Plotly) render();
+      else window.addEventListener('load', render, { once: true });
+    })();
+
+    (function initHubTabs() {
+      var tabs = document.querySelectorAll('.hub-tab');
+      var brain = document.getElementById('tab-brain');
+      var trading = document.getElementById('tab-trading');
+      tabs.forEach(function (btn) {
+        btn.addEventListener('click', function () {
+          var name = btn.getAttribute('data-tab');
+          tabs.forEach(function (b) {
+            var on = b === btn;
+            b.classList.toggle('is-active', on);
+            b.setAttribute('aria-selected', on ? 'true' : 'false');
+          });
+          if (brain) brain.hidden = name !== 'brain';
+          if (trading) trading.hidden = name !== 'trading';
+        });
+      });
+    })();
+
+    function stancePill(s) {
+      if (!s) return '<span class="stance-pill stance-none">—</span>';
+      var conf = (s.confidence != null) ? (' · ' + Math.round(Number(s.confidence) * 100) + '%') : '';
+      var tip = (s.rationale || '').replace(/"/g, '&quot;');
+      return '<span class="stance-pill stance-' + s.stance + '" title="' + tip + '">' + s.stance + conf + '</span>';
+    }
+
+    function biasBadge(side, pct, source) {
+      var cls = side === 'bullish' ? 'badge-good' : (side === 'bearish' ? 'badge-bad' : 'badge-none');
+      return '<span class="badge ' + cls + '" title="' + (source || 'deterministic') + '">' + side + ' ' + pct + '%</span>';
+    }
+
+    // Dateline helpers — mirror the Jinja news_when/news_age/news_source filters
+    // so a live refresh renders identically to the server-rendered page.
+    var MONTHS = ['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'];
+
+    function newsDate(value) {
+      if (!value) return null;
+      var d = new Date(value);
+      return isNaN(d.getTime()) ? null : d;
+    }
+
+    function newsWhen(value) {
+      var d = newsDate(value);
+      if (!d) return '';
+      var hh = String(d.getUTCHours()).padStart(2, '0');
+      var mm = String(d.getUTCMinutes()).padStart(2, '0');
+      return MONTHS[d.getUTCMonth()] + ' ' + d.getUTCDate() + ' · ' + hh + ':' + mm + ' UTC';
+    }
+
+    function newsAge(value) {
+      var d = newsDate(value);
+      if (!d) return '';
+      var minutes = Math.floor((Date.now() - d.getTime()) / 60000);
+      if (minutes < 1) return 'just now';
+      if (minutes < 60) return minutes + 'm ago';
+      var hours = Math.floor(minutes / 60);
+      return hours < 24 ? hours + 'h ago' : Math.floor(hours / 24) + 'd ago';
+    }
+
+    function newsSource(item) {
+      try {
+        if (item.url) return new URL(item.url).hostname.replace(/^www\./, '');
+      } catch (e) { /* fall through to feed title */ }
+      return String(item.source || '').split(':')[0].slice(0, 28);
+    }
+
+    async function refreshBrain() {
+      try {
+        var res = await fetch('/api/brain');
+        if (!res.ok) return;
+        var brain = await res.json();
+        var spots = brain.spots || {};
+        var btc = document.getElementById('brain-spot-btc');
+        var eth = document.getElementById('brain-spot-eth');
+        if (btc && spots['BTC-USD'] != null) btc.textContent = '$' + Number(spots['BTC-USD']).toFixed(2);
+        if (eth && spots['ETH-USD'] != null) eth.textContent = '$' + Number(spots['ETH-USD']).toFixed(2);
+        var cts = document.getElementById('brain-cycle-ts');
+        if (cts) cts.textContent = brain.cycle_ts || '—';
+
+        function findStance(pid, tf) {
+          return (brain.stances || []).find(function (s) { return s.product_id === pid && s.timeframe === tf; });
+        }
+        var body = document.getElementById('brain-stance-body');
+        if (body) {
+          body.innerHTML =
+            '<tr><td>BTC</td><td>' + stancePill(findStance('BTC-USD','H4')) + '</td><td>' + stancePill(findStance('BTC-USD','H1')) + '</td><td>' + stancePill(findStance('BTC-USD','M15')) + '</td></tr>' +
+            '<tr><td>ETH</td><td>' + stancePill(findStance('ETH-USD','H4')) + '</td><td>' + stancePill(findStance('ETH-USD','H1')) + '</td><td>' + stancePill(findStance('ETH-USD','M15')) + '</td></tr>';
+        }
+
+        var fund = document.getElementById('brain-funding');
+        if (fund && brain.funding) {
+          fund.innerHTML = Object.keys(brain.funding).map(function (pid) {
+            var f = brain.funding[pid] || {};
+            return '<span class="badge badge-none">' + pid.replace('-USD','') + ' funding: ' + (f.regime || '—') + '</span>';
+          }).join(' ');
+        }
+
+        var list = document.getElementById('brain-news-list');
+        if (list) {
+          var items = (brain.macro && (brain.macro.active && brain.macro.active.length ? brain.macro.active : brain.macro.recent)) || [];
+          list.innerHTML = items.map(function (item) {
+            var when = item.published_at || item.ingested_at;
+            var title = item.url
+              ? '<a class="news-title" href="' + item.url + '" target="_blank" rel="noopener">' + (item.title || '') + '</a>'
+              : '<span class="news-title">' + (item.title || '') + '</span>';
+            var bias = (item.bias_side != null && item.bias_pct != null)
+              ? biasBadge(item.bias_side, item.bias_pct, item.bias_source) + ' '
+              : '';
+            var sev = item.severity != null
+              ? '<span class="badge badge-macro-sev-' + item.severity + '">SEV ' + item.severity + '</span> '
+              : '';
+            var age = newsAge(when);
+            var meta = '<div class="news-meta">' + bias + sev +
+              '<span class="news-source">' + newsSource(item) + '</span>' +
+              '<time class="news-when">' + newsWhen(when) + '</time>' +
+              (age ? '<span class="news-age">' + age + '</span>' : '') +
+              '</div>';
+            var blurb = (item.bias_one_liner || item.eth_impact_summary)
+              ? '<p class="news-blurb">' + (item.bias_one_liner || item.eth_impact_summary) + '</p>'
+              : '';
+            return '<li class="news-item">' + meta + title + blurb + '</li>';
+          }).join('');
+        }
+      } catch (e) {}
+    }
+    setInterval(refreshBrain, 60000);
+
     function initTradeCards(root) {
       (root || document).querySelectorAll('.trade-card > .trade-summary').forEach(function (btn) {
         if (btn.dataset.bound) return;

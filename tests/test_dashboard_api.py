@@ -11,6 +11,8 @@ from unittest.mock import patch
 
 from fastapi.testclient import TestClient
 
+from dashboard import data
+
 
 class DashboardApiTests(unittest.TestCase):
     def setUp(self) -> None:
@@ -124,12 +126,14 @@ class DashboardApiTests(unittest.TestCase):
             return_value={"ETH-USD": 2000.0, "BTC-USD": 60000.0},
         )
         self._spot.start()
+        data.reset_spot_cache()
 
         from dashboard.app import create_app
 
         self.client = TestClient(create_app())
 
     def tearDown(self) -> None:
+        data.reset_spot_cache()
         self._spot.stop()
         self._config_root.stop()
         self._config_charts.stop()

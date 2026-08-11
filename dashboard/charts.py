@@ -52,6 +52,18 @@ def convention_chart_path(cycle_id: str, tf: str, kind: str) -> Path | None:
     return None
 
 
+STANCE_TFS = frozenset({"H4", "H1", "M15"})
+
+
+def stance_chart_path(product_id: str, timeframe: str) -> Path | None:
+    """Marked stance-board PNG for a product/timeframe, or None if not rendered."""
+    tf = (timeframe or "").upper()
+    if not product_id or tf not in STANCE_TFS:
+        return None
+    slug = product_id.replace("/", "_").replace("-", "_")
+    return resolve_chart_path(str(config.CHARTS_DIR / f"stance_{slug}_{tf}_marked.png"))
+
+
 def latest_marked_h4_path(product_id: str) -> Path | None:
     """Newest ``*_{slug}_H4_marked.png`` on disk for a product (ETH-USD / BTC-USD)."""
     if not product_id:

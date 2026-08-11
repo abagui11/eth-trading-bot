@@ -21,6 +21,12 @@ _spots_cache: tuple[dict[str, float], float] = ({}, 0.0)
 _SPOT_TTL_SEC = 30.0
 
 
+def reset_spot_cache() -> None:
+    """Drop the memoized spot quotes so the next read refetches."""
+    global _spots_cache
+    _spots_cache = ({}, 0.0)
+
+
 def get_live_spot() -> dict[str, Any]:
     """Backward-compatible single ETH spot plus multi-asset map."""
     spots = get_live_spots()

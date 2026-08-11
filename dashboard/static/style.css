@@ -244,27 +244,7 @@ footer {
 
 a { color: var(--accent); }
 
-.macro-list {
-  list-style: none;
-  margin: 0;
-  padding: 0;
-}
-
-.macro-item {
-  padding: 8px 0;
-  border-bottom: 1px solid var(--border);
-  font-size: 0.875rem;
-}
-
-.macro-item:last-child { border-bottom: none; }
-
 .macro-ignored { opacity: 0.65; }
-
-.macro-impact {
-  margin: 4px 0 0;
-  color: var(--muted);
-  font-size: 0.8rem;
-}
 
 .macro-status {
   font-size: 0.7rem;
@@ -273,36 +253,6 @@ a { color: var(--accent); }
 }
 
 .macro-gate { color: var(--warn); font-weight: 600; }
-
-.macro-scroll {
-  width: min(100%, 640px);
-  aspect-ratio: 1 / 1;
-  max-height: none;
-  overflow-y: auto;
-  overflow-x: hidden;
-  border: 1px solid var(--border);
-  border-radius: 8px;
-  padding: 8px 10px;
-  background: var(--bg);
-  -webkit-overflow-scrolling: touch;
-}
-
-.macro-scroll-label {
-  margin: 10px 0 6px;
-  position: sticky;
-  top: 0;
-  background: var(--bg);
-  padding: 2px 0;
-  z-index: 1;
-}
-
-.macro-scroll-label:first-child {
-  margin-top: 0;
-}
-
-.macro-scroll .macro-item:last-child {
-  border-bottom: none;
-}
 
 .badge[title] {
   cursor: help;
@@ -694,4 +644,198 @@ body.lightbox-open {
 
 .load-more { margin-top: 12px; background: transparent; border: 1px solid rgba(139, 148, 158, 0.35); color: var(--text); border-radius: 8px; padding: 8px 14px; cursor: pointer; }
 .load-more:disabled { opacity: 0.5; cursor: default; }
+
+/* Intelligence Hub tabs */
+.hub-tabs {
+  display: flex;
+  gap: 8px;
+  margin: 0 0 16px;
+  border-bottom: 1px solid var(--border);
+  padding-bottom: 8px;
+}
+.hub-tab {
+  background: transparent;
+  border: 1px solid transparent;
+  color: var(--muted, #8b949e);
+  border-radius: 8px;
+  padding: 8px 14px;
+  cursor: pointer;
+  font: inherit;
+}
+.hub-tab.is-active {
+  color: var(--text);
+  border-color: rgba(139, 148, 158, 0.45);
+  background: rgba(139, 148, 158, 0.08);
+}
+.stance-table td, .stance-table th { text-align: center; }
+.stance-table td:first-child, .stance-table th:first-child { text-align: left; }
+.stance-pill {
+  display: inline-block;
+  padding: 2px 8px;
+  border-radius: 999px;
+  font-size: 0.75rem;
+  border: 1px solid rgba(139, 148, 158, 0.35);
+}
+.stance-bullish { color: #3fb950; border-color: rgba(63, 185, 80, 0.45); }
+.stance-bearish { color: #f85149; border-color: rgba(248, 81, 73, 0.45); }
+.stance-neutral, .stance-none { color: var(--muted, #8b949e); }
+.funding-row { display: flex; flex-wrap: wrap; gap: 6px; }
+
+/* —— Marked structure board (Brain tab) —— */
+.structure-row + .structure-row { margin-top: 18px; }
+
+.structure-product {
+  font-size: 0.8rem;
+  font-weight: 600;
+  color: var(--muted);
+  margin: 0 0 8px;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+
+.structure-grid {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 10px;
+}
+
+@media (max-width: 720px) {
+  .structure-grid { grid-template-columns: 1fr; }
+}
+
+.structure-chart {
+  margin: 0;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  overflow: hidden;
+  background: var(--bg);
+}
+
+.structure-chart figcaption {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 10px;
+  border-bottom: 1px solid var(--border);
+  font-size: 0.75rem;
+}
+
+.structure-tf {
+  font-weight: 700;
+  letter-spacing: 0.04em;
+}
+
+.structure-chart img {
+  display: block;
+  width: 100%;
+  height: auto;
+  cursor: zoom-in;
+}
+
+/* —— News desk (Brain tab + Trading Log macro monitor) —— */
+.news-feed {
+  width: 100%;
+  max-height: 620px;
+  overflow-y: auto;
+  overflow-x: hidden;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--bg);
+  -webkit-overflow-scrolling: touch;
+}
+
+.news-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+}
+
+/* Section headers inside a scrolling feed (Active / Recent ingested). */
+.news-section {
+  margin: 0;
+  padding: 8px 14px;
+  position: sticky;
+  top: 0;
+  z-index: 1;
+  background: var(--bg);
+  border-bottom: 1px solid var(--border);
+}
+
+.news-empty {
+  margin: 0;
+  padding: 12px 14px;
+}
+
+.news-item {
+  padding: 12px 14px;
+  border-bottom: 1px solid var(--border);
+}
+
+.news-item:last-child { border-bottom: none; }
+.news-item:hover { background: rgba(88, 166, 255, 0.05); }
+
+.news-meta {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+  margin-bottom: 6px;
+  font-size: 0.72rem;
+  color: var(--muted);
+}
+
+.news-source {
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  font-weight: 600;
+  margin-left: 2px;
+}
+.news-when { white-space: nowrap; }
+.news-age {
+  margin-left: auto;
+  white-space: nowrap;
+  opacity: 0.85;
+}
+
+.news-title {
+  display: block;
+  color: var(--text);
+  text-decoration: none;
+  font-size: 0.95rem;
+  font-weight: 600;
+  line-height: 1.35;
+}
+
+a.news-title:hover {
+  color: var(--accent);
+  text-decoration: underline;
+}
+
+.news-blurb {
+  margin: 5px 0 0;
+  color: var(--muted);
+  font-size: 0.82rem;
+  line-height: 1.45;
+}
+
+.cycle-plot-wrap { margin-top: 14px; }
+#brain-cycle-plot {
+  width: 100%;
+  min-height: 620px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  overflow: hidden;
+}
+.cycle-plot-hint { margin-top: 6px; font-size: 0.75rem; }
+.cycle-phases, .cycle-static { margin-top: 14px; }
+.cycle-phases summary, .cycle-static summary {
+  cursor: pointer;
+  color: var(--muted, #8b949e);
+  font-size: 0.85rem;
+  padding: 4px 0;
+}
+.cycle-phases summary:hover, .cycle-static summary:hover { color: var(--text); }
+.seg-up { color: #3fb950; }
+.seg-down { color: #f85149; }
+
 

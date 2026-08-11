@@ -1,0 +1,103 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="robots" content="noindex,nofollow" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Volume paper book</title>
+  <link rel="stylesheet" href="/static/style.css" />
+  <style>
+    .vol-wrap { max-width: 1100px; margin: 1.5rem auto; padding: 0 1rem 3rem; }
+    .vol-meta { color: #8b949e; font-size: 0.85rem; margin-bottom: 1rem; }
+    .vol-stats { display: flex; flex-wrap: wrap; gap: 1rem; margin-bottom: 1.5rem; }
+    .vol-stat { background: #161b22; border: 1px solid #30363d; padding: 0.75rem 1rem; min-width: 120px; }
+    .vol-stat b { display: block; font-size: 1.25rem; color: #e6edf3; }
+    table.vol { width: 100%; border-collapse: collapse; font-size: 0.85rem; }
+    table.vol th, table.vol td { border-bottom: 1px solid #30363d; padding: 0.45rem 0.5rem; text-align: left; }
+    table.vol th { color: #8b949e; font-weight: 600; }
+    .pnl-pos { color: #3fb950; }
+    .pnl-neg { color: #f85149; }
+    .badge { font-size: 0.7rem; text-transform: uppercase; letter-spacing: 0.04em; color: #8b949e; }
+  </style>
+</head>
+<body>
+  <div class="vol-wrap">
+    <h1>Volume paper book</h1>
+    <p class="vol-meta">
+      Hidden tracker for every public-lane idea (not just Telegram broadcasts).
+      Not linked from the hub. <a href="/">← Hub</a>
+    </p>
+
+    {% if not book or not book.available %}
+      <p>Volume DB unavailable — set <code>IDEAS_DB</code> and run the trade_ideas mill.</p>
+    {% else %}
+      {% set s = book.summary %}
+      <div class="vol-stats">
+        <div class="vol-stat"><span class="badge">Open</span><b>{{ s.open }}</b></div>
+        <div class="vol-stat"><span class="badge">Closed</span><b>{{ s.closed }}</b></div>
+        <div class="vol-stat"><span class="badge">Win rate</span>
+          <b>{% if s.win_rate is not none %}{{ '%.0f'|format(s.win_rate * 100) }}%{% else %}—{% endif %}</b>
+        </div>
+        <div class="vol-stat"><span class="badge">Σ PnL %</span>
+          <b class="{% if s.pnl_pct_sum >= 0 %}pnl-pos{% else %}pnl-neg{% endif %}">
+            {{ '%.2f'|format(s.pnl_pct_sum) }}%
+          </b>
+        </div>
+      </div>
+
+      {% if book.trades %}
+      <table class="vol">
+        <thead>
+          <tr>
+            <th>#</th><th>Idea</th><th>Src</th><th>Pair</th><th>Dir</th>
+            <th>Entry</th><th>SL</th><th>TP</th><th>Status</th><th>Exit</th><th>PnL%</th><th>Opened</th>
+          </tr>
+        </thead>
+        <tbody>
+          {% for t in book.trades %}
+          <tr>
+            <td>{{ t.id }}</td>
+            <td>#{{ t.idea_id }} {{ (t.title or '')[:48] }}</td>
+            <td>{{ t.source or '—' }}</td>
+            <td>{{ t.product_id }}</td>
+            <td>{{ t.direction }}</td>
+            <td>{{ '%.2f'|format(t.entry) if t.entry is not none else '—' }}</td>
+            <td>{{ '%.2f'|format(t.stop_loss) if t.stop_loss is not none else '—' }}</td>
+            <td>{{ '%.2f'|format(t.take_profit) if t.take_profit is not none else '—' }}</td>
+            <td>{{ t.status }}</td>
+            <td>{{ '%.2f'|format(t.exit_price) if t.exit_price is not none else '—' }}</td>
+            <td class="{% if t.pnl_pct is not none and t.pnl_pct >= 0 %}pnl-pos{% elif t.pnl_pct is not none %}pnl-neg{% endif %}">
+              {% if t.pnl_pct is not none %}{{ '%.2f'|format(t.pnl_pct) }}{% else %}—{% endif %}
+            </td>
+            <td>{{ t.opened_at }}</td>
+          </tr>
+          {% endfor %}
+        </tbody>
+      </table>
+      {% elif book.ideas %}
+      <p>No paper rows yet — showing raw ideas:</p>
+      <table class="vol">
+        <thead>
+          <tr><th>ID</th><th>Src</th><th>Pair</th><th>Dir</th><th>Title</th><th>Status</th><th>Created</th></tr>
+        </thead>
+        <tbody>
+          {% for i in book.ideas %}
+          <tr>
+            <td>{{ i.id }}</td>
+            <td>{{ i.source }}</td>
+            <td>{{ i.product_id }}</td>
+            <td>{{ i.direction }}</td>
+            <td>{{ (i.title or '')[:60] }}</td>
+            <td>{{ i.status }}</td>
+            <td>{{ i.created_at }}</td>
+          </tr>
+          {% endfor %}
+        </tbody>
+      </table>
+      {% else %}
+      <p>No volume ideas yet.</p>
+      {% endif %}
+    {% endif %}
+  </div>
+</body>
+</html>
