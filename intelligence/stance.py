@@ -17,6 +17,7 @@ from typing import Any
 import anthropic
 
 import bot_config
+import charts
 import config
 import research
 from intelligence import store
@@ -105,16 +106,56 @@ def compute_timeframe_features(
     }
 
 
-def gather_features() -> dict[str, dict[str, dict[str, Any]]]:
+def gather_bars() -> dict[str, dict[str, list[dict[str, Any]]]]:
+    """{product_id: {timeframe: bars}} for the stance products."""
+    return {
+        product_id: {
+            tf: research.get_ohlc(tf, product_id=product_id)
+            for tf in STANCE_TIMEFRAMES
+        }
+        for product_id in STANCE_PRODUCTS
+    }
+
+
+def gather_features(
+    bars_by_product: dict[str, dict[str, list[dict[str, Any]]]] | None = None,
+) -> dict[str, dict[str, dict[str, Any]]]:
     """{product_id: {timeframe: features}} for the stance products."""
-    out: dict[str, dict[str, dict[str, Any]]] = {}
+    bars_by_product = bars_by_product or gather_bars()
+    return {
+        product_id: {
+            tf: compute_timeframe_features(bars_by_product[product_id][tf])
+            for tf in STANCE_TIMEFRAMES
+        }
+        for product_id in STANCE_PRODUCTS
+    }
+
+
+def render_structure_board(
+    bars_by_product: dict[str, dict[str, list[dict[str, Any]]]],
+    features: dict[str, dict[str, dict[str, Any]]],
+    stances: list[dict[str, Any]],
+) -> dict[str, str]:
+    """Marked H4/H1/M15 PNGs for the hub. Never fails the stance cycle."""
+    by_key = {
+        (str(s.get("product_id")), str(s.get("timeframe"))): s for s in stances
+    }
+    paths: dict[str, str] = {}
     for product_id in STANCE_PRODUCTS:
-        per_tf: dict[str, dict[str, Any]] = {}
         for tf in STANCE_TIMEFRAMES:
-            bars = research.get_ohlc(tf, product_id=product_id)
-            per_tf[tf] = compute_timeframe_features(bars)
-        out[product_id] = per_tf
-    return out
+            stance_row = by_key.get((product_id, tf)) or {}
+            try:
+                paths[f"{product_id}:{tf}"] = charts.render_stance_chart(
+                    bars_by_product[product_id][tf],
+                    product_id=product_id,
+                    timeframe=tf,
+                    features=features[product_id][tf],
+                    stance=stance_row.get("stance"),
+                    confidence=stance_row.get("confidence"),
+                )
+            except Exception:
+                logger.exception("Stance chart failed for %s %s", product_id, tf)
+    return paths
 
 
 def _funding_context_block() -> str:
@@ -167,20 +208,35 @@ Rules:
 - confidence is 0.0-1.0.
 - rationale: 1-3 short bullet-style sentences.
 
-Return JSON only:
+Return JSON only, with no commentary before or after the object:
 {"stances":[{"product_id":"BTC-USD","timeframe":"H4","stance":"bullish",
-"confidence":0.7,"rationale":"..."}, ...12 entries total...],
+"confidence":0.7,"rationale":"..."}, ...6 entries total: BTC-USD and ETH-USD
+on each of H4, H1, M15...],
 "medium_summary":"2-4 sentences on the medium-term picture",
 "btc_eth_note":"1-2 sentences on how BTC posture maps to ETH"}
 """
 
 
 def _extract_json(text: str) -> dict:
+    """Pull the first JSON object out of a model reply.
+
+    The model intermittently wraps the object in a code fence or appends a
+    sentence of commentary after it, so decode from the first brace and ignore
+    whatever trails the object rather than parsing the whole reply.
+    """
     text = text.strip()
     if text.startswith("```"):
         text = re.sub(r"^```(?:json)?\s*", "", text)
         text = re.sub(r"\s*```$", "", text)
-    return json.loads(text)
+        text = text.strip()
+
+    start = text.find("{")
+    if start == -1:
+        raise ValueError("no JSON object in stance reply")
+    obj, _ = json.JSONDecoder().raw_decode(text[start:])
+    if not isinstance(obj, dict):
+        raise ValueError("stance reply is not a JSON object")
+    return obj
 
 
 def _fallback_stances(
@@ -251,7 +307,8 @@ def _validate_llm_stances(payload: dict) -> list[dict[str, Any]]:
 def run_stance_cycle(cycle_ts: str | None = None) -> dict[str, Any]:
     """Compute and persist the hourly stance batch. Returns the stored payload."""
     cycle_ts = cycle_ts or datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:00:00Z")
-    features = gather_features()
+    bars_by_product = gather_bars()
+    features = gather_features(bars_by_product)
 
     macro_block = build_macro_block()
     funding_block = _funding_context_block()
@@ -286,6 +343,7 @@ def run_stance_cycle(cycle_ts: str | None = None) -> dict[str, Any]:
         source = "programmatic"
 
     store.insert_stances(cycle_ts, stances, source=source)
+    render_structure_board(bars_by_product, features, stances)
     funding_note = funding_block or None
     if not medium_summary:
         btc_h4 = next(

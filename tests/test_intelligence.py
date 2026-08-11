@@ -22,6 +22,7 @@ from intelligence.funding import (
 from intelligence.stance import (
     STANCE_PRODUCTS,
     STANCE_TIMEFRAMES,
+    _extract_json,
     _fallback_stances,
     compute_timeframe_features,
     run_stance_cycle,
@@ -41,6 +42,41 @@ def _bars(closes: list[float], volume: float = 100.0) -> list[dict]:
         }
         for i, c in enumerate(closes)
     ]
+
+
+class TestExtractJson(unittest.TestCase):
+    """The stance reply is not always a bare JSON object."""
+
+    def test_plain_object(self) -> None:
+        self.assertEqual(_extract_json('{"stances": []}'), {"stances": []})
+
+    def test_code_fenced(self) -> None:
+        self.assertEqual(
+            _extract_json('```json\n{"stances": []}\n```'), {"stances": []}
+        )
+
+    def test_trailing_commentary(self) -> None:
+        """Regression: a sentence after the object used to raise 'Extra data'."""
+        reply = '{"stances": [], "medium_summary": "x"}\n\nLet me know if you want more.'
+        self.assertEqual(
+            _extract_json(reply), {"stances": [], "medium_summary": "x"}
+        )
+
+    def test_leading_commentary(self) -> None:
+        reply = 'Here is the analysis:\n{"stances": []}'
+        self.assertEqual(_extract_json(reply), {"stances": []})
+
+    def test_fenced_with_trailing_commentary(self) -> None:
+        reply = 'Sure:\n```json\n{"stances": []}\n```\nHope that helps.'
+        self.assertEqual(_extract_json(reply), {"stances": []})
+
+    def test_no_object_raises(self) -> None:
+        with self.assertRaises(ValueError):
+            _extract_json("no json here")
+
+    def test_non_object_raises(self) -> None:
+        with self.assertRaises(ValueError):
+            _extract_json("[1, 2, 3]")
 
 
 class TempDbTestCase(unittest.TestCase):
@@ -89,7 +125,11 @@ class TestStanceCycle(TempDbTestCase):
 
     def test_run_stance_cycle_llm_failure_uses_fallback(self) -> None:
         with mock.patch(
+            "intelligence.stance.gather_bars", return_value={}
+        ), mock.patch(
             "intelligence.stance.gather_features", return_value=self._fake_features()
+        ), mock.patch(
+            "intelligence.stance.render_structure_board"
         ), mock.patch("anthropic.Anthropic") as anthropic_cls:
             anthropic_cls.return_value.messages.create.side_effect = RuntimeError(
                 "api down"
@@ -129,7 +169,11 @@ class TestStanceCycle(TempDbTestCase):
         response.content = [block]
 
         with mock.patch(
+            "intelligence.stance.gather_bars", return_value={}
+        ), mock.patch(
             "intelligence.stance.gather_features", return_value=self._fake_features()
+        ), mock.patch(
+            "intelligence.stance.render_structure_board"
         ), mock.patch("anthropic.Anthropic") as anthropic_cls:
             anthropic_cls.return_value.messages.create.return_value = response
             result = run_stance_cycle("2026-08-10T16:00:00Z")
@@ -213,6 +257,29 @@ class TestStore(TempDbTestCase):
         latest = store.latest_stances()
         self.assertEqual(len(latest), 1)
         self.assertEqual(latest[0]["stance"], "bullish")
+
+    def test_rerun_in_same_hour_collapses_to_newest_row(self) -> None:
+        """A restart re-runs the cycle under the same hour-bucketed cycle_ts."""
+        cycle_ts = "2026-08-10T15:00:00Z"
+        base = [
+            {"product_id": p, "timeframe": tf, "stance": "bullish", "confidence": 0.6}
+            for p in ("BTC-USD", "ETH-USD")
+            for tf in ("H4", "H1", "M15")
+        ]
+        store.insert_stances(cycle_ts, base, source="llm")
+        store.insert_stances(
+            cycle_ts,
+            [{**s, "stance": "bearish", "confidence": 0.67} for s in base],
+            source="programmatic",
+        )
+
+        latest = store.latest_stances()
+        self.assertEqual(len(latest), 6)
+        keys = [(s["product_id"], s["timeframe"]) for s in latest]
+        self.assertEqual(len(keys), len(set(keys)))
+        # Newest batch wins, so the whole board reflects one coherent run.
+        self.assertTrue(all(s["stance"] == "bearish" for s in latest))
+        self.assertTrue(all(s["source"] == "programmatic" for s in latest))
 
     def test_invalid_stance_normalized_to_neutral(self) -> None:
         store.insert_stances(

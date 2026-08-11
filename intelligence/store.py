@@ -145,18 +145,27 @@ def insert_stances(
 
 
 def latest_stances() -> list[dict[str, Any]]:
-    """Most recent stance batch (all products/timeframes for latest cycle_ts)."""
+    """Most recent stance batch (one row per product/timeframe for latest cycle_ts).
+
+    ``cycle_ts`` is bucketed to the hour, so a restart or a manual re-run inside
+    the same hour appends a second batch under the same key. Collapse those to
+    the newest row per product/timeframe so callers never see duplicates.
+    """
     init_db()
     with _connect() as conn:
         row = conn.execute(
-            "SELECT cycle_ts FROM intel_stances ORDER BY created_at DESC LIMIT 1"
+            "SELECT cycle_ts FROM intel_stances ORDER BY created_at DESC, id DESC LIMIT 1"
         ).fetchone()
         if row is None:
             return []
         cycle_ts = str(row["cycle_ts"])
         rows = conn.execute(
             """
-            SELECT * FROM intel_stances WHERE cycle_ts = ?
+            SELECT * FROM intel_stances WHERE id IN (
+                SELECT MAX(id) FROM intel_stances
+                WHERE cycle_ts = ?
+                GROUP BY product_id, timeframe
+            )
             ORDER BY product_id, timeframe
             """,
             (cycle_ts,),
