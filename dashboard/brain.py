@@ -11,6 +11,7 @@ from typing import Any
 import bot_config
 from dashboard import data
 from dashboard.charts import stance_chart_path
+from intelligence import funding as intel_funding
 from intelligence import store as intel_store
 from macro.context import macro_payload_for_dashboard
 
@@ -99,12 +100,18 @@ def get_brain_payload() -> dict[str, Any]:
     medium = intel_store.latest_medium_summary() or {}
     funding = {}
     for pid in bot_config.FUNDING_PRODUCTS:
-        regime = intel_store.latest_funding_regime(pid)
+        status = intel_funding.funding_status(pid)
         funding[pid] = {
-            "regime": (regime or {}).get("regime"),
-            "streak_periods": (regime or {}).get("streak_periods"),
-            "as_of_ts": (regime or {}).get("as_of_ts"),
+            "regime": status["regime"],
+            "streak_periods": status["streak_periods"],
+            "as_of_ts": status["as_of_ts"],
+            "source": status["source"],
+            "status": status["status"],
+            "stale": status["stale"],
+            "available": status["available"],
+            "last_error": status["last_error"],
         }
+    funding_ok = any(f["available"] for f in funding.values()) if funding else False
     structure_charts = _structure_board(stances)
     zmoves = intel_store.recent_zmove_events(limit=12)
     macro = macro_payload_for_dashboard()
@@ -131,6 +138,7 @@ def get_brain_payload() -> dict[str, Any]:
         },
         "long_thesis": thesis,
         "funding": funding,
+        "funding_ok": funding_ok,
         "structure_charts": structure_charts,
         "zmoves": zmoves,
         "macro": macro,

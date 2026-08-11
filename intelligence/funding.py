@@ -1,7 +1,8 @@
 """Perp funding-rate regime tracker (medium-term signal).
 
-Reads 8h funding prints for BTC/ETH perps from Binance's public API, persists
-the series, and classifies a regime:
+Reads 8h funding prints for BTC/ETH perps from a swappable venue adapter (see
+``intelligence.funding_sources``; OKX by default), persists the series, and
+classifies a regime:
 
 - bull_persist / bear_persist — funding held one sign for N consecutive prints
 - chop — sign keeps flipping without a sustained run (noise; never mints ideas)
@@ -14,17 +15,21 @@ from __future__ import annotations
 
 import logging
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Any
-
-import requests
 
 import bot_config
 from intelligence import store
+from intelligence.funding_sources import (
+    FUNDING_INTERVAL_HOURS,
+    fetch_funding_history,
+)
 
 logger = logging.getLogger(__name__)
 
-_BINANCE_FUNDING_URL = "https://fapi.binance.com/fapi/v1/fundingRate"
+# Prints land every 8h, so nothing newer than two missed settlements (plus an
+# hour of slack) means the feed is broken rather than merely between prints.
+FUNDING_STALE_AFTER_H = 2 * FUNDING_INTERVAL_HOURS + 1
 
 REGIME_BULL = "bull_persist"
 REGIME_BEAR = "bear_persist"
@@ -43,27 +48,44 @@ class FundingRegime:
     is_switch_event: bool
 
 
-def fetch_funding_history(
-    symbol: str,
-    *,
-    limit: int = 90,
-) -> list[dict[str, Any]]:
-    """Fetch recent funding prints from Binance. Returns [{ts, rate}] oldest-first."""
-    response = requests.get(
-        _BINANCE_FUNDING_URL,
-        params={"symbol": symbol, "limit": min(limit, 1000)},
-        timeout=30,
-    )
-    response.raise_for_status()
-    payload = response.json()
-    out: list[dict[str, Any]] = []
-    for item in payload:
-        ts = datetime.fromtimestamp(
-            int(item["fundingTime"]) / 1000, tz=timezone.utc
-        ).strftime("%Y-%m-%dT%H:%M:%SZ")
-        out.append({"ts": ts, "rate": float(item["fundingRate"])})
-    out.sort(key=lambda r: r["ts"])
-    return out
+def is_stale(as_of_ts: str | None, *, now: datetime | None = None) -> bool:
+    """True when the newest funding print is too old to still be trusted."""
+    if not as_of_ts:
+        return True
+    try:
+        stamp = datetime.strptime(as_of_ts, "%Y-%m-%dT%H:%M:%SZ").replace(
+            tzinfo=timezone.utc
+        )
+    except ValueError:
+        return True
+    reference = now or datetime.now(timezone.utc)
+    return reference - stamp > timedelta(hours=FUNDING_STALE_AFTER_H)
+
+
+def funding_status(product_id: str) -> dict[str, Any]:
+    """Regime plus feed health for one product, for prompts and the dashboard.
+
+    ``available`` is the single flag every consumer should branch on: it is
+    False both when we have never had data and when what we have has gone
+    stale, so a dead feed can never masquerade as a live signal.
+    """
+    regime = store.latest_funding_regime(product_id)
+    health = store.funding_health(product_id) or {}
+    as_of = (regime or {}).get("as_of_ts")
+    stale = is_stale(as_of)
+    return {
+        "product_id": product_id,
+        "regime": (regime or {}).get("regime"),
+        "streak_periods": (regime or {}).get("streak_periods"),
+        "as_of_ts": as_of,
+        "latest_rate": ((regime or {}).get("detail") or {}).get("latest_rate"),
+        "source": health.get("source"),
+        "status": health.get("status") or ("ok" if regime else "unknown"),
+        "last_error": health.get("last_error"),
+        "last_ok_at": health.get("last_ok_at"),
+        "stale": stale,
+        "available": regime is not None and not stale,
+    }
 
 
 def _sign(rate: float) -> int:
@@ -167,31 +189,59 @@ def evaluate_product(
 
 
 def run_funding_scan() -> list[FundingRegime]:
-    """Fetch funding for all tracked products, persist prints, classify regimes."""
+    """Fetch funding for all tracked products, persist prints, classify regimes.
+
+    Products are addressed by canonical id — the venue symbol is resolved
+    inside the adapter — and every outcome is written to funding_health so a
+    dead feed is visible to the dashboard, not just to whoever reads the logs.
+    """
     if not bot_config.FUNDING_ENABLED:
         return []
     results: list[FundingRegime] = []
-    for product_id, symbol in bot_config.FUNDING_PRODUCTS.items():
+    failures: list[str] = []
+    products = list(bot_config.FUNDING_PRODUCTS)
+    for product_id in products:
         try:
-            series = fetch_funding_history(symbol)
-        except Exception:
-            logger.exception("Funding fetch failed for %s (%s)", product_id, symbol)
-            continue
-        if not series:
+            series, source_name = fetch_funding_history(product_id)
+        except Exception as exc:
+            failures.append(f"{product_id}: {exc}")
+            logger.exception("Funding fetch failed for %s", product_id)
+            store.record_funding_health(
+                product_id, status="error", error=str(exc)[:500]
+            )
             continue
         store.upsert_funding_rates(product_id, series)
         # Classify on the full persisted series (survives restarts/backfill).
         persisted = store.funding_series(product_id, limit=200)
         regime = evaluate_product(product_id, persisted)
         results.append(regime)
-        logger.info(
-            "Funding %s: regime=%s streak=%s as_of=%s%s",
+        store.record_funding_health(
             product_id,
+            status="ok",
+            source=source_name,
+            funding_ts=regime.as_of_ts,
+        )
+        logger.info(
+            "Funding %s via %s: regime=%s streak=%s as_of=%s latest_rate=%s%s",
+            product_id,
+            source_name,
             regime.regime,
             regime.streak_periods,
             regime.as_of_ts,
+            regime.latest_rate,
             " [SWITCH EVENT]" if regime.is_switch_event else "",
         )
+
+    if failures and len(failures) == len(products):
+        # A total outage is the case that used to vanish into a per-product
+        # warning and an empty prompt block. Say it once, loudly.
+        logger.error(
+            "FUNDING OUTAGE: every tracked product failed to fetch — the stance "
+            "prompt will run without a funding signal. Details: %s",
+            " | ".join(failures),
+        )
+    elif failures:
+        logger.error("Funding partially degraded: %s", " | ".join(failures))
     return results
 
 

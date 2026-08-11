@@ -18,6 +18,7 @@ import access
 import bot_config
 import config
 import ledger
+from intelligence import funding as intel_funding
 from intelligence import store as intel_store
 from macro import store as macro_store
 
@@ -65,6 +66,7 @@ def _funding_payload(product_id: str) -> dict:
         "product_id": product_id,
         "regime": regime,
         "series": series,
+        "health": intel_funding.funding_status(product_id),
     }
 
 
@@ -149,13 +151,13 @@ async def signals_zmove(limit: int = 50) -> dict:
 
 @router.get("/signals/funding")
 async def signals_funding() -> dict:
+    products = {pid: _funding_payload(pid) for pid in bot_config.FUNDING_PRODUCTS}
     return {
         "enabled": bot_config.FUNDING_ENABLED,
         "persist_periods": bot_config.FUNDING_PERSIST_PERIODS,
         "switch_confirm_periods": bot_config.FUNDING_SWITCH_CONFIRM_PERIODS,
-        "products": {
-            pid: _funding_payload(pid) for pid in bot_config.FUNDING_PRODUCTS
-        },
+        "healthy": any(p["health"]["available"] for p in products.values()),
+        "products": products,
     }
 
 

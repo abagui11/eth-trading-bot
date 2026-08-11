@@ -252,7 +252,11 @@
         {% endif %}
         <div class="funding-row" id="brain-funding" style="margin-top:10px">
           {% for pid, f in brain.funding.items() %}
-          <span class="badge badge-none">{{ pid|replace('-USD','') }} funding: {{ f.regime or '—' }}</span>
+          <span class="badge {{ 'badge-none' if f.available else 'badge-bad' }}"
+                title="{{ (f.last_error or 'no funding prints stored') if not f.available else 'source: ' ~ (f.source or 'unknown') ~ ' · as of ' ~ (f.as_of_ts or '—') }}">
+            {{ pid|replace('-USD','') }} funding:
+            {{ f.regime if f.available else ('STALE' if f.as_of_ts else 'FEED DOWN') }}
+          </span>
           {% endfor %}
         </div>
       </section>
@@ -850,7 +854,14 @@
         if (fund && brain.funding) {
           fund.innerHTML = Object.keys(brain.funding).map(function (pid) {
             var f = brain.funding[pid] || {};
-            return '<span class="badge badge-none">' + pid.replace('-USD','') + ' funding: ' + (f.regime || '—') + '</span>';
+            // A dead feed must read as broken, never as a neutral '—'.
+            var cls = f.available ? 'badge-none' : 'badge-bad';
+            var label = f.available ? (f.regime || '—') : (f.as_of_ts ? 'STALE' : 'FEED DOWN');
+            var tip = f.available
+              ? ('source: ' + (f.source || 'unknown') + ' · as of ' + (f.as_of_ts || '—'))
+              : (f.last_error || 'no funding prints stored');
+            return '<span class="badge ' + cls + '" title="' + String(tip).replace(/"/g, "'") + '">'
+              + pid.replace('-USD','') + ' funding: ' + label + '</span>';
           }).join(' ');
         }
 

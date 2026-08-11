@@ -59,6 +59,16 @@ CREATE TABLE IF NOT EXISTS funding_regimes (
 
 CREATE INDEX IF NOT EXISTS idx_funding_regimes_product ON funding_regimes(product_id, created_at);
 
+CREATE TABLE IF NOT EXISTS funding_health (
+    product_id TEXT PRIMARY KEY,
+    status TEXT NOT NULL,
+    source TEXT,
+    last_ok_at TEXT,
+    last_ok_funding_ts TEXT,
+    last_error TEXT,
+    checked_at TEXT NOT NULL
+);
+
 CREATE TABLE IF NOT EXISTS intel_long_thesis (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     as_of_date TEXT NOT NULL,
@@ -308,6 +318,58 @@ def latest_funding_regime(product_id: str) -> dict[str, Any] | None:
             data["detail"] = {}
     data.pop("detail_json", None)
     return data
+
+
+def record_funding_health(
+    product_id: str,
+    *,
+    status: str,
+    source: str | None = None,
+    funding_ts: str | None = None,
+    error: str | None = None,
+) -> None:
+    """Record the outcome of a funding fetch. 'ok' refreshes the success marks;
+    'error' keeps the previous success marks so staleness stays measurable."""
+    init_db()
+    now = _now_iso()
+    with _connect() as conn:
+        conn.execute(
+            """
+            INSERT INTO funding_health
+                (product_id, status, source, last_ok_at, last_ok_funding_ts,
+                 last_error, checked_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(product_id) DO UPDATE SET
+                status = excluded.status,
+                source = COALESCE(excluded.source, funding_health.source),
+                last_ok_at = COALESCE(excluded.last_ok_at, funding_health.last_ok_at),
+                last_ok_funding_ts = COALESCE(
+                    excluded.last_ok_funding_ts, funding_health.last_ok_funding_ts
+                ),
+                last_error = excluded.last_error,
+                checked_at = excluded.checked_at
+            """,
+            (
+                product_id,
+                status,
+                source,
+                now if status == "ok" else None,
+                funding_ts if status == "ok" else None,
+                error,
+                now,
+            ),
+        )
+        conn.commit()
+
+
+def funding_health(product_id: str) -> dict[str, Any] | None:
+    init_db()
+    with _connect() as conn:
+        row = conn.execute(
+            "SELECT * FROM funding_health WHERE product_id = ?",
+            (product_id,),
+        ).fetchone()
+    return dict(row) if row is not None else None
 
 
 def funding_regime_history(

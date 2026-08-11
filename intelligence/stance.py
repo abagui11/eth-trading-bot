@@ -20,7 +20,7 @@ import bot_config
 import charts
 import config
 import research
-from intelligence import store
+from intelligence import funding, store
 from macro.context import build_macro_block
 from patterns.htf_structure import HTFZone, detect_htf_zones
 from patterns.key_levels import KeyLevel, compute_key_levels
@@ -186,25 +186,51 @@ def render_structure_board(
 
 
 def _funding_context_block() -> str:
-    """Current funding regimes for BTC/ETH, if tracked."""
+    """Current funding regimes for BTC/ETH.
+
+    Never returns an empty string on failure: an unavailable feed is stated in
+    the prompt and logged, so a missing model input cannot pass unnoticed.
+    """
     lines: list[str] = []
+    missing: list[str] = []
     for product_id in STANCE_PRODUCTS:
-        regime = store.latest_funding_regime(product_id)
-        if regime is None:
+        status = funding.funding_status(product_id)
+        label = bot_config.product_label(product_id)
+        if not status["available"]:
+            reason = "stale" if status["as_of_ts"] else "no data"
+            missing.append(f"{label} ({reason})")
             continue
         lines.append(
-            f"{bot_config.product_label(product_id)}: regime={regime['regime']} "
-            f"streak={regime['streak_periods']} periods (as of {regime['as_of_ts']})"
+            f"{label}: regime={status['regime']} "
+            f"streak={status['streak_periods']} periods "
+            f"(as of {status['as_of_ts']}, source {status['source'] or 'unknown'})"
         )
+
+    if missing:
+        logger.error(
+            "Funding context unavailable for %s — stance prompt runs without "
+            "that signal",
+            ", ".join(missing),
+        )
+
     if not lines:
-        return ""
-    return (
+        return (
+            "=== Perp funding regimes (medium-term signal) ===\n"
+            "UNAVAILABLE — the funding feed is down for "
+            f"{', '.join(missing)}. Do not infer a funding bias; treat this "
+            "input as missing rather than neutral."
+        )
+
+    block = (
         "=== Perp funding regimes (medium-term signal) ===\n"
         + "\n".join(lines)
         + "\nRules: persistent positive funding = bullish medium-term bias; "
         "persistent negative = bearish; chop = noise (ignore); a first switch "
         "after persistence is a position-switch cue."
     )
+    if missing:
+        block += f"\nNOTE: no usable funding data for {', '.join(missing)}."
+    return block
 
 
 def _features_block(features: dict[str, dict[str, dict[str, Any]]]) -> str:
