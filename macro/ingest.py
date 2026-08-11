@@ -10,6 +10,7 @@ import feedparser
 import bot_config
 import config
 from macro import classify, pulse, store
+from macro.bias_score import deterministic_bias
 from macro.keywords import relevance_score
 
 logger = logging.getLogger(__name__)
@@ -42,6 +43,7 @@ def ingest_headline(
     promote = force_classify or score >= bot_config.MACRO_LLM_PROMOTE_THRESHOLD
 
     if not promote:
+        det = deterministic_bias(title)
         return store.insert_event(
             source=source,
             title=title,
@@ -52,6 +54,8 @@ def ingest_headline(
             keyword_hits=hits,
             severity=0,
             status="ignored",
+            bias_side_det=det["side"],
+            bias_pct_det=det["pct"],
         )
 
     classification = classify.classify_headline(
@@ -60,6 +64,7 @@ def ingest_headline(
         source=source,
     )
     expires_at = classify.expires_at_from_ttl(int(classification["ttl_hours"]))
+    det = deterministic_bias(title, classification.get("eth_bias"))
 
     event = store.insert_event(
         source=source,
@@ -77,6 +82,8 @@ def ingest_headline(
         expires_at=expires_at,
         status="classified",
         raw_json=classification,
+        bias_side_det=det["side"],
+        bias_pct_det=det["pct"],
     )
 
     if int(event.get("severity") or 0) >= bot_config.MACRO_PULSE_MIN_SEVERITY:

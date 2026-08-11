@@ -148,6 +148,9 @@ def macro_payload_for_dashboard() -> dict[str, Any]:
 
 
 def _event_summary(event: dict[str, Any]) -> dict[str, Any]:
+    from macro.bias_score import best_bias
+
+    bias = best_bias(event)
     return {
         "id": event.get("id"),
         "title": event.get("title"),
@@ -163,4 +166,12 @@ def _event_summary(event: dict[str, Any]) -> dict[str, Any]:
         "eth_impact_summary": event.get("eth_impact_summary"),
         "expires_at": event.get("expires_at"),
         "posture_hints": event.get("posture_hints") or [],
+        "bias_side": bias["side"],
+        "bias_pct": bias["pct"],
+        "bias_source": bias["source"],
+        "bias_one_liner": bias.get("one_liner"),
+        "bias_side_det": event.get("bias_side_det"),
+        "bias_pct_det": event.get("bias_pct_det"),
+        "bias_side_llm": event.get("bias_side_llm"),
+        "bias_pct_llm": event.get("bias_pct_llm"),
     }

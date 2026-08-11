@@ -10,3 +10,5 @@ charts/
 *.egg-info/
 dist/
 build/
+exports/
+.cursor/

@@ -57,6 +57,18 @@ def _connect() -> sqlite3.Connection:
 def init_db() -> None:
     with _connect() as conn:
         conn.executescript(_SCHEMA)
+        # Additive columns for deterministic → LLM bias pipeline.
+        for col, decl in (
+            ("bias_side_det", "TEXT"),
+            ("bias_pct_det", "INTEGER"),
+            ("bias_side_llm", "TEXT"),
+            ("bias_pct_llm", "INTEGER"),
+            ("bias_one_liner", "TEXT"),
+        ):
+            try:
+                conn.execute(f"ALTER TABLE macro_events ADD COLUMN {col} {decl}")
+            except sqlite3.OperationalError:
+                pass
         conn.execute("PRAGMA journal_mode=WAL")
         conn.commit()
 
@@ -98,6 +110,8 @@ def insert_event(
     expires_at: str | None = None,
     status: str = "ignored",
     raw_json: dict | None = None,
+    bias_side_det: str | None = None,
+    bias_pct_det: int | None = None,
 ) -> dict[str, Any]:
     init_db()
     ingested_at = _now_iso()
@@ -108,8 +122,9 @@ def insert_event(
             INSERT INTO macro_events (
                 url_hash, source, title, url, summary, published_at, ingested_at,
                 keyword_score, keyword_hits, severity, eth_bias, category,
-                eth_impact_summary, posture_hints, expires_at, status, raw_json
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                eth_impact_summary, posture_hints, expires_at, status, raw_json,
+                bias_side_det, bias_pct_det
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 hash_value,
@@ -129,6 +144,8 @@ def insert_event(
                 expires_at,
                 status,
                 json.dumps(raw_json or {}),
+                bias_side_det,
+                bias_pct_det,
             ),
         )
         conn.commit()
@@ -274,3 +291,33 @@ def prune_old_events(*, days: int = 7) -> int:
         )
         conn.commit()
         return int(cur.rowcount)
+
+
+def update_bias_det(event_id: int, *, side: str, pct: int) -> None:
+    init_db()
+    with _connect() as conn:
+        conn.execute(
+            """
+            UPDATE macro_events
+            SET bias_side_det = ?, bias_pct_det = ?
+            WHERE id = ?
+            """,
+            (side, int(pct), event_id),
+        )
+        conn.commit()
+
+
+def update_bias_llm(
+    event_id: int, *, side: str, pct: int, one_liner: str | None = None
+) -> None:
+    init_db()
+    with _connect() as conn:
+        conn.execute(
+            """
+            UPDATE macro_events
+            SET bias_side_llm = ?, bias_pct_llm = ?, bias_one_liner = COALESCE(?, bias_one_liner)
+            WHERE id = ?
+            """,
+            (side, int(pct), one_liner, event_id),
+        )
+        conn.commit()

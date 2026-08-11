@@ -101,9 +101,19 @@ async def long_thesis_job(context) -> None:
 
 
 async def hourly_job(context) -> None:
-    """Run the hourly stance batch, then the sync agent cycle, in a thread pool."""
+    """Run the hourly stance batch, bias refine, then the sync agent cycle."""
     logger.info("Hourly job starting")
     await stance_job(context)
+    # One batched Claude call refining news bias scores for the hub + mill.
+    if bot_config.MACRO_CONTEXT_ENABLED:
+        loop = asyncio.get_running_loop()
+        try:
+            from macro.bias_score import run_hourly_bias_refine
+
+            n = await loop.run_in_executor(None, run_hourly_bias_refine)
+            logger.info("Hourly bias refine updated %s headlines", n)
+        except Exception:
+            logger.exception("Hourly bias refine failed")
     loop = asyncio.get_running_loop()
     try:
         await loop.run_in_executor(None, run_cycle)
