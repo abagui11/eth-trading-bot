@@ -32,44 +32,32 @@ import anthropic
 import config
 import research
 from intelligence import store
+from intelligence.cycle_chart import write_cycle_figure
+from intelligence.cycle_phases import (
+    HALVINGS,
+    NEXT_HALVING_EST,
+    PHASE_BOUNDS,
+    build_segments,
+    current_phase,
+    cycle_position,
+)
 
 logger = logging.getLogger(__name__)
 
-# Bitcoin halving dates (UTC). The next expected halving anchors the cycle clock.
-HALVINGS: tuple[str, ...] = (
-    "2012-11-28",
-    "2016-07-09",
-    "2020-05-11",
-    "2024-04-20",
-)
-NEXT_HALVING_EST = "2028-04-15"
-
-# Rough historical cycle anatomy in days after a halving (advisory analogs).
-PHASE_BOUNDS: tuple[tuple[int, str], ...] = (
-    (0, "post_halving_accumulation"),      # 0-180d: chop/accumulation
-    (180, "bull_expansion"),               # 180-550d: historical bull leg
-    (550, "cycle_top_window"),             # 550-750d: prior tops printed here
-    (750, "bear_drawdown"),                # 750-1100d: historical bear
-    (1100, "pre_halving_accumulation"),    # 1100d+: basing into next halving
-)
+__all__ = [
+    "HALVINGS",
+    "NEXT_HALVING_EST",
+    "PHASE_BOUNDS",
+    "current_phase",
+    "fetch_btc_history",
+    "compute_gold_ratios",
+    "render_cycle_chart",
+    "build_thesis",
+    "run_long_thesis_refresh",
+]
 
 _MAX_THESIS_TOKENS = 900
 _GOLD_PRODUCT = "PAXG-USD"  # on-chain gold proxy on Coinbase
-
-
-def current_phase(as_of: date | None = None) -> tuple[str, int]:
-    """(phase_label, days_since_last_halving) for the current cycle position."""
-    today = as_of or datetime.now(timezone.utc).date()
-    last_halving = max(
-        (date.fromisoformat(h) for h in HALVINGS if date.fromisoformat(h) <= today),
-        default=date.fromisoformat(HALVINGS[0]),
-    )
-    days_since = (today - last_halving).days
-    label = PHASE_BOUNDS[0][1]
-    for threshold, phase in PHASE_BOUNDS:
-        if days_since >= threshold:
-            label = phase
-    return label, days_since
 
 
 def fetch_btc_history(*, years: int = 10) -> list[dict[str, Any]]:
@@ -132,6 +120,34 @@ def render_cycle_chart(
     fig, ax = plt.subplots(figsize=(18, 8), dpi=120)
     ax.plot(df.index, df["close"], linewidth=1.2, color="#f7931a", label="BTC-USD (daily close)")
     ax.set_yscale("log")
+
+    # Phase bands mirror the interactive chart so both artifacts tell one story.
+    for seg in build_segments(bars):
+        start = pd.Timestamp(seg.start_date, tz="UTC")
+        end = pd.Timestamp(seg.end_date, tz="UTC")
+        if end < df.index[0]:
+            continue
+        start = max(start, df.index[0])
+        color = "#2e7d32" if seg.kind == "expansion" else "#b71c1c"
+        ax.axvspan(
+            start,
+            end,
+            color=color,
+            alpha=0.10 if seg.projected else 0.18,
+            hatch="//" if seg.projected else None,
+            linewidth=0,
+            zorder=0,
+        )
+        if seg.change_pct is not None:
+            ax.annotate(
+                f"{seg.change_pct:+,.1f}%\n{seg.months} bars",
+                xy=(start, df["close"].max()),
+                xytext=(6, -6),
+                textcoords="offset points",
+                fontsize=8,
+                color=color,
+                va="top",
+            )
 
     for h in HALVINGS:
         h_dt = pd.Timestamp(h, tz="UTC")
@@ -230,6 +246,7 @@ def build_thesis(
     gold: dict[str, Any],
     *,
     spot_summary: str,
+    cycle_context: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """LLM thesis with deterministic fallback."""
     context = (
@@ -238,6 +255,8 @@ def build_thesis(
         f"{spot_summary}\n"
         f"Gold ratios: {json.dumps(gold)}"
     )
+    if cycle_context:
+        context += f"\nCycle anatomy: {json.dumps(cycle_context)}"
     try:
         client = anthropic.Anthropic(api_key=config.ANTHROPIC_API_KEY)
         response = client.messages.create(
@@ -266,10 +285,13 @@ def run_long_thesis_refresh() -> dict[str, Any]:
         return existing
 
     phase, days_since = current_phase()
-    bars = fetch_btc_history(years=10)
+    bars = fetch_btc_history(years=12)
     chart_path = render_cycle_chart(
         bars, phase=phase, days_since_halving=days_since
     )
+    figure_path = write_cycle_figure(bars, config.CHARTS_DIR)
+    position = cycle_position(bars)
+    segments = [s.to_dict() for s in build_segments(bars)]
     gold = compute_gold_ratios()
 
     last_close = float(bars[-1]["close"]) if bars else 0.0
@@ -283,9 +305,18 @@ def run_long_thesis_refresh() -> dict[str, Any]:
         else "BTC spot unavailable."
     )
 
-    thesis = build_thesis(phase, days_since, gold, spot_summary=spot_summary)
+    thesis = build_thesis(
+        phase,
+        days_since,
+        gold,
+        spot_summary=spot_summary,
+        cycle_context=position,
+    )
     thesis["days_since_halving"] = days_since
     thesis["gold_ratios"] = gold
+    thesis["cycle_position"] = position
+    thesis["cycle_segments"] = segments
+    thesis["cycle_figure_path"] = figure_path
     store.insert_long_thesis(today, phase, thesis, chart_path=chart_path)
     logger.info("Long thesis stored for %s (phase=%s)", today, phase)
     return {
@@ -293,6 +324,7 @@ def run_long_thesis_refresh() -> dict[str, Any]:
         "cycle_phase": phase,
         "thesis": thesis,
         "chart_path": chart_path,
+        "figure_path": figure_path,
     }
 
 

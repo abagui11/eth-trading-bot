@@ -6,6 +6,7 @@ apscheduler==3.11.0
 python-dotenv==1.0.1
 pandas==2.2.3
 matplotlib==3.10.0
+plotly==5.24.1
 Pillow>=10.0.0
 fastapi==0.115.6
 uvicorn[standard]==0.32.1
