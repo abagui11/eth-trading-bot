@@ -63,6 +63,32 @@ _CHART_QUERY = re.compile(
     re.IGNORECASE,
 )
 
+# Volume-lane idea book (trade_ideas mill paper book) — not personal demo books.
+_PERFORMANCE_QUERY = re.compile(
+    r"(?:"
+    r"/performance\b"
+    r"|/ideas\b"
+    r"|\bperformance\b"
+    r"|\bidea\s+book\b"
+    r"|\bvolume\s+book\b"
+    r"|\bhow\s+are\s+(?:the\s+)?ideas?\s+doing\b"
+    r"|\bhow(?:'s|\s+is)\s+(?:the\s+)?(?:idea\s+)?book\b"
+    r"|\bshow\s+(?:me\s+)?(?:the\s+)?(?:idea\s+)?performance\b"
+    r")",
+    re.IGNORECASE,
+)
+
+# Personal accepted-idea portfolio (trade_ideas user_paper_trades) — not demo cash book.
+_ME_QUERY = re.compile(
+    r"(?:"
+    r"/me\b"
+    r"|\bmy\s+(?:idea\s+)?(?:portfolio|pnl|book)\b"
+    r"|\bpersonal\s+(?:idea\s+)?(?:portfolio|pnl|book)\b"
+    r"|\bhow\s+am\s+i\s+doing\b"
+    r")",
+    re.IGNORECASE,
+)
+
 
 def _username(update: Update) -> str | None:
     user = update.effective_user
@@ -76,6 +102,20 @@ def _is_chart_query(text: str) -> bool:
     if normalized in ("/chart", "chart"):
         return True
     return bool(_CHART_QUERY.search(text))
+
+
+def _is_performance_query(text: str) -> bool:
+    normalized = text.strip().lower()
+    if normalized in ("/performance", "performance", "/ideas", "ideas"):
+        return True
+    return bool(_PERFORMANCE_QUERY.search(text))
+
+
+def _is_me_query(text: str) -> bool:
+    normalized = text.strip().lower()
+    if normalized in ("/me", "me"):
+        return True
+    return bool(_ME_QUERY.search(text))
 
 
 async def _reply(update: Update, text: str) -> None:
@@ -118,6 +158,51 @@ async def _handle_chart(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
     spot = research.get_spot_price()
     pnl = paper.format_pnl_footer(spot)
     await _reply(update, f"{view.watch_summary}\n\n{pnl}"[:4096])
+
+
+async def _handle_performance(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Volume-lane idea book (trade_ideas mill)."""
+    if update.message is None:
+        return
+
+    await update.message.chat.send_action("typing")
+    loop = asyncio.get_running_loop()
+
+    def _load() -> str:
+        spots = research.get_spot_prices()
+        report = trade_ideas_bridge.volume_book_report(spots)
+        return trade_ideas_bridge.format_volume_book_report(report)
+
+    try:
+        text = await loop.run_in_executor(None, _load)
+    except Exception:
+        logger.exception("Performance handler failed")
+        await _reply(update, "Sorry, I could not load idea-book performance right now.")
+        return
+    await _reply(update, text[:4096])
+
+
+async def _handle_me(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Personal accepted-idea portfolio (trade_ideas user_paper_trades)."""
+    if update.message is None or update.effective_user is None:
+        return
+
+    user_id = update.effective_user.id
+    await update.message.chat.send_action("typing")
+    loop = asyncio.get_running_loop()
+
+    def _load() -> str:
+        spots = research.get_spot_prices()
+        report = trade_ideas_bridge.user_book_report(user_id, spots)
+        return trade_ideas_bridge.format_user_book_report(report)
+
+    try:
+        text = await loop.run_in_executor(None, _load)
+    except Exception:
+        logger.exception("Me handler failed")
+        await _reply(update, "Sorry, I could not load your idea portfolio right now.")
+        return
+    await _reply(update, text[:4096])
 
 
 async def _handle_research(update: Update, context: ContextTypes.DEFAULT_TYPE, text: str) -> None:
@@ -461,6 +546,8 @@ async def cmd_help(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         "Commands:\n"
         "/start — welcome + menu (Open account, My Metrics, My book, Journal, Research)\n"
         "/status — current suggestion + paper PnL\n"
+        "/performance — volume idea book (realized + unrealized)\n"
+        "/me — your accepted-idea portfolio PnL\n"
         "/chart — latest analysis chart + what the bot is watching\n"
         "/research — research topic catalog\n"
         "/help — this message\n\n"
@@ -547,6 +634,34 @@ async def cmd_status(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
     await _reply(update, body[:4096])
 
 
+async def cmd_performance(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    user = update.effective_user
+    if user is None or update.message is None:
+        return
+
+    access.register_user(user.id, _username(update))
+
+    if not access.is_allowed(user.id):
+        await _reply(update, PAYWALL_MESSAGE)
+        return
+
+    await _handle_performance(update, context)
+
+
+async def cmd_me(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    user = update.effective_user
+    if user is None or update.message is None:
+        return
+
+    access.register_user(user.id, _username(update))
+
+    if not access.is_allowed(user.id):
+        await _reply(update, PAYWALL_MESSAGE)
+        return
+
+    await _handle_me(update, context)
+
+
 async def cmd_chart(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     user = update.effective_user
     if user is None or update.message is None:
@@ -619,6 +734,14 @@ async def on_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 
     if _is_chart_query(user_text):
         await _handle_chart(update, context)
+        return
+
+    if _is_performance_query(user_text):
+        await _handle_performance(update, context)
+        return
+
+    if _is_me_query(user_text):
+        await _handle_me(update, context)
         return
 
     await update.message.chat.send_action("typing")
@@ -765,6 +888,9 @@ def build_application() -> Application:
     app.add_handler(CommandHandler("start", cmd_start))
     app.add_handler(CommandHandler("help", cmd_help))
     app.add_handler(CommandHandler("status", cmd_status))
+    app.add_handler(CommandHandler("performance", cmd_performance))
+    app.add_handler(CommandHandler("ideas", cmd_performance))
+    app.add_handler(CommandHandler("me", cmd_me))
     app.add_handler(CommandHandler("chart", cmd_chart))
     app.add_handler(CommandHandler("research", cmd_research))
     app.add_handler(CommandHandler("macro", cmd_macro))
