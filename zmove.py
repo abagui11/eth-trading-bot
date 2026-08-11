@@ -229,8 +229,7 @@ def format_signal_message(signal: ZMoveSignal) -> str:
         mult_s = f"{mult:.2f}× mean" if mult is not None else "elevated"
         detail = f"Hourly volume {mult_s} ({direction} vs mean)"
     return (
-        f"Z-MOVE — {label} {signal.metric.upper()}\n"
-        f"z = {signal.z:+.2f} (|z| threshold {bot_config.ZMOVE_THRESHOLD})\n"
+        f"SPIKE — {label} {signal.metric.upper()}\n"
         f"{detail}\n"
         f"Bar: {signal.bar_ts}\n"
         f"Lookback: {bot_config.ZMOVE_LOOKBACK_H}h\n"
