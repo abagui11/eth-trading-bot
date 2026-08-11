@@ -325,17 +325,18 @@ def user_book_payload(user_id: int, *, limit: int = 100) -> dict[str, Any] | Non
             str(r["status"]): {"count": int(r["n"]), "pnl_pct_sum": float(r["pnl"])}
             for r in status_rows
         }
-        closed = by_status.get("hit_tp", {"count": 0})["count"] + by_status.get(
-            "hit_sl", {"count": 0}
-        )["count"]
-        wins = by_status.get("hit_tp", {"count": 0})["count"]
+        tp_n = by_status.get("hit_tp", {"count": 0})["count"]
+        sl_n = by_status.get("hit_sl", {"count": 0})["count"]
+        manual_n = by_status.get("manual", {"count": 0})["count"]
+        auto_closed = tp_n + sl_n
+        closed = auto_closed + manual_n
         return {
             "available": True,
             "summary": {
                 "by_status": by_status,
                 "open": by_status.get("open", {"count": 0})["count"],
                 "closed": closed,
-                "win_rate": (wins / closed) if closed else None,
+                "win_rate": (tp_n / auto_closed) if auto_closed else None,
                 "pnl_pct_sum": sum(v["pnl_pct_sum"] for v in by_status.values()),
             },
             "trades": [dict(r) for r in trades],
@@ -413,7 +414,7 @@ def _enrich_book_report(
                         (float(tp) - spot_f) / spot_f * 100.0, 4
                     )
             open_trades.append(trade)
-        elif status in ("hit_tp", "hit_sl"):
+        elif status in ("hit_tp", "hit_sl", "manual"):
             closed_trades.append(trade)
 
     unrealized_sum = sum(
@@ -493,11 +494,15 @@ def _format_book_body(
     by = report.get("by_status") or {}
     tp_n = int((by.get("hit_tp") or {}).get("count") or 0)
     sl_n = int((by.get("hit_sl") or {}).get("count") or 0)
+    manual_n = int((by.get("manual") or {}).get("count") or 0)
+    closed_bits = f"TP {tp_n} / SL {sl_n}"
+    if manual_n:
+        closed_bits += f" / manual {manual_n}"
 
     lines = [
         report.get("label") or "Idea book",
         "",
-        f"Open {open_n} · Closed {closed_n} (TP {tp_n} / SL {sl_n})",
+        f"Open {open_n} · Closed {closed_n} ({closed_bits})",
         f"Win rate {wr}",
         f"Realized PnL  {_fmt_pct(report.get('pnl_pct_sum'))}",
         f"Unrealized    {_fmt_pct(report.get('unrealized_pct_sum'))}",
@@ -581,13 +586,145 @@ def format_user_book_report(
         max_open_lines=max_open_lines,
         empty_closed_hint=(
             "No closed trades yet — Accept ideas to track personal PnL; "
-            "updates when price hits TP1 or SL."
+            "updates when price hits TP1 or SL, or tap Close."
         ),
     )
     lines.extend(
         [
             "",
-            "Personal book (ideas you Accepted). Overall mill: /performance",
+            "Personal book (ideas you Accepted). Tap Close below, or /performance for the mill.",
         ]
     )
     return "\n".join(lines)
+
+
+CloseStatus = str  # closed | not_found | unavailable | no_spot
+
+
+def get_open_user_trade(
+    user_id: int, paper_id: int
+) -> dict[str, Any] | None:
+    """Return an open personal trade owned by ``user_id``, else None."""
+    conn = _connect()
+    if conn is None:
+        return None
+    try:
+        with conn:
+            conn.executescript(_USER_PAPER_SCHEMA)
+            row = conn.execute(
+                """
+                SELECT * FROM user_paper_trades
+                WHERE id = ? AND user_id = ? AND status = 'open'
+                """,
+                (int(paper_id), int(user_id)),
+            ).fetchone()
+        return dict(row) if row else None
+    except sqlite3.Error:
+        logger.exception(
+            "get_open_user_trade failed user=%s paper=%s", user_id, paper_id
+        )
+        return None
+    finally:
+        conn.close()
+
+
+def close_user_trade_at_spot(
+    user_id: int,
+    paper_id: int,
+    spot: float,
+) -> tuple[CloseStatus, dict[str, Any] | None]:
+    """Manually close a personal open trade at spot. Ownership-checked."""
+    conn = _connect()
+    if conn is None:
+        return "unavailable", None
+    try:
+        with conn:
+            conn.executescript(_USER_PAPER_SCHEMA)
+            row = conn.execute(
+                """
+                SELECT * FROM user_paper_trades
+                WHERE id = ? AND user_id = ? AND status = 'open'
+                """,
+                (int(paper_id), int(user_id)),
+            ).fetchone()
+            if row is None:
+                return "not_found", None
+            trade = dict(row)
+            entry = trade.get("entry")
+            direction = str(trade.get("direction") or "")
+            if entry is None or direction not in ("long", "short"):
+                return "not_found", None
+            entry_f = float(entry)
+            spot_f = float(spot)
+            if direction == "long":
+                pnl_pct = (spot_f - entry_f) / entry_f * 100.0
+            else:
+                pnl_pct = (entry_f - spot_f) / entry_f * 100.0
+            pnl_pct = round(pnl_pct, 4)
+            now = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+            conn.execute(
+                """
+                UPDATE user_paper_trades
+                SET status = 'manual', exit_price = ?, pnl_pct = ?, closed_at = ?
+                WHERE id = ? AND user_id = ? AND status = 'open'
+                """,
+                (spot_f, pnl_pct, now, int(paper_id), int(user_id)),
+            )
+            closed = conn.execute(
+                "SELECT * FROM user_paper_trades WHERE id = ?",
+                (int(paper_id),),
+            ).fetchone()
+        return "closed", dict(closed) if closed else None
+    except sqlite3.Error:
+        logger.exception(
+            "manual close failed user=%s paper=%s", user_id, paper_id
+        )
+        return "unavailable", None
+    finally:
+        conn.close()
+
+
+def format_close_reply(
+    status: CloseStatus, trade: dict[str, Any] | None = None
+) -> str:
+    if status == "closed" and trade:
+        return (
+            f"Closed #{trade.get('id')} {trade.get('product_id')} "
+            f"{trade.get('direction')} @ {_fmt_px(trade.get('exit_price'))} · "
+            f"{_fmt_pct(trade.get('pnl_pct'))}"
+        )
+    if status == "not_found":
+        return "That position is not open (or isn’t yours)."
+    if status == "no_spot":
+        return "Couldn’t fetch a spot price to close — try again shortly."
+    return "Couldn’t close that position right now — try again shortly."
+
+
+def user_book_close_keyboard(
+    report: dict[str, Any] | None, *, max_buttons: int = 8
+):
+    """Inline Close buttons for open personal trades. Returns None when empty."""
+    from telegram import InlineKeyboardButton, InlineKeyboardMarkup
+
+    if not report:
+        return None
+    open_trades = list(report.get("open_trades") or [])[:max_buttons]
+    if not open_trades:
+        return None
+    rows: list[list[InlineKeyboardButton]] = []
+    for t in open_trades:
+        pid = t.get("id")
+        if pid is None:
+            continue
+        product = str(t.get("product_id") or "?").replace("-USD", "")
+        direction = str(t.get("direction") or "")
+        upnl = _fmt_pct(t.get("unrealized_pct"))
+        rows.append(
+            [
+                InlineKeyboardButton(
+                    f"Close #{pid} {product} {direction} ({upnl})",
+                    callback_data=f"uportfolio:close:{int(pid)}",
+                )
+            ]
+        )
+    return InlineKeyboardMarkup(rows) if rows else None

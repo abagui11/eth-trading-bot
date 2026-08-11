@@ -227,6 +227,39 @@ class TradeIdeasBridgeTests(unittest.TestCase):
         text = trade_ideas_bridge.format_user_book_report(report)
         self.assertIn("Your idea portfolio", text)
         self.assertIn("/performance", text)
+        keyboard = trade_ideas_bridge.user_book_close_keyboard(report)
+        self.assertIsNotNone(keyboard)
+
+    def test_manual_close_at_spot(self) -> None:
+        self.assertEqual(
+            trade_ideas_bridge.record_decision(5, 42, "accept"), "recorded"
+        )
+        report = trade_ideas_bridge.user_book_report(42, {"ETH-USD": 105.0})
+        assert report is not None
+        paper_id = int(report["open_trades"][0]["id"])
+        status, closed = trade_ideas_bridge.close_user_trade_at_spot(
+            42, paper_id, 108.0
+        )
+        self.assertEqual(status, "closed")
+        assert closed is not None
+        self.assertEqual(closed["status"], "manual")
+        self.assertGreater(closed["pnl_pct"], 0)
+        # Second close fails
+        status2, _ = trade_ideas_bridge.close_user_trade_at_spot(42, paper_id, 108.0)
+        self.assertEqual(status2, "not_found")
+        # Other user cannot close someone else's row
+        self.assertEqual(
+            trade_ideas_bridge.record_decision(5, 99, "accept"), "recorded"
+        )
+        report99 = trade_ideas_bridge.user_book_report(99, {"ETH-USD": 105.0})
+        assert report99 is not None
+        other_id = int(report99["open_trades"][0]["id"])
+        status3, _ = trade_ideas_bridge.close_user_trade_at_spot(42, other_id, 108.0)
+        self.assertEqual(status3, "not_found")
+        self.assertIn(
+            "Closed",
+            trade_ideas_bridge.format_close_reply("closed", closed),
+        )
 
 
 if __name__ == "__main__":

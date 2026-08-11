@@ -41,6 +41,8 @@ PAYWALL_MESSAGE = (
 
 # Callback prefix for trade_ideas mill cards (idea:accept:<id> / idea:reject:<id>).
 _CB_IDEA_PREFIX = "idea:"
+# Personal idea-portfolio closes from /me (uportfolio:close:<user_paper_id>).
+_CB_UPORTFOLIO_PREFIX = "uportfolio:"
 
 # Kept for any external imports; live copy lives in telegram_ui.
 WELCOME_MESSAGE = telegram_ui.WELCOME_MESSAGE
@@ -191,18 +193,20 @@ async def _handle_me(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
     await update.message.chat.send_action("typing")
     loop = asyncio.get_running_loop()
 
-    def _load() -> str:
+    def _load() -> tuple[str, object]:
         spots = research.get_spot_prices()
         report = trade_ideas_bridge.user_book_report(user_id, spots)
-        return trade_ideas_bridge.format_user_book_report(report)
+        text = trade_ideas_bridge.format_user_book_report(report)
+        keyboard = trade_ideas_bridge.user_book_close_keyboard(report)
+        return text, keyboard
 
     try:
-        text = await loop.run_in_executor(None, _load)
+        text, keyboard = await loop.run_in_executor(None, _load)
     except Exception:
         logger.exception("Me handler failed")
         await _reply(update, "Sorry, I could not load your idea portfolio right now.")
         return
-    await _reply(update, text[:4096])
+    await update.message.reply_text(text[:4096], reply_markup=keyboard)
 
 
 async def _handle_research(update: Update, context: ContextTypes.DEFAULT_TYPE, text: str) -> None:
@@ -310,6 +314,68 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
 
     data = query.data or ""
     chat_id = query.message.chat_id if query.message else user_id
+
+    # Personal idea portfolio: close open trade at spot from /me buttons.
+    if data.startswith(_CB_UPORTFOLIO_PREFIX):
+        parts = data.split(":")
+        if len(parts) != 3 or parts[1] != "close":
+            return
+        try:
+            paper_id = int(parts[2])
+        except ValueError:
+            return
+        loop = asyncio.get_running_loop()
+
+        def _close_proper() -> tuple[str, dict | None]:
+            trade = trade_ideas_bridge.get_open_user_trade(user_id, paper_id)
+            if trade is None:
+                # Distinguish missing DB vs missing row
+                if not trade_ideas_bridge.enabled():
+                    return "unavailable", None
+                return "not_found", None
+            product = str(trade.get("product_id") or "")
+            spots = research.get_spot_prices()
+            spot = spots.get(product)
+            if spot is None:
+                return "no_spot", None
+            status, closed = trade_ideas_bridge.close_user_trade_at_spot(
+                user_id, paper_id, spot
+            )
+            return status, closed
+
+        try:
+            status, trade = await loop.run_in_executor(None, _close_proper)
+        except Exception:
+            logger.exception("uportfolio close failed")
+            await context.bot.send_message(
+                chat_id,
+                trade_ideas_bridge.format_close_reply("unavailable"),
+                reply_markup=telegram_ui.main_keyboard(),
+            )
+            return
+        await context.bot.send_message(
+            chat_id,
+            trade_ideas_bridge.format_close_reply(status, trade),
+            reply_markup=telegram_ui.main_keyboard(),
+        )
+        if status == "closed":
+
+            def _refresh() -> tuple[str, object]:
+                spots = research.get_spot_prices()
+                report = trade_ideas_bridge.user_book_report(user_id, spots)
+                return (
+                    trade_ideas_bridge.format_user_book_report(report),
+                    trade_ideas_bridge.user_book_close_keyboard(report),
+                )
+
+            try:
+                text, keyboard = await loop.run_in_executor(None, _refresh)
+                await context.bot.send_message(
+                    chat_id, text[:4096], reply_markup=keyboard
+                )
+            except Exception:
+                logger.exception("uportfolio refresh after close failed")
+        return
 
     # Volume-lane idea cards are sent by the trade_ideas mill through this
     # bot's token; this process owns the update stream, so their Accept/Reject
@@ -547,7 +613,7 @@ async def cmd_help(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         "/start — welcome + menu (Open account, My Metrics, My book, Journal, Research)\n"
         "/status — current suggestion + paper PnL\n"
         "/performance — volume idea book (realized + unrealized)\n"
-        "/me — your accepted-idea portfolio PnL\n"
+        "/me — your accepted-idea portfolio PnL (Close buttons on open trades)\n"
         "/chart — latest analysis chart + what the bot is watching\n"
         "/research — research topic catalog\n"
         "/help — this message\n\n"
