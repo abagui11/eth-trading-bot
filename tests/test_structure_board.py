@@ -12,18 +12,20 @@ import charts
 import config
 from dashboard.brain import _structure_board
 from dashboard.charts import stance_chart_path
-from intelligence.stance import compute_timeframe_features
+from patterns.htf_structure import HTFZone
+from patterns.key_levels import KeyLevel
+
+_START = datetime(2026, 8, 1, tzinfo=timezone.utc)
 
 
 def _bars(count: int = 80) -> list[dict]:
-    """Synthetic uptrending bars with enough history for the 40-bar window."""
-    start = datetime(2026, 8, 1, tzinfo=timezone.utc)
+    """Synthetic uptrending hourly bars (closes run 100.0 upward by 1.5)."""
     out = []
     for i in range(count):
         close = 100.0 + i * 1.5
         out.append(
             {
-                "ts": (start + timedelta(hours=i)).isoformat().replace("+00:00", "Z"),
+                "ts": (_START + timedelta(hours=i)).isoformat().replace("+00:00", "Z"),
                 "open": close - 0.8,
                 "high": close + 1.2,
                 "low": close - 1.4,
@@ -32,6 +34,17 @@ def _bars(count: int = 80) -> list[dict]:
             }
         )
     return out
+
+
+def _zone() -> HTFZone:
+    """Unmitigated bullish OB inside the synthetic bar range."""
+    return HTFZone(
+        zone_type="order_block",
+        direction="bullish",
+        low=140.0,
+        high=150.0,
+        start_ts=(_START + timedelta(hours=30)).isoformat().replace("+00:00", "Z"),
+    )
 
 
 class StanceChartRenderTests(unittest.TestCase):
@@ -49,13 +62,13 @@ class StanceChartRenderTests(unittest.TestCase):
             pass
 
     def test_render_writes_png_with_stable_name(self) -> None:
-        bars = _bars()
         path = Path(
-            charts.render_stance_chart(
-                bars,
+            charts.render_stance_marked_chart(
+                _bars(),
                 product_id="BTC-USD",
                 timeframe="M15",
-                features=compute_timeframe_features(bars),
+                key_levels=[KeyLevel(150.0, "Daily Open", "#08bcd4")],
+                htf_zones=[_zone()],
                 stance="bullish",
                 confidence=0.72,
             )
@@ -65,20 +78,46 @@ class StanceChartRenderTests(unittest.TestCase):
         self.assertGreater(path.stat().st_size, 0)
 
         # Re-rendering overwrites in place so the hub URL never changes.
-        charts.render_stance_chart(
-            bars, product_id="BTC-USD", timeframe="M15", stance="bearish"
+        charts.render_stance_marked_chart(
+            _bars(), product_id="BTC-USD", timeframe="M15", stance="bearish"
         )
         self.assertEqual(len(list(self._charts.glob("stance_*"))), 1)
 
-    def test_render_survives_short_history(self) -> None:
-        # Fewer than 20 bars skips the swing overlay rather than raising.
-        path = charts.render_stance_chart(
+    def test_render_draws_trading_log_overlays(self) -> None:
+        """The board must use the same overlays as the trade journal charts."""
+        near = KeyLevel(150.0, "Daily Open", "#08bcd4")
+        far = KeyLevel(9000.0, "Yearly Open", "#ff0000")
+        with patch.object(
+            charts, "_draw_key_levels", wraps=charts._draw_key_levels
+        ) as levels, patch.object(
+            charts, "_draw_htf_zones", wraps=charts._draw_htf_zones
+        ) as zones, patch.object(
+            charts, "_draw_swing_hlines", wraps=charts._draw_swing_hlines
+        ) as swings:
+            charts.render_stance_marked_chart(
+                _bars(),
+                product_id="ETH-USD",
+                timeframe="H4",
+                key_levels=[near, far],
+                htf_zones=[_zone()],
+            )
+
+        swings.assert_called_once()
+        self.assertEqual(zones.call_args.args[2], [_zone()])
+        # Levels far outside the candle range are filtered before drawing.
+        self.assertEqual(levels.call_args.args[1], [near])
+
+    def test_render_survives_missing_overlays(self) -> None:
+        # A failed key-level/zone fetch still leaves a candle chart on the hub.
+        path = charts.render_stance_marked_chart(
             _bars(12), product_id="ETH-USD", timeframe="H1"
         )
         self.assertTrue(Path(path).is_file())
 
     def test_stance_chart_path_rejects_unknown_timeframe(self) -> None:
-        charts.render_stance_chart(_bars(), product_id="ETH-USD", timeframe="H4")
+        charts.render_stance_marked_chart(
+            _bars(), product_id="ETH-USD", timeframe="H4"
+        )
         self.assertIsNotNone(stance_chart_path("ETH-USD", "H4"))
         self.assertIsNotNone(stance_chart_path("ETH-USD", "h4"))
         self.assertIsNone(stance_chart_path("ETH-USD", "M5"))
@@ -91,7 +130,9 @@ class StanceChartRenderTests(unittest.TestCase):
 class StructureBoardPayloadTests(StanceChartRenderTests):
     def test_board_pairs_charts_with_latest_stance(self) -> None:
         for tf in ("H4", "H1", "M15"):
-            charts.render_stance_chart(_bars(), product_id="BTC-USD", timeframe=tf)
+            charts.render_stance_marked_chart(
+                _bars(), product_id="BTC-USD", timeframe=tf
+            )
 
         stances = [
             {

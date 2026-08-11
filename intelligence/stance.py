@@ -22,6 +22,8 @@ import config
 import research
 from intelligence import store
 from macro.context import build_macro_block
+from patterns.htf_structure import HTFZone, detect_htf_zones
+from patterns.key_levels import KeyLevel, compute_key_levels
 
 logger = logging.getLogger(__name__)
 
@@ -131,9 +133,31 @@ def gather_features(
     }
 
 
+def _board_overlays(
+    product_id: str,
+    bars: dict[str, list[dict[str, Any]]],
+) -> tuple[list[KeyLevel], list[HTFZone]]:
+    """Calendar key levels + H4 order blocks for one product's board row.
+
+    Either overlay degrades to empty rather than losing the whole chart, so a
+    failed daily-candle fetch still leaves candles and swing lines on screen.
+    """
+    try:
+        daily_bars = research.get_daily_bars_for_levels(product_id=product_id)
+        key_levels = compute_key_levels(daily_bars)
+    except Exception:
+        logger.exception("Key levels failed for %s", product_id)
+        key_levels = []
+    try:
+        htf_zones = detect_htf_zones(bars.get("H4") or [], product_id=product_id)
+    except Exception:
+        logger.exception("H4 zones failed for %s", product_id)
+        htf_zones = []
+    return key_levels, htf_zones
+
+
 def render_structure_board(
     bars_by_product: dict[str, dict[str, list[dict[str, Any]]]],
-    features: dict[str, dict[str, dict[str, Any]]],
     stances: list[dict[str, Any]],
 ) -> dict[str, str]:
     """Marked H4/H1/M15 PNGs for the hub. Never fails the stance cycle."""
@@ -142,14 +166,17 @@ def render_structure_board(
     }
     paths: dict[str, str] = {}
     for product_id in STANCE_PRODUCTS:
+        bars = bars_by_product.get(product_id) or {}
+        key_levels, htf_zones = _board_overlays(product_id, bars)
         for tf in STANCE_TIMEFRAMES:
             stance_row = by_key.get((product_id, tf)) or {}
             try:
-                paths[f"{product_id}:{tf}"] = charts.render_stance_chart(
-                    bars_by_product[product_id][tf],
+                paths[f"{product_id}:{tf}"] = charts.render_stance_marked_chart(
+                    bars[tf],
                     product_id=product_id,
                     timeframe=tf,
-                    features=features[product_id][tf],
+                    key_levels=key_levels,
+                    htf_zones=htf_zones,
                     stance=stance_row.get("stance"),
                     confidence=stance_row.get("confidence"),
                 )
@@ -343,7 +370,7 @@ def run_stance_cycle(cycle_ts: str | None = None) -> dict[str, Any]:
         source = "programmatic"
 
     store.insert_stances(cycle_ts, stances, source=source)
-    render_structure_board(bars_by_product, features, stances)
+    render_structure_board(bars_by_product, stances)
     funding_note = funding_block or None
     if not medium_summary:
         btc_h4 = next(

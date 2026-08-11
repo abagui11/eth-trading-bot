@@ -408,141 +408,38 @@ def render_marked_charts(
   return paths
 
 
-STANCE_FIGSIZE = (16, 9)
-
-_STANCE_COLORS = {
-  "bullish": "#3fb950",
-  "bearish": "#f85149",
-  "neutral": "#8b949e",
-}
-
-
-def _ema_series(values: list[float], period: int) -> list[float]:
-  """Full EMA series (the stance engine keeps only the last value)."""
-  if not values:
-    return []
-  k = 2.0 / (period + 1)
-  out = [values[0]]
-  for v in values[1:]:
-    out.append(v * k + out[-1] * (1 - k))
-  return out
-
-
-def render_stance_chart(
+def render_stance_marked_chart(
   bars: list[dict],
   *,
   product_id: str,
   timeframe: str,
-  features: dict | None = None,
+  key_levels: list[KeyLevel] | None = None,
+  htf_zones: list[HTFZone] | None = None,
   stance: str | None = None,
   confidence: float | None = None,
 ) -> str:
-  """Marked chart for the intelligence stance board (H4/H1/M15).
+  """One marked chart for the intelligence stance board (H4/H1/M15).
 
-  Draws exactly what the stance engine measures — EMA12/26, the 40-bar range
-  that sets range_pos, and the 10-bar vs prior-10-bar swings behind HH/HL/LH/LL
-  — so the hub shows the evidence behind each posture pill.
+  Draws the same overlays as ``render_marked_charts`` so the hub board and the
+  trade journal read identically. The filename is stable per product/timeframe
+  (no cycle id) because the hub links to a fixed URL and overwrites in place.
   """
   out_dir = _ensure_charts_dir()
-  label = _chart_label(product_id)
   slug = _product_slug(product_id)
+  tf = timeframe.upper()
   df = _to_mpf_df(bars)
 
-  head = f"{label} {timeframe} — stance structure"
+  head = f"{_chart_label(product_id)} {tf} — Key Levels + H4 Structure"
   if stance:
     head += f" · {stance.upper()}"
     if confidence is not None:
       head += f" ({confidence:.0%})"
-  fig, ax = _render_candlestick_figure(df, head, figsize=STANCE_FIGSIZE)
 
-  closes = [float(c) for c in df["Close"].tolist()]
-  highs = [float(h) for h in df["High"].tolist()]
-  lows = [float(low) for low in df["Low"].tolist()]
-  x = list(range(len(df)))
-
-  ax.plot(x, _ema_series(closes, 12), color="#58a6ff", linewidth=1.3, label="EMA12")
-  ax.plot(x, _ema_series(closes, 26), color="#d29922", linewidth=1.3, label="EMA26")
-
-  # 40-bar range — the band range_pos is measured against.
-  window = min(40, len(df))
-  win_high = max(highs[-window:])
-  win_low = min(lows[-window:])
-  x0 = len(df) - window
-  ax.axhspan(win_low, win_high, xmin=0, xmax=1, color="#58a6ff", alpha=0.05, zorder=0)
-  for price, name in ((win_high, "40-bar high"), (win_low, "40-bar low")):
-    ax.axhline(price, color="#8b949e", linestyle="--", linewidth=0.9, alpha=0.75)
-    ax.text(
-      x0,
-      price,
-      f" {name} {price:,.2f}",
-      fontsize=FONT_SIZE - 3,
-      color="#8b949e",
-      va="bottom",
-    )
-
-  # Swing comparison driving HH/HL/LH/LL (last 10 bars vs the 10 before).
-  if len(df) >= 20:
-    segments = (
-      (max(highs[-10:]), len(df) - 10, len(df) - 1, "#f85149", "recent high"),
-      (max(highs[-20:-10]), len(df) - 20, len(df) - 11, "#f85149", "prior high"),
-      (min(lows[-10:]), len(df) - 10, len(df) - 1, "#3fb950", "recent low"),
-      (min(lows[-20:-10]), len(df) - 20, len(df) - 11, "#3fb950", "prior low"),
-    )
-    for price, left, right, color, name in segments:
-      recent = name.startswith("recent")
-      ax.hlines(
-        price,
-        left,
-        right,
-        colors=color,
-        linewidth=2.2 if recent else 1.2,
-        alpha=0.95 if recent else 0.55,
-        linestyles="-" if recent else ":",
-      )
-      if recent:
-        ax.text(
-          right,
-          price,
-          f" {name}",
-          fontsize=FONT_SIZE - 3,
-          color=color,
-          va="center",
-        )
-
-  last = closes[-1]
-  ax.axhline(last, color="#e6edf3", linestyle=":", linewidth=1.0, alpha=0.8)
-
-  if features:
-    tags = []
-    if features.get("higher_highs"):
-      tags.append("HH")
-    if features.get("higher_lows"):
-      tags.append("HL")
-    if features.get("lower_highs"):
-      tags.append("LH")
-    if features.get("lower_lows"):
-      tags.append("LL")
-    summary = (
-      f"range_pos {features.get('range_pos')}  ·  "
-      f"vol x{features.get('volume_last_ratio')}  ·  "
-      f"score {features.get('score')}"
-    )
-    if tags:
-      summary = " ".join(tags) + "  ·  " + summary
-    ax.text(
-      0.01,
-      0.02,
-      summary,
-      transform=ax.transAxes,
-      fontsize=FONT_SIZE - 2,
-      color=_STANCE_COLORS.get(str(stance), "#8b949e"),
-      bbox=dict(boxstyle="round,pad=0.35", facecolor="white", alpha=0.75, edgecolor="#8b949e"),
-      va="bottom",
-    )
-
-  ax.legend(loc="upper left", fontsize=FONT_SIZE - 3, framealpha=0.75)
-  path = out_dir / f"stance_{slug}_{timeframe}_marked.png"
-  return _save_chart_figure(fig, path)
+  fig, ax = _render_candlestick_figure(df, head)
+  _draw_htf_zones(ax, df, htf_zones or [])
+  _draw_swing_hlines(ax, df)
+  _draw_key_levels(ax, _visible_key_levels(key_levels or [], df), df)
+  return _save_chart_figure(fig, out_dir / f"stance_{slug}_{tf}_marked.png")
 
 
 def render_ratio_chart(
