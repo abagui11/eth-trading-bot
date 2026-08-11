@@ -81,11 +81,14 @@ def deterministic_bias(title: str, eth_bias: str | None = None) -> dict[str, Any
     return {"side": side, "pct": int(pct), "source": "deterministic"}
 
 
-_BATCH_SYSTEM = """You refine crypto-macro headline bias for an ETH/BTC intelligence desk.
+_ONE_LINER_CHARS = 110
+
+_BATCH_SYSTEM = f"""You refine crypto-macro headline bias for an ETH/BTC intelligence desk.
 For each headline return a calibrated directional score.
 
-Return JSON only:
-{"items":[{"id":123,"side":"bullish|bearish|neutral","pct":0-100,"one_liner":"≤140 chars"}]}
+Return JSON only — no markdown fence, no commentary. Emit it compactly, one
+item object per line and no indentation:
+{{"items":[{{"id":123,"side":"bullish|bearish|neutral","pct":0-100,"one_liner":"..."}}]}}
 
 Rules:
 - pct is conviction that the named side is correct for near-term ETH/BTC risk appetite.
@@ -93,65 +96,86 @@ Rules:
 - Be nuanced: sell-the-news, already-priced, and second-order effects matter.
 - Do not invent facts not in the headline.
 - Keep the same id for each input item. One entry per input id.
+- one_liner must be at most {_ONE_LINER_CHARS} characters.
 """
 
+# Headlines are scored in bounded chunks rather than one unbounded call, so the
+# batch can grow with news volume without any single reply outgrowing its token
+# budget. This stays a batch job: one call covers many headlines.
+_CHUNK_SIZE = 20
+# A fully expanded reply (every JSON field on its own line) costs about 50
+# tokens per item; budget well above that so the model's formatting choice can
+# never truncate the reply.
+_TOKENS_PER_ITEM = 90
+_CHUNK_TOKEN_OVERHEAD = 256
+_MAX_CHUNK_TOKENS = 8192
 
-def refine_bias_batch(events: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    """One Claude call for many events. Returns [{id, side, pct, one_liner}, ...]."""
-    if not events:
-        return []
-    payload = []
-    for e in events:
-        payload.append(
-            {
-                "id": e.get("id"),
-                "title": e.get("title"),
-                "summary": (e.get("summary") or e.get("eth_impact_summary") or "")[:280],
-                "severity": e.get("severity"),
-                "current_bias": e.get("eth_bias"),
-                "det_side": e.get("bias_side_det"),
-                "det_pct": e.get("bias_pct_det"),
-            }
-        )
-    client = anthropic.Anthropic(api_key=config.ANTHROPIC_API_KEY)
-    try:
-        response = client.messages.create(
-            model=config.ANTHROPIC_MODEL_FAST,
-            max_tokens=2048,
-            system=_BATCH_SYSTEM,
-            messages=[
-                {
-                    "role": "user",
-                    "content": "Headlines JSON:\n"
-                    + json.dumps(payload)
-                    + "\nReturn JSON only.",
-                }
-            ],
-        )
-    except Exception:
-        logger.exception("Batched bias refine failed")
-        return []
 
-    log_anthropic_usage(response, "macro_bias_batch")
-    raw = ""
-    for block in response.content:
-        if block.type == "text":
-            raw += block.text
-    raw = raw.strip()
-    if raw.startswith("```"):
-        raw = re.sub(r"^```(?:json)?\s*", "", raw)
-        raw = re.sub(r"\s*```$", "", raw)
+def _chunk_max_tokens(count: int) -> int:
+    return min(_MAX_CHUNK_TOKENS, count * _TOKENS_PER_ITEM + _CHUNK_TOKEN_OVERHEAD)
+
+
+def _strip_fence(text: str) -> str:
+    text = text.strip()
+    if text.startswith("```"):
+        text = re.sub(r"^```(?:json)?\s*", "", text)
+        text = re.sub(r"\s*```$", "", text)
+    return text.strip()
+
+
+def _snippet(raw: str, *, head: int = 400, tail: int = 200) -> str:
+    """Head and tail of a reply, enough to see where and how it broke."""
+    if len(raw) <= head + tail:
+        return raw
+    return f"{raw[:head]} …[{len(raw) - head - tail} chars omitted]… {raw[-tail:]}"
+
+
+def _salvage_items(raw: str) -> list[dict[str, Any]]:
+    """Recover every complete item object from a reply that will not parse.
+
+    A reply cut off at max_tokens ends mid-object, which makes the whole
+    document invalid even though every earlier entry arrived intact. Decoding
+    object by object costs only the severed tail instead of the whole batch.
+    """
+    decoder = json.JSONDecoder()
+    items: list[dict[str, Any]] = []
+    idx = raw.find("{")
+    while idx != -1:
+        try:
+            obj, end = decoder.raw_decode(raw, idx)
+        except ValueError:
+            idx = raw.find("{", idx + 1)
+            continue
+        if isinstance(obj, dict):
+            # A complete wrapper means the reply was valid after all.
+            if isinstance(obj.get("items"), list):
+                return [i for i in obj["items"] if isinstance(i, dict)]
+            if "id" in obj:
+                items.append(obj)
+        idx = raw.find("{", max(end, idx + 1))
+    return items
+
+
+def _parse_items(raw: str) -> tuple[list[dict[str, Any]], bool]:
+    """(items, salvaged) — salvaged is True when the reply was not valid JSON."""
     try:
         data = json.loads(raw)
     except json.JSONDecodeError:
-        logger.exception("Bias batch JSON parse failed")
-        return []
+        return _salvage_items(raw), True
     items = data.get("items") if isinstance(data, dict) else data
     if not isinstance(items, list):
-        return []
+        return _salvage_items(raw), True
+    return [i for i in items if isinstance(i, dict)], False
+
+
+def _normalize_items(items: list[dict[str, Any]]) -> list[dict[str, Any]]:
     out: list[dict[str, Any]] = []
     for item in items:
         if not isinstance(item, dict) or item.get("id") is None:
+            continue
+        try:
+            event_id = int(item["id"])
+        except (TypeError, ValueError):
             continue
         side = str(item.get("side") or "neutral").lower()
         if side not in ("bullish", "bearish", "neutral"):
@@ -163,12 +187,85 @@ def refine_bias_batch(events: list[dict[str, Any]]) -> list[dict[str, Any]]:
         pct = max(0, min(100, pct))
         out.append(
             {
-                "id": int(item["id"]),
+                "id": event_id,
                 "side": side,
                 "pct": pct,
                 "one_liner": str(item.get("one_liner") or "")[:200],
             }
         )
+    return out
+
+
+def _chunk_payload(events: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    return [
+        {
+            "id": e.get("id"),
+            "title": e.get("title"),
+            "summary": (e.get("summary") or e.get("eth_impact_summary") or "")[:280],
+            "severity": e.get("severity"),
+            "current_bias": e.get("eth_bias"),
+            "det_side": e.get("bias_side_det"),
+            "det_pct": e.get("bias_pct_det"),
+        }
+        for e in events
+    ]
+
+
+def _refine_chunk(client: Any, chunk: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Score one bounded chunk. Never raises; returns whatever it could parse."""
+    try:
+        response = client.messages.create(
+            model=config.ANTHROPIC_MODEL_FAST,
+            max_tokens=_chunk_max_tokens(len(chunk)),
+            system=_BATCH_SYSTEM,
+            messages=[
+                {
+                    "role": "user",
+                    "content": "Headlines JSON:\n"
+                    + json.dumps(_chunk_payload(chunk))
+                    + "\nReturn JSON only.",
+                }
+            ],
+        )
+    except Exception:
+        logger.exception("Batched bias refine call failed for %s headlines", len(chunk))
+        return []
+
+    log_anthropic_usage(response, "macro_bias_batch")
+    raw = _strip_fence(
+        "".join(b.text for b in response.content if getattr(b, "type", None) == "text")
+    )
+    items, salvaged = _parse_items(raw)
+    out = _normalize_items(items)
+    stop_reason = getattr(response, "stop_reason", None)
+    if salvaged or stop_reason == "max_tokens" or len(out) < len(chunk):
+        usage = getattr(response, "usage", None)
+        logger.error(
+            "Bias batch reply incomplete: stop_reason=%s output_tokens=%s "
+            "max_tokens=%s sent=%s recovered=%s salvaged=%s raw=%r",
+            stop_reason,
+            getattr(usage, "output_tokens", None),
+            _chunk_max_tokens(len(chunk)),
+            len(chunk),
+            len(out),
+            salvaged,
+            _snippet(raw),
+        )
+    return out
+
+
+def refine_bias_batch(events: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Score many events in a few batched Claude calls.
+
+    Returns [{id, side, pct, one_liner}, ...] for every entry that came back
+    intact; a chunk that fails or arrives truncated costs only its own entries.
+    """
+    if not events:
+        return []
+    client = anthropic.Anthropic(api_key=config.ANTHROPIC_API_KEY)
+    out: list[dict[str, Any]] = []
+    for start in range(0, len(events), _CHUNK_SIZE):
+        out.extend(_refine_chunk(client, events[start : start + _CHUNK_SIZE]))
     return out
 
 
@@ -197,6 +294,12 @@ def run_hourly_bias_refine(*, limit: int = 40) -> int:
             one_liner=item.get("one_liner"),
         )
         updated += 1
+    if updated < len(events):
+        logger.warning(
+            "Bias refine covered %s of %s headlines — the rest stay deterministic",
+            updated,
+            len(events),
+        )
     return updated
 
 

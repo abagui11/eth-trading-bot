@@ -4,7 +4,7 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
   <title>Republic Technologies Intelligence</title>
-  <link rel="stylesheet" href="/static/style.css?v=news2">
+  <link rel="stylesheet" href="/static/style.css?v=news3">
 </head>
 <body>
   {% macro tip_badge(label, class_name='badge-none') -%}
@@ -13,7 +13,9 @@
 
   {% macro bias_badge(side, pct, source) -%}
   {% set cls = 'badge-good' if side == 'bullish' else ('badge-bad' if side == 'bearish' else 'badge-none') %}
-  <span class="badge {{ cls }}" title="{{ source or 'deterministic' }}">{{ side }} {{ pct }}%</span>
+  {% set refined = source == 'llm' %}
+  <span class="badge {{ cls }}{{ '' if refined else ' badge-unrefined' }}"
+        title="{{ 'LLM-refined score' if refined else 'Deterministic score — awaiting the hourly LLM refine' }}">{{ side }} {{ pct }}%{% if not refined %} <span class="bias-src">det</span>{% endif %}</span>
   {%- endmacro %}
 
   {% macro stance_cell(stances, product_id, timeframe) -%}
@@ -381,7 +383,7 @@
       <section class="card" id="brain-news">
         <h2>News desk</h2>
         <p class="sub" style="margin-bottom:10px">
-          Ranked bullish/bearish with conviction %. Deterministic score shows first; hourly batched LLM refine updates it (one Claude call).
+          Ranked bullish/bearish with conviction %. Scores marked <span class="bias-src">det</span> are the deterministic read shown at ingest; the hourly batched LLM refine replaces them.
         </p>
         <div class="news-feed" id="brain-news-feed">
           {% set news_items = brain.macro.active or brain.macro.recent %}
@@ -780,7 +782,10 @@
 
     function biasBadge(side, pct, source) {
       var cls = side === 'bullish' ? 'badge-good' : (side === 'bearish' ? 'badge-bad' : 'badge-none');
-      return '<span class="badge ' + cls + '" title="' + (source || 'deterministic') + '">' + side + ' ' + pct + '%</span>';
+      var refined = source === 'llm';
+      var tip = refined ? 'LLM-refined score' : 'Deterministic score — awaiting the hourly LLM refine';
+      return '<span class="badge ' + cls + (refined ? '' : ' badge-unrefined') + '" title="' + tip + '">' +
+        side + ' ' + pct + '%' + (refined ? '' : ' <span class="bias-src">det</span>') + '</span>';
     }
 
     // Dateline helpers — mirror the Jinja news_when/news_age/news_source filters
