@@ -334,7 +334,10 @@ Defaults from `bot_config.py` (non-secret tunables). Secrets and portfolio size 
 | hourly interval | `3600s` | `hourly_job` cadence in `main.py` (wall-clock aligned to the top of the hour) |
 | `validate.MIN_STOP_DISTANCE_PCT` | `0.008` (0.8%) | hard floor on stop distance (LLM + watchdog) |
 | `INTELLIGENCE_ENABLED` | `True` | hourly BTC/ETH stance batch (H4/H1/M15) persisted + served on `/api/v1` |
-| `HQ_IDEAS_INTERNAL_ONLY` | `True` | HQ (abstention-first ICT) cards DM only `INTERNAL_TELEGRAM_IDS`; ledger + house paper book still record every idea, so dashboard quality tracking is unchanged |
+| `HQ_IDEAS_INTERNAL_ONLY` | `False` | HQ (abstention-first ICT) cards now DM **all public subscribers** with Accept/Reject and a "High Quality" title label (2026-08-12); set `True` to gate back to `INTERNAL_TELEGRAM_IDS`. Ledger + house paper book record every idea either way |
+| `DAILY_PERFORMANCE_POST_ENABLED` | `True` | once-daily performance digest ("you'd be up X%" + winner breakdown) posted as an X thread and mirrored to Telegram subscribers |
+| `DAILY_DIGEST_HOUR_UTC` | `21` | daily digest post time (UTC) |
+| `TWITTER_ENABLED` (env) | `false` | X announcement mirror for HQ cards + daily digest (OAuth 1.0a keys in `.env`; announcement-only, no Accept/Reject on X). The trade_ideas mill mirrors its broadcast idea cards with the same keys |
 | `FUNDING_ENABLED` | `True` | perp funding regime tracker (Binance prints for BTC/ETH) |
 | `FUNDING_INTERVAL_SEC` | `3600` | funding refresh cadence (prints land every 8h) |
 | `FUNDING_PERSIST_PERIODS` | see `bot_config` | prints required before a regime counts as persistent |

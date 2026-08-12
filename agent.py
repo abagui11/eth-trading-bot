@@ -15,6 +15,7 @@ import ledger
 import notify
 import paper
 import research
+import twitter_post
 import user_books
 from macro.context import decision_macro_snapshot
 from models import Suggestion
@@ -255,10 +256,13 @@ def run_cycle() -> list[tuple[Suggestion, list[str]]] | None:
                         pnl_footer=pnl_footer,
                         offer_id=offer_id,
                         display_summary_text=card_summary,
-                        # HQ abstention-first cards are internal-only; the
-                        # public volume lane lives in the trade_ideas product.
+                        # False = public subscribers get HQ cards with the
+                        # High Quality label; True gates to the internal
+                        # ops allowlist.
                         internal_only=bot_config.HQ_IDEAS_INTERNAL_ONLY,
                     )
+                    # Announcement-only mirror on X (no Accept/Reject there).
+                    twitter_post.announce_hq(suggestion, summary=card_summary)
                 else:
                     logger.info(
                         "Skipping subscriber broadcast — %s for cycle %s",

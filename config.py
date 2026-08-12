@@ -110,6 +110,19 @@ SERVICE_API_TOKENS: list[str] = [
     t.strip() for t in _service_tokens_raw.split(",") if t.strip()
 ]
 
+# Twitter/X announcement posting (pay-per-use API v2, OAuth 1.0a user context).
+# All optional: posting silently no-ops until TWITTER_ENABLED=true and all
+# four keys are present.
+TWITTER_ENABLED: bool = _optional_bool("TWITTER_ENABLED", default=False)
+TWITTER_API_KEY: str | None = _optional("TWITTER_API_KEY")
+TWITTER_API_SECRET: str | None = _optional("TWITTER_API_SECRET")
+TWITTER_ACCESS_TOKEN: str | None = _optional("TWITTER_ACCESS_TOKEN")
+TWITTER_ACCESS_TOKEN_SECRET: str | None = _optional("TWITTER_ACCESS_TOKEN_SECRET")
+# OAuth 2.0 Client ID/Secret (User authentication settings). Stored for
+# future use; current poster uses OAuth 1.0a keys above.
+TWITTER_CLIENT_ID: str | None = _optional("TWITTER_CLIENT_ID")
+TWITTER_CLIENT_SECRET: str | None = _optional("TWITTER_CLIENT_SECRET")
+
 # Public dashboard URL shown in Telegram (Portfolio button / welcome copy).
 DASHBOARD_PUBLIC_URL: str | None = _optional("DASHBOARD_PUBLIC_URL")
 DASHBOARD_PORT: int = int(os.getenv("DASHBOARD_PORT", "8080") or "8080")

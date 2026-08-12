@@ -6,6 +6,7 @@ import asyncio
 import logging
 import sys
 import time
+from datetime import time as dtime, timezone
 
 from bot import build_application
 from agent import run_cycle
@@ -100,6 +101,19 @@ async def long_thesis_job(context) -> None:
         logger.exception("Long thesis job failed")
 
 
+async def daily_digest_job(context) -> None:
+    """Post the daily performance digest (X thread + Telegram mirror)."""
+    if not bot_config.DAILY_PERFORMANCE_POST_ENABLED:
+        return
+    from performance_digest import run_daily_digest
+
+    loop = asyncio.get_running_loop()
+    try:
+        await loop.run_in_executor(None, run_daily_digest)
+    except Exception:
+        logger.exception("Daily digest job failed")
+
+
 async def hourly_job(context) -> None:
     """Run the sync agent cycle first, then the stance batch and bias refine."""
     logger.info("Hourly job starting")
@@ -169,6 +183,17 @@ def main() -> None:
             name="long_thesis_refresh",
         )
         logger.info("Long thesis refresh enabled — every %ss", bot_config.LONG_THESIS_INTERVAL_SEC)
+
+    if bot_config.DAILY_PERFORMANCE_POST_ENABLED:
+        app.job_queue.run_daily(
+            daily_digest_job,
+            time=dtime(hour=bot_config.DAILY_DIGEST_HOUR_UTC, tzinfo=timezone.utc),
+            name="daily_performance_digest",
+        )
+        logger.info(
+            "Daily performance digest enabled — %02d:00 UTC",
+            bot_config.DAILY_DIGEST_HOUR_UTC,
+        )
 
     if bot_config.WATCHDOG_ENABLED:
         interval = max(60, min(bot_config.WATCHDOG_INTERVAL_SEC, 300))

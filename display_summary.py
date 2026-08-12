@@ -221,7 +221,12 @@ def build_card_body(
     else:
         lead = f"Potential entry near ${entry:,.2f}"
 
-    lines = [friendly_title(suggestion), "", lead + "."]
+    # HQ hourly (abstention-first ICT) cards carry the High Quality label;
+    # watchdog programmatic fires do not.
+    title = friendly_title(suggestion)
+    if not is_watchdog_suggestion(suggestion):
+        title = f"High Quality · {title}"
+    lines = [title, "", lead + "."]
     if pcts and tp1 is not None:
         lines.append(
             f"Target 1 is ${tp1:,.2f} ({format_pct(pcts['tp_pct'])} price move) "

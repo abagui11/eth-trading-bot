@@ -113,10 +113,10 @@ RELATIVE_STRENGTH_ENABLED = True
 # --- Republic Intelligence layer ---------------------------------------------
 # Hourly BTC/ETH stance batch (H4/H1/M15) persisted + served on /api/v1.
 INTELLIGENCE_ENABLED = True
-# Gate high-quality (abstention-first ICT) trade cards to the internal
-# allowlist (config.INTERNAL_TELEGRAM_IDS). Public volume ideas live in the
-# separate trade_ideas product.
-HQ_IDEAS_INTERNAL_ONLY = True
+# When True, gate high-quality (abstention-first ICT) trade cards to the
+# internal allowlist (config.INTERNAL_TELEGRAM_IDS). False = HQ cards go to
+# all public subscribers with Accept/Reject and a "High Quality" label.
+HQ_IDEAS_INTERNAL_ONLY = False
 
 # Perp funding regime tracker (Binance public funding prints for BTC/ETH).
 FUNDING_ENABLED = True
@@ -135,6 +135,12 @@ FUNDING_SWITCH_CONFIRM_PERIODS = 3
 # Long-horizon (4-year cycle) thesis: refreshed daily.
 LONG_THESIS_ENABLED = True
 LONG_THESIS_INTERVAL_SEC = 24 * 3600
+
+# Once-daily performance digest ("you'd be up X%" + winner breakdown),
+# posted as an X thread and mirrored to Telegram subscribers. X posting
+# additionally requires TWITTER_ENABLED + keys in .env.
+DAILY_PERFORMANCE_POST_ENABLED = True
+DAILY_DIGEST_HOUR_UTC = 21  # 21:00 UTC ≈ 5pm ET
 
 
 def qty_caps(product_id: str) -> tuple[float, float]:
