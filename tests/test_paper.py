@@ -687,5 +687,61 @@ class PaperPositionTests(unittest.TestCase):
         self.assertEqual(epoch["prior_epoch_count"], 1)
 
 
+class PairClosedTradesTests(unittest.TestCase):
+    """_pair_closed_trades is pure — feed it ledger rows directly."""
+
+    @staticmethod
+    def _row(event: str, qty: float, price: float, **kw) -> dict:
+        return {
+            "event": event,
+            "position_id": kw.get("position_id", 1),
+            "side": kw.get("side", "long"),
+            "qty": qty,
+            "eth_qty": qty,
+            "price": price,
+            "cycle_id": kw.get("cycle_id"),
+            "ts": kw.get("ts"),
+            "close_reason": kw.get("close_reason"),
+            "product_id": "ETH-USD",
+        }
+
+    def test_close_spanning_scale_in_tranches_blends_entry(self) -> None:
+        rows = [
+            self._row("open", 1.0, 100.0, cycle_id="t1"),
+            self._row("open", 1.0, 110.0, cycle_id="t2"),  # scale-in
+            self._row("close", 2.0, 90.0, close_reason="stop_loss"),
+        ]
+        closed = paper._pair_closed_trades(rows)
+        self.assertEqual(len(closed), 1)
+        trade = closed[0]
+        self.assertAlmostEqual(trade["qty"], 2.0)
+        self.assertAlmostEqual(trade["entry"], 105.0)
+        # Old behavior paired only one tranche (−$10) and dropped the rest;
+        # the full realized loss is 2 × (105 − 90) = −$30.
+        self.assertAlmostEqual(trade["realized_pnl_usd"], -30.0)
+
+    def test_partial_closes_still_pair_per_exit(self) -> None:
+        rows = [
+            self._row("open", 0.75, 100.0, cycle_id="t1"),
+            self._row("close", 0.25, 120.0, close_reason="take_profit"),
+            self._row("close", 0.50, 100.0, close_reason="stop_loss"),
+        ]
+        closed = paper._pair_closed_trades(rows)
+        self.assertEqual(len(closed), 2)
+        self.assertAlmostEqual(closed[0]["realized_pnl_usd"], 5.0)
+        self.assertAlmostEqual(closed[1]["realized_pnl_usd"], 0.0)
+
+    def test_short_close_spans_tranches(self) -> None:
+        rows = [
+            self._row("open", 1.0, 100.0, side="short"),
+            self._row("open", 1.0, 90.0, side="short"),
+            self._row("close", 2.0, 95.0, side="short", close_reason="signal_net"),
+        ]
+        closed = paper._pair_closed_trades(rows)
+        self.assertEqual(len(closed), 1)
+        # blended entry 95 vs exit 95 → flat
+        self.assertAlmostEqual(closed[0]["realized_pnl_usd"], 0.0)
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -1272,9 +1272,12 @@ def format_position_detail(spot_price: float | None = None) -> str | None:
 def _pair_closed_trades(rows: list[dict]) -> list[dict]:
     """Pair open/close ledger rows into closed trade summaries (oldest-first input).
 
-    Supports partial closes (TP scale-outs / signal nets): one open may match
-    multiple close rows; realized qty/PnL use the close size, and any unused
-    open qty stays pending for later closes.
+    Supports partial closes (TP scale-outs / signal nets) and scale-ins: one
+    close may span multiple open tranches, so it consumes across as many
+    pending opens as its quantity covers (LIFO within its position, then any
+    same-side open) and reports a single trade at the blended entry. Dropping
+    the unmatched remainder instead — the old behavior — silently discarded
+    realized P&L on multi-tranche positions and skewed win/loss stats.
     """
     pending_opens: dict[int | None, list[dict]] = {}
     closed: list[dict] = []
@@ -1285,6 +1288,18 @@ def _pair_closed_trades(rows: list[dict]) -> list[dict]:
         return float(
             opened.get("qty") if opened.get("qty") is not None else opened["eth_qty"]
         )
+
+    def _next_open(pos_id: int | None, side: str) -> dict | None:
+        opens = pending_opens.get(pos_id) or []
+        for i in range(len(opens) - 1, -1, -1):
+            if _open_remaining(opens[i]) > 1e-12:
+                return opens[i]
+        for other in pending_opens.values():
+            for i in range(len(other) - 1, -1, -1):
+                cand = other[i]
+                if str(cand.get("side") or "") == side and _open_remaining(cand) > 1e-12:
+                    return cand
+        return None
 
     for row in rows:
         event = str(row.get("event") or "")
@@ -1299,28 +1314,26 @@ def _pair_closed_trades(rows: list[dict]) -> list[dict]:
 
         side = str(row.get("side") or "")
         close_qty = float(row.get("qty") if row.get("qty") is not None else row["eth_qty"])
-        opened: dict | None = None
-        if pos_id is not None and pos_id in pending_opens and pending_opens[pos_id]:
-            opened = pending_opens[pos_id][-1]
-        if opened is None or _open_remaining(opened) <= 1e-12:
-            opened = None
-            for opens in pending_opens.values():
-                for i in range(len(opens) - 1, -1, -1):
-                    cand = opens[i]
-                    if str(cand.get("side") or "") == side and _open_remaining(cand) > 1e-12:
-                        opened = cand
-                        break
-                if opened is not None:
-                    break
-        if opened is None:
+
+        need = close_qty
+        consumed: list[tuple[float, dict]] = []
+        while need > 1e-12:
+            opened = _next_open(pos_id, side)
+            if opened is None:
+                break
+            take = min(need, _open_remaining(opened))
+            if take <= 1e-12:
+                break
+            opened["_remaining"] = _open_remaining(opened) - take
+            consumed.append((take, opened))
+            need -= take
+        if not consumed:
             continue
 
-        entry = float(opened["price"])
+        qty = sum(take for take, _ in consumed)
+        entry = sum(take * float(o["price"]) for take, o in consumed) / qty
+        primary = consumed[0][1]
         exit_price = float(row["price"])
-        qty = min(close_qty, _open_remaining(opened))
-        if qty <= 1e-12:
-            continue
-        opened["_remaining"] = _open_remaining(opened) - qty
         if side == "long":
             realized_pnl = qty * (exit_price - entry)
         else:
@@ -1329,18 +1342,18 @@ def _pair_closed_trades(rows: list[dict]) -> list[dict]:
         closed.append(
             {
                 "side": side,
-                "open_cycle_id": opened.get("cycle_id"),
+                "open_cycle_id": primary.get("cycle_id"),
                 "close_cycle_id": row.get("cycle_id"),
                 "eth_qty": qty,
                 "qty": qty,
                 "product_id": str(
                     row.get("product_id")
-                    or opened.get("product_id")
+                    or primary.get("product_id")
                     or "ETH-USD"
                 ),
                 "entry": entry,
                 "exit": exit_price,
-                "opened_at": opened.get("ts"),
+                "opened_at": primary.get("ts"),
                 "closed_at": row.get("ts"),
                 "close_reason": row.get("close_reason"),
                 "realized_pnl_usd": realized_pnl,
