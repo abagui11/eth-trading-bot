@@ -134,6 +134,21 @@ YIELD_GEN_DASHBOARD_URL: str | None = (
     _optional("YIELD_GEN_DASHBOARD_URL") or _optional("YIELD_GEN_API_URL")
 )
 
+# --- Live execution (Coinbase Deribit-powered derivatives gateway) -----------
+# off    = paper only (default, safe)
+# shadow = log the exact live order we WOULD send, place nothing
+# live   = place real orders (requires CDP key below)
+EXECUTION_MODE: str = (_optional("EXECUTION_MODE") or "off").lower()
+if EXECUTION_MODE not in ("off", "shadow", "live"):
+    raise RuntimeError(
+        f"EXECUTION_MODE must be off|shadow|live, got {EXECUTION_MODE!r}"
+    )
+# CDP API key: View + Trade permissions ONLY — never Transfer.
+COINBASE_CDP_API_KEY_NAME: str | None = _optional("COINBASE_CDP_API_KEY_NAME")
+COINBASE_CDP_PRIVATE_KEY: str | None = _optional("COINBASE_CDP_PRIVATE_KEY")
+# New Deribit-powered gateway (INTX retires 2026-09-09 — do not point at it).
+COINBASE_DERIV_API_URL: str | None = _optional("COINBASE_DERIV_API_URL")
+
 # HMAC secret for /me magic links (falls back to bot token if unset).
 ME_TOKEN_SECRET: str = _optional("ME_TOKEN_SECRET") or TELEGRAM_BOT_TOKEN
 ME_TOKEN_TTL_SEC: int = int(os.getenv("ME_TOKEN_TTL_SEC", "3600") or "3600")

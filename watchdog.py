@@ -762,6 +762,14 @@ def run_watchdog() -> list[Suggestion] | None:
     posture = active_posture()
     macro_snap = decision_macro_snapshot(posture)
     execute = bot_config.watchdog_execute_enabled()
+
+    # Reconcile exchange-side closes (stop fills / manual flattens) each scan.
+    try:
+        import execute as live_exec
+
+        live_exec.sync_live_positions()
+    except Exception:
+        logger.exception("Live position sync failed")
     rs_bias = "neutral"
     if bot_config.RELATIVE_STRENGTH_ENABLED:
         try:
@@ -885,6 +893,17 @@ def run_watchdog() -> list[Suggestion] | None:
                     cycle_id=cycle_id,
                     spots=spots,
                 )
+                # Watchdog live fills need BOTH EXECUTION_MODE=shadow|live and
+                # the separate watchdog-live gate (paper execute is not enough).
+                if bot_config.watchdog_live_enabled():
+                    import execute as live_exec
+
+                    live_exec.maybe_execute_live(
+                        suggestion,
+                        spots.get(product_id, live_spot),
+                        cycle_id=cycle_id,
+                        source="hq",
+                    )
                 offer_id = None
                 card_summary = None
                 house_pos_id = user_books.find_house_position_id_for_cycle(cycle_id)

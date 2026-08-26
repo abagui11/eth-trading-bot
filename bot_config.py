@@ -90,6 +90,32 @@ WATCHDOG_ALLOW_SHORTS = False
 # Scale-in only when unrealized P&L >= this multiple of 1R (entry→stop distance).
 SCALE_IN_MIN_R = 0.5
 
+# --- Live execution sleeves (Coinbase perps via the Deribit gateway) ----------
+# All LIVE_* values are live-only. Paper sizing (TRADE_DEPLOY_PCT=0.25,
+# PRODUCT_QTY_CAPS) is untouched — never reuse paper equity for live size.
+LIVE_HQ_EQUITY_USD = 2000.0          # HQ ICT margin sleeve
+LIVE_TRADE_DEPLOY_PCT = 0.50         # 50% of the HQ sleeve per idea ($1,000)
+LIVE_MAX_OPEN_HQ = 2                 # skip new ideas when full (no FIFO kill)
+LIVE_DAILY_LOSS_LIMIT_USD = 160.0    # 8% of sleeve → halt until next UTC day
+LIVE_MAX_LEVERAGE = 1.0              # notional ≤ sleeve × 1 (1x; hard cap 2x)
+LIVE_SCALE_IN_ENABLED = False        # 0.718 adds are paper-only on live
+# Live qty floors per product — PRODUCT_QTY_CAPS mins (ETH 0.25 ≈ $1,100) are
+# LARGER than a $1,000 live clip, so live uses its own floors.
+LIVE_PRODUCT_QTY_FLOORS: dict[str, float] = {
+    "ETH-USD": 0.02,
+    "BTC-USD": 0.001,
+}
+# Watchdog live execution is gated separately from paper execute.
+WATCHDOG_LIVE_ENABLED = False
+WATCHDOG_LIVE_META_KEY = "watchdog_live_enabled"
+
+# Volume-mill tiny live sleeve (same Coinbase account, internal partition).
+LIVE_MILL_SLEEVE_USD = 400.0
+LIVE_MILL_NOTIONAL_USD = 80.0        # per idea
+LIVE_MILL_MAX_OPEN = 2
+LIVE_MILL_MAX_FILLS_PER_DAY = 2
+LIVE_MILL_DAILY_LOSS_LIMIT_USD = 80.0
+
 # Macro headline context (RSS + webhook advisory layer).
 MACRO_CONTEXT_ENABLED = True
 MACRO_POLL_INTERVAL_SEC = 300  # 5 minutes
@@ -184,4 +210,26 @@ def set_watchdog_execute_enabled(enabled: bool) -> bool:
     import user_books
 
     user_books.set_meta(WATCHDOG_EXECUTE_META_KEY, "1" if enabled else "0")
+    return enabled
+
+
+def watchdog_live_enabled() -> bool:
+    """Watchdog LIVE execution gate — separate from paper execute, and only
+    meaningful when config.EXECUTION_MODE is shadow|live."""
+    try:
+        import user_books
+
+        raw = user_books.get_meta(WATCHDOG_LIVE_META_KEY)
+    except Exception:
+        raw = None
+    if raw is None or str(raw).strip() == "":
+        return bool(WATCHDOG_LIVE_ENABLED)
+    return str(raw).strip().lower() in {"1", "true", "yes", "on"}
+
+
+def set_watchdog_live_enabled(enabled: bool) -> bool:
+    """Persist runtime override for watchdog LIVE execution."""
+    import user_books
+
+    user_books.set_meta(WATCHDOG_LIVE_META_KEY, "1" if enabled else "0")
     return enabled

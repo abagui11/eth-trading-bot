@@ -14,3 +14,6 @@ uvicorn[standard]==0.32.1
 jinja2==3.1.4
 httpx==0.28.1
 feedparser==6.0.11
+# Live execution: CDP JWT signing for the Coinbase Deribit gateway
+PyJWT==2.10.1
+cryptography>=42.0.0

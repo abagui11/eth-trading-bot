@@ -188,6 +188,17 @@ def run_cycle() -> list[tuple[Suggestion, list[str]]] | None:
                 cycle_id=product_cycle_id,
                 spots=spots,
             )
+            # Live mirror (EXECUTION_MODE=shadow|live). Never blocks the
+            # paper path — failures log + halt inside execute.
+            if suggestion.action != "no_trade":
+                import execute
+
+                execute.maybe_execute_live(
+                    suggestion,
+                    spots.get(product_id, price),
+                    cycle_id=product_cycle_id,
+                    source="hq",
+                )
             offer_id = None
             card_summary = None
             if suggestion.action != "no_trade":
