@@ -225,15 +225,26 @@ def record_yield_nav(
     pt_usd: float,
     health_factor: float | None,
 ) -> bool:
-    """Insert at most one NAV row per UTC day. Returns True when written."""
+    """Upsert today's NAV row (one per UTC day, latest reading wins).
+
+    Keeping the day's row current means pnl_1d compares against yesterday's
+    close rather than this morning's first fetch. Returns True when written.
+    """
     today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
     with _connect() as conn:
         cur = conn.execute(
             """
-            INSERT OR IGNORE INTO yield_nav_snapshots (
+            INSERT INTO yield_nav_snapshots (
                 snapshot_date, nav_usd, collateral_usd, debt_usd, pt_usd,
                 health_factor, created_at
             ) VALUES (?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(snapshot_date) DO UPDATE SET
+                nav_usd = excluded.nav_usd,
+                collateral_usd = excluded.collateral_usd,
+                debt_usd = excluded.debt_usd,
+                pt_usd = excluded.pt_usd,
+                health_factor = excluded.health_factor,
+                created_at = excluded.created_at
             """,
             (
                 today,

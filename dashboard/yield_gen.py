@@ -101,13 +101,17 @@ def get_yield_payload() -> dict[str, Any]:
     if positions.get("enabled"):
         try:
             live_ledger.init_db()
-            live_ledger.record_yield_nav(
-                nav_usd=nav,
-                collateral_usd=collateral,
-                debt_usd=debt,
-                pt_usd=pt_total,
-                health_factor=worst_hf,
-            )
+            # Don't record dust: an unfunded wallet (or a partially failed
+            # sync reading everything as 0) must never become the go-live
+            # baseline or overwrite a real day's mark.
+            if nav >= 50:
+                live_ledger.record_yield_nav(
+                    nav_usd=nav,
+                    collateral_usd=collateral,
+                    debt_usd=debt,
+                    pt_usd=pt_total,
+                    health_factor=worst_hf,
+                )
             nav_series = live_ledger.get_yield_nav_series(limit=90)
             if nav_series:
                 first = float(nav_series[0]["nav_usd"])
