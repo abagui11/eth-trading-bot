@@ -127,6 +127,13 @@ TWITTER_CLIENT_SECRET: str | None = _optional("TWITTER_CLIENT_SECRET")
 DASHBOARD_PUBLIC_URL: str | None = _optional("DASHBOARD_PUBLIC_URL")
 DASHBOARD_PORT: int = int(os.getenv("DASHBOARD_PORT", "8080") or "8080")
 
+# Yield generation dashboard (yield_gen_bot Next.js app). API base is used by
+# the hub's Yield Generation tab; the dashboard URL is the outbound link.
+YIELD_GEN_API_URL: str | None = _optional("YIELD_GEN_API_URL")
+YIELD_GEN_DASHBOARD_URL: str | None = (
+    _optional("YIELD_GEN_DASHBOARD_URL") or _optional("YIELD_GEN_API_URL")
+)
+
 # HMAC secret for /me magic links (falls back to bot token if unset).
 ME_TOKEN_SECRET: str = _optional("ME_TOKEN_SECRET") or TELEGRAM_BOT_TOKEN
 ME_TOKEN_TTL_SEC: int = int(os.getenv("ME_TOKEN_TTL_SEC", "3600") or "3600")

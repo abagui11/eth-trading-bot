@@ -15,10 +15,12 @@ import audit
 import bot_config
 import config
 import ledger
+import live_ledger
 import paper
 import user_books
 from dashboard import data
 from dashboard.brain import get_brain_payload
+from dashboard.yield_gen import get_yield_payload
 from dashboard.charts import (
     VALID_KINDS,
     VALID_TFS,
@@ -69,6 +71,7 @@ def create_app() -> FastAPI:
     macro_store.init_db()
     user_books.init_db()
     intel_store.init_db()
+    live_ledger.init_db()
 
     app.include_router(intel_router)
 
@@ -99,6 +102,11 @@ def create_app() -> FastAPI:
                 "archived_trades": data.get_archived_trades_payload(limit=15),
                 "macro": data.get_macro_payload(),
                 "brain": get_brain_payload(),
+                "live_open": live_ledger.get_open_trades(),
+                "live_closed": live_ledger.get_closed_trades(limit=15),
+                "live_performance": live_ledger.get_live_performance(),
+                "yield_enabled": bool(config.YIELD_GEN_API_URL),
+                "yield_dashboard_url": config.YIELD_GEN_DASHBOARD_URL,
             },
         )
 
@@ -106,6 +114,21 @@ def create_app() -> FastAPI:
     async def api_brain() -> dict:
         """Public intelligence hub snapshot (no HQ ideas, no service token)."""
         return get_brain_payload()
+
+    @app.get("/api/yield")
+    async def api_yield() -> dict:
+        """Yield Generation tab payload (proxied from yield_gen_bot)."""
+        return get_yield_payload()
+
+    @app.get("/api/trades/live")
+    async def api_live_trades(limit: int = 50, offset: int = 0) -> dict:
+        return {
+            "open": live_ledger.get_open_trades(),
+            "closed": live_ledger.get_closed_trades(
+                limit=min(limit, 100), offset=max(offset, 0)
+            ),
+            "performance": live_ledger.get_live_performance(),
+        }
 
     @app.get("/api/brain/cycle-chart")
     async def api_brain_cycle_chart() -> FileResponse:

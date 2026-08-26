@@ -202,9 +202,35 @@
     <nav class="hub-tabs" role="tablist">
       <button type="button" class="hub-tab is-active" data-tab="brain" role="tab" aria-selected="true">Brain</button>
       <button type="button" class="hub-tab" data-tab="trading" role="tab" aria-selected="false">Trading Log</button>
+      <button type="button" class="hub-tab" data-tab="yield" role="tab" aria-selected="false">Yield Generation</button>
     </nav>
 
     <div id="tab-brain" class="hub-panel" role="tabpanel">
+      <section class="card" id="sleeve-strip">
+        <h2>Live sleeves</h2>
+        <div class="metrics">
+          <div class="metric">
+            <div class="label">Yield NAV</div>
+            <div class="value" id="sleeve-yield-nav">{% if yield_enabled %}…{% else %}—{% endif %}</div>
+          </div>
+          <div class="metric">
+            <div class="label">HQ live P&amp;L</div>
+            {% set hq = live_performance.by_source.get('hq') %}
+            <div class="value {{ 'pos' if hq and hq.pnl_usd >= 0 else ('neg' if hq else '') }}" id="sleeve-hq-pnl">
+              {% if hq %}{{ "%+.2f"|format(hq.pnl_usd) }} · {{ hq.open }} open{% else %}no fills{% endif %}
+            </div>
+          </div>
+          <div class="metric">
+            <div class="label">Mill live P&amp;L</div>
+            {% set mill = live_performance.by_source.get('mill') %}
+            <div class="value {{ 'pos' if mill and mill.pnl_usd >= 0 else ('neg' if mill else '') }}" id="sleeve-mill-pnl">
+              {% if mill %}{{ "%+.2f"|format(mill.pnl_usd) }} · {{ mill.open }} open{% else %}no fills{% endif %}
+            </div>
+          </div>
+        </div>
+        <p class="sub" style="margin-top:8px">Real capital only — paper books are excluded. Details in the Trading Log and Yield Generation tabs.</p>
+      </section>
+
       <section class="card" id="brain-tape">
         <h2>Live tape</h2>
         <div class="metrics">
@@ -441,6 +467,77 @@
     </div>
 
     <div id="tab-trading" class="hub-panel" role="tabpanel" hidden>
+    <section class="card" id="live-book-card">
+      <h2>Live book (Coinbase perps)</h2>
+      <div class="metrics" style="margin-bottom:10px">
+        <div class="metric">
+          <div class="label">Realized P&amp;L</div>
+          <div class="value {{ 'pos' if live_performance.total_pnl_usd >= 0 else 'neg' }}">
+            {{ "%+.2f"|format(live_performance.total_pnl_usd) }}
+          </div>
+        </div>
+        <div class="metric">
+          <div class="label">Open</div>
+          <div class="value">{{ live_open|length }}</div>
+        </div>
+        <div class="metric">
+          <div class="label">Closed</div>
+          <div class="value">{{ live_closed|length }}</div>
+        </div>
+      </div>
+      {% if live_open %}
+      <p class="sub news-section">Open live positions</p>
+      <div class="table-scroll">
+        <table>
+          <thead>
+            <tr><th>Opened</th><th>Sleeve</th><th>Instrument</th><th>Side</th><th>Qty</th><th>Entry</th><th>Stop</th></tr>
+          </thead>
+          <tbody>
+            {% for t in live_open %}
+            <tr>
+              <td>{{ (t.opened_at or '')[:16] }}</td>
+              <td>{{ t.source }}</td>
+              <td>{{ t.instrument }}</td>
+              <td>{{ t.side }}</td>
+              <td>{{ "%.4f"|format(t.qty) }}</td>
+              <td>${{ "%.2f"|format(t.entry) }}</td>
+              <td>{% if t.stop_loss %}${{ "%.2f"|format(t.stop_loss) }}{% else %}—{% endif %}</td>
+            </tr>
+            {% endfor %}
+          </tbody>
+        </table>
+      </div>
+      {% endif %}
+      {% if live_closed %}
+      <p class="sub news-section">Closed live trades</p>
+      <div class="table-scroll">
+        <table>
+          <thead>
+            <tr><th>Closed</th><th>Sleeve</th><th>Instrument</th><th>Side</th><th>Entry</th><th>Exit</th><th>P&amp;L</th><th>Reason</th></tr>
+          </thead>
+          <tbody>
+            {% for t in live_closed %}
+            <tr>
+              <td>{{ (t.closed_at or '')[:16] }}</td>
+              <td>{{ t.source }}</td>
+              <td>{{ t.instrument }}</td>
+              <td>{{ t.side }}</td>
+              <td>${{ "%.2f"|format(t.entry) }}</td>
+              <td>{% if t.exit_price %}${{ "%.2f"|format(t.exit_price) }}{% else %}—{% endif %}</td>
+              <td class="{{ 'pos-row' if (t.pnl_usd or 0) >= 0 else 'neg-row' }}">{{ "%+.2f"|format(t.pnl_usd or 0) }}</td>
+              <td>{{ t.close_reason or '—' }}</td>
+            </tr>
+            {% endfor %}
+          </tbody>
+        </table>
+      </div>
+      {% endif %}
+      {% if not live_open and not live_closed %}
+      <p class="sub">No live fills yet. Live execution starts after the Coinbase gateway smoke test; the paper journal below is the reference book.</p>
+      {% endif %}
+      <p class="sub" style="margin-top:8px">Live capital only — never blended with the paper book below.</p>
+    </section>
+
     <section class="card" id="status-card">
       <h2>Agent status</h2>
       <div class="metrics" style="margin-bottom:12px">
@@ -602,7 +699,7 @@
     {% endif %}
 
     <section class="card">
-      <h2>Agent book (house)</h2>
+      <h2>Agent book (house · paper)</h2>
       <div class="metrics">
         <div class="metric">
           <div class="label">Equity</div>
@@ -648,10 +745,12 @@
 
     {% if positions or closed_trades %}
     <section class="card journal-card">
-      <h2>Trade journal</h2>
+      <h2>Paper journal (reference book)</h2>
       <p class="sub journal-intro">
-        Expand a trade to see structure, execution, levels, and the bot’s rationale.
+        Simulated fills only — excluded from live P&amp;L above.
       </p>
+      <button type="button" class="load-more" id="paper-journal-toggle" aria-expanded="false">Show paper journal</button>
+      <div id="paper-journal-body" hidden>
 
       {% if positions %}
       <h3 class="journal-subhead">Open</h3>
@@ -671,6 +770,7 @@
       </div>
       <button type="button" class="load-more" id="load-more-closed" data-offset="{{ closed_trades|length }}">Load more closed trades</button>
       {% endif %}
+      </div>
     </section>
     {% endif %}
 
@@ -718,6 +818,58 @@
     </section>
     </div><!-- /tab-trading -->
 
+    <div id="tab-yield" class="hub-panel" role="tabpanel" hidden>
+      <section class="card" id="yield-summary">
+        <h2>Yield generation (wstETH → Aave → Pendle)</h2>
+        {% if yield_enabled %}
+        <p class="sub" style="margin-bottom:10px">
+          Read-only mirror of the yield book — the bot never transacts.
+          {% if yield_dashboard_url %}
+          <a href="{{ yield_dashboard_url }}" target="_blank" rel="noopener">Open the full yield dashboard →</a>
+          {% endif %}
+        </p>
+        <div class="metrics" id="yield-metrics">
+          <div class="metric">
+            <div class="label">Sleeve NAV</div>
+            <div class="value" id="yield-nav">…</div>
+          </div>
+          <div class="metric">
+            <div class="label">Health factor</div>
+            <div class="value" id="yield-hf">…</div>
+          </div>
+          <div class="metric">
+            <div class="label">P&amp;L since go-live</div>
+            <div class="value" id="yield-pnl">…</div>
+          </div>
+          <div class="metric">
+            <div class="label">P&amp;L 1d</div>
+            <div class="value" id="yield-pnl-1d">…</div>
+          </div>
+        </div>
+        <div class="metrics" style="margin-top:8px">
+          <div class="metric">
+            <div class="label">Collateral</div>
+            <div class="value" id="yield-collateral" style="font-size:0.95rem">…</div>
+          </div>
+          <div class="metric">
+            <div class="label">Debt</div>
+            <div class="value" id="yield-debt" style="font-size:0.95rem">…</div>
+          </div>
+          <div class="metric">
+            <div class="label">Pendle PTs</div>
+            <div class="value" id="yield-pt" style="font-size:0.95rem">…</div>
+          </div>
+        </div>
+        <div id="yield-monitors" style="margin-top:10px"></div>
+        <div id="yield-positions" style="margin-top:10px"></div>
+        <div id="yield-plan" style="margin-top:10px"></div>
+        <p class="sub" id="yield-status" style="margin-top:8px">Loading yield book…</p>
+        {% else %}
+        <p class="sub">Set <code>YIELD_GEN_API_URL</code> in the agent .env to mirror the yield dashboard here.</p>
+        {% endif %}
+      </section>
+    </div><!-- /tab-yield -->
+
     <footer>
       Paper trading only — not financial advice. Brain + tape refresh every 60s.
     </footer>
@@ -761,8 +913,11 @@
 
     (function initHubTabs() {
       var tabs = document.querySelectorAll('.hub-tab');
-      var brain = document.getElementById('tab-brain');
-      var trading = document.getElementById('tab-trading');
+      var panels = {
+        brain: document.getElementById('tab-brain'),
+        trading: document.getElementById('tab-trading'),
+        yield: document.getElementById('tab-yield'),
+      };
       tabs.forEach(function (btn) {
         btn.addEventListener('click', function () {
           var name = btn.getAttribute('data-tab');
@@ -771,9 +926,113 @@
             b.classList.toggle('is-active', on);
             b.setAttribute('aria-selected', on ? 'true' : 'false');
           });
-          if (brain) brain.hidden = name !== 'brain';
-          if (trading) trading.hidden = name !== 'trading';
+          Object.keys(panels).forEach(function (key) {
+            if (panels[key]) panels[key].hidden = key !== name;
+          });
+          if (name === 'yield') refreshYield();
         });
+      });
+    })();
+
+    var yieldLoaded = false;
+    function fmtMoney(v) {
+      if (v == null) return '—';
+      var n = Number(v);
+      return (n < 0 ? '-$' : '$') + Math.abs(n).toLocaleString(undefined, { maximumFractionDigits: 2 });
+    }
+    function fmtSigned(v) {
+      if (v == null) return '—';
+      var n = Number(v);
+      return (n >= 0 ? '+' : '') + n.toFixed(2);
+    }
+    async function refreshYield() {
+      var status = document.getElementById('yield-status');
+      if (!status) return;
+      try {
+        var res = await fetch('/api/yield');
+        if (!res.ok) throw new Error('HTTP ' + res.status);
+        var y = await res.json();
+        var strip = document.getElementById('sleeve-yield-nav');
+        if (!y.enabled || y.available === false) {
+          status.textContent = y.error || 'Yield book unavailable.';
+          if (strip) strip.textContent = '—';
+          return;
+        }
+        yieldLoaded = true;
+        var setText = function (id, txt) {
+          var el = document.getElementById(id);
+          if (el) el.textContent = txt;
+        };
+        setText('yield-nav', fmtMoney(y.nav_usd));
+        setText('yield-hf', y.health_factor != null ? Number(y.health_factor).toFixed(3) : 'no debt');
+        setText('yield-pnl', fmtSigned(y.pnl_since_golive_usd));
+        setText('yield-pnl-1d', fmtSigned(y.pnl_1d_usd));
+        setText('yield-collateral', fmtMoney(y.collateral_usd));
+        setText('yield-debt', fmtMoney(y.debt_usd));
+        setText('yield-pt', fmtMoney(y.pt_usd));
+        if (strip) strip.textContent = fmtMoney(y.nav_usd);
+
+        var monitors = document.getElementById('yield-monitors');
+        if (monitors) {
+          var alerting = y.alerting || [];
+          monitors.innerHTML = alerting.length
+            ? '<p class="sub news-section">Active warnings</p><ul class="plain">' +
+              alerting.map(function (m) {
+                return '<li><span class="badge badge-bad">' + m.state + '</span> ' +
+                  (m.label || m.monitor) + ' — ' + (m.recommendation || '') + '</li>';
+              }).join('') + '</ul>'
+            : '<p class="sub">All monitors OK (HF ladder, depegs, ETH drawdown).</p>';
+        }
+
+        var positions = document.getElementById('yield-positions');
+        if (positions) {
+          var pts = y.pendle || [];
+          positions.innerHTML = pts.length
+            ? '<p class="sub news-section">Pendle PT positions</p><ul class="plain">' +
+              pts.map(function (p) {
+                return '<li>' + (p.name || '?') + ' · ' + fmtMoney(p.valuation_usd) +
+                  (p.maturity ? ' · matures ' + String(p.maturity).slice(0, 10) : '') + '</li>';
+              }).join('') + '</ul>'
+            : '<p class="sub">No open Pendle PT positions.</p>';
+        }
+
+        var planEl = document.getElementById('yield-plan');
+        if (planEl && y.plan) {
+          if (y.plan.status === 'blocked') {
+            planEl.innerHTML = '<p class="sub news-section">Recommended allocations</p>' +
+              '<p class="sub"><span class="badge badge-bad">BLOCKED</span> ' + (y.plan.blocked_reason || '') + '</p>';
+          } else {
+            var acts = (y.plan.actions || []).map(function (a, i) {
+              return '<li>' + (i + 1) + '. ' + a + '</li>';
+            }).join('');
+            planEl.innerHTML = '<p class="sub news-section">Recommended allocations (β ' +
+              Number(y.plan.planned_beta).toFixed(2) + ' · HF ' + y.plan.target_hf + ')</p>' +
+              (acts ? '<ul class="plain">' + acts + '</ul>' : '<p class="sub">Wallet matches the plan.</p>');
+          }
+        }
+
+        status.textContent = y.live_read
+          ? 'Live read-only · fetched ' + (y.fetched_at || '')
+          : 'Yield app reachable, but WATCHED_WALLET_ADDRESSES is unset on it.';
+      } catch (e) {
+        status.textContent = 'Yield book fetch failed: ' + e.message;
+      }
+    }
+    // Populate the Brain sleeve strip shortly after load without opening the tab.
+    if (document.getElementById('sleeve-yield-nav')) {
+      window.addEventListener('load', function () { refreshYield(); }, { once: true });
+      setInterval(function () { if (yieldLoaded) refreshYield(); }, 120000);
+    }
+
+    (function initPaperJournalToggle() {
+      var btn = document.getElementById('paper-journal-toggle');
+      var body = document.getElementById('paper-journal-body');
+      if (!btn || !body) return;
+      btn.addEventListener('click', function () {
+        var open = body.hidden;
+        body.hidden = !open;
+        btn.setAttribute('aria-expanded', open ? 'true' : 'false');
+        btn.textContent = open ? 'Hide paper journal' : 'Show paper journal';
       });
     })();
 
