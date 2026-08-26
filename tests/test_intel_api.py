@@ -194,6 +194,61 @@ class IntelApiTests(unittest.TestCase):
         response = self.client.get("/api/v1/charts/cycle", headers=self.auth)
         self.assertEqual(response.status_code, 404)
 
+    def test_execute_mill_requires_token(self) -> None:
+        response = self.client.post(
+            "/api/v1/execute/mill",
+            json={
+                "idea_id": 1,
+                "product_id": "ETH-USD",
+                "direction": "long",
+                "entry": 2000.0,
+                "stop_loss": 1970.0,
+            },
+        )
+        self.assertEqual(response.status_code, 401)
+
+    def test_execute_mill_forwards_to_executor(self) -> None:
+        with mock.patch(
+            "execute.maybe_execute_live", return_value={"mode": "shadow"}
+        ) as mocked:
+            response = self.client.post(
+                "/api/v1/execute/mill",
+                headers=self.auth,
+                json={
+                    "idea_id": 7,
+                    "product_id": "ETH-USD",
+                    "direction": "short",
+                    "entry": 2000.0,
+                    "stop_loss": 2030.0,
+                    "take_profits": [1950.0],
+                    "signal_key": "zmove:ETH-USD:abc",
+                },
+            )
+        self.assertEqual(response.status_code, 200)
+        payload = response.json()
+        self.assertTrue(payload["executed"])
+        suggestion = mocked.call_args.args[0]
+        self.assertEqual(suggestion.action, "deriv_sell")
+        self.assertEqual(suggestion.product_id, "ETH-USD")
+        self.assertEqual(suggestion.stop_loss, 2030.0)
+        self.assertEqual(suggestion.order_block_ref, "zmove:ETH-USD:abc")
+        self.assertEqual(mocked.call_args.kwargs["source"], "mill")
+        self.assertEqual(mocked.call_args.kwargs["cycle_id"], "mill_7")
+
+    def test_execute_mill_rejects_bad_direction(self) -> None:
+        response = self.client.post(
+            "/api/v1/execute/mill",
+            headers=self.auth,
+            json={
+                "idea_id": 1,
+                "product_id": "ETH-USD",
+                "direction": "watch",
+                "entry": 2000.0,
+                "stop_loss": 1970.0,
+            },
+        )
+        self.assertEqual(response.status_code, 422)
+
     def test_public_dashboard_routes_stay_open(self) -> None:
         """The /api/v1 lockdown must not leak onto the public dashboard."""
         for path in ("/api/status", "/api/performance", "/api/macro"):

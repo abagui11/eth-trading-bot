@@ -13,6 +13,7 @@ from pathlib import Path
 
 from fastapi import APIRouter, Depends, Header, HTTPException
 from fastapi.responses import FileResponse
+from pydantic import BaseModel
 
 import access
 import bot_config
@@ -21,6 +22,7 @@ import ledger
 from intelligence import funding as intel_funding
 from intelligence import store as intel_store
 from macro import store as macro_store
+from models import Suggestion
 
 
 def _require_service_auth(authorization: str | None) -> None:
@@ -198,6 +200,54 @@ async def subscribers() -> dict:
         "paywall_enabled": config.PAYWALL_ENABLED,
         "count": len(recipients),
         "recipients": recipients,
+    }
+
+
+class MillExecuteRequest(BaseModel):
+    """Sized mill idea forwarded for a tiny live clip (mill sleeve limits)."""
+
+    idea_id: int
+    product_id: str
+    direction: str  # long | short
+    entry: float
+    stop_loss: float
+    take_profits: list[float] = []
+    signal_key: str | None = None
+
+
+@router.post("/execute/mill")
+async def execute_mill(body: MillExecuteRequest) -> dict:
+    """Mirror a mill house fill onto the live mill sleeve ($80/idea, 2 open,
+    2 fills/day — enforced inside execute.py). EXECUTION_MODE=off → no-op.
+    Never affects the mill's paper book; this is fire-and-forget for the mill.
+    """
+    if body.direction not in ("long", "short"):
+        raise HTTPException(status_code=422, detail="direction must be long|short")
+
+    import execute
+
+    suggestion = Suggestion(
+        action="deriv_buy" if body.direction == "long" else "deriv_sell",
+        size=0.0,  # live sizing comes from LIVE_MILL_NOTIONAL_USD, not paper size
+        entry=body.entry,
+        stop_loss=body.stop_loss,
+        take_profits=list(body.take_profits or []),
+        risk_reward=None,
+        rationale=f"mill idea #{body.idea_id}",
+        product_id=body.product_id,
+        # Dedupe key: one live clip per mill idea, mirroring the OB rule.
+        order_block_ref=body.signal_key or f"mill-idea-{body.idea_id}",
+    )
+    result = execute.maybe_execute_live(
+        suggestion,
+        body.entry,
+        cycle_id=f"mill_{body.idea_id}",
+        source="mill",
+    )
+    return {
+        "execution_mode": config.EXECUTION_MODE,
+        "executed": result is not None,
+        "result": result,
     }
 
 
