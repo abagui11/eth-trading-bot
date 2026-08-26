@@ -47,7 +47,9 @@ def _rationale_one_liner(open_cycle_id: str | None) -> str:
 def build_digest(spots: dict[str, float] | None = None) -> dict[str, Any]:
     """Aggregate house-book performance + recent winners with rationale."""
     perf = build_performance(spots=spots)
-    closed = paper.get_closed_trades(limit=50)
+    # Same scope as the headline P&L (whole epoch) — a windowed win rate next
+    # to all-time P&L reads as a contradiction when the window differs.
+    closed = paper.get_closed_trades(limit=500)
 
     wins = [t for t in closed if float(t.get("realized_pnl_usd") or 0) > 0]
     losses = [t for t in closed if float(t.get("realized_pnl_usd") or 0) <= 0]
