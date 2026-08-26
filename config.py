@@ -149,6 +149,12 @@ COINBASE_CDP_PRIVATE_KEY: str | None = _optional("COINBASE_CDP_PRIVATE_KEY")
 # New Deribit-powered gateway (INTX retires 2026-09-09 — do not point at it).
 COINBASE_DERIV_API_URL: str | None = _optional("COINBASE_DERIV_API_URL")
 
+# Critical live-execution alerts (halt / failed stop) also go out by email.
+# Same Resend account the yield_gen_bot uses; silently skipped when unset.
+RESEND_API_KEY: str | None = _optional("RESEND_API_KEY")
+ALERT_EMAIL_TO: str | None = _optional("ALERT_EMAIL_TO")
+ALERT_EMAIL_FROM: str = _optional("ALERT_EMAIL_FROM") or "alerts@resend.dev"
+
 # HMAC secret for /me magic links (falls back to bot token if unset).
 ME_TOKEN_SECRET: str = _optional("ME_TOKEN_SECRET") or TELEGRAM_BOT_TOKEN
 ME_TOKEN_TTL_SEC: int = int(os.getenv("ME_TOKEN_TTL_SEC", "3600") or "3600")

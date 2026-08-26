@@ -40,6 +40,8 @@ class ExecuteLiveTests(unittest.TestCase):
         self._patches = [
             patch.object(config, "LEDGER_DB", db),
             patch.object(config, "EXECUTION_MODE", "shadow"),
+            # halt_live notifies ops (Telegram/email) — keep unit tests offline.
+            patch.object(execute, "_notify_ops"),
         ]
         for p in self._patches:
             p.start()

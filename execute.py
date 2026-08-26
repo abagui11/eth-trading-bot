@@ -59,9 +59,12 @@ def is_halted() -> str | None:
 
 
 def halt_live(reason: str) -> None:
+    already = live_ledger.get_meta(_HALT_KEY)
     live_ledger.set_meta(_HALT_KEY, reason)
     live_ledger.set_meta(_HALT_DATE_KEY, _today())
     logger.error("LIVE HALT: %s", reason)
+    if already != reason:
+        _notify_ops(f"LIVE HALT — {reason}. New live entries paused.")
 
 
 def clear_halt() -> None:
@@ -269,10 +272,8 @@ def _execute(
             gw.close_position(instrument)
         except GatewayError:
             logger.exception("Flatten after stop-reject ALSO failed — manual action required")
-        halt_live(f"stop_reject:{instrument}:{exc}")
-        _notify_ops(
-            f"LIVE HALT — stop rejected on {instrument} ({exc}). "
-            f"Position flattened (verify on Coinbase)."
+        halt_live(
+            f"stop_reject:{instrument}:{exc} — position flattened, verify on Coinbase"
         )
         return None
 
@@ -348,20 +349,36 @@ def sync_live_positions() -> None:
 
 
 def _notify_ops(message: str) -> None:
-    """Best-effort Telegram DM to the admin chat; never raises."""
+    """Best-effort Telegram + email to ops; never raises."""
     try:
         import requests as _rq
 
         chat = config.TELEGRAM_ADMIN_CHAT_ID or config.TELEGRAM_CHAT_ID
-        if not chat:
-            return
-        _rq.post(
-            f"https://api.telegram.org/bot{config.TELEGRAM_BOT_TOKEN}/sendMessage",
-            json={"chat_id": chat, "text": message},
-            timeout=10,
-        )
+        if chat:
+            _rq.post(
+                f"https://api.telegram.org/bot{config.TELEGRAM_BOT_TOKEN}/sendMessage",
+                json={"chat_id": chat, "text": message},
+                timeout=10,
+            )
     except Exception:
-        logger.exception("Ops notify failed")
+        logger.exception("Ops Telegram notify failed")
+    try:
+        import requests as _rq
+
+        if config.RESEND_API_KEY and config.ALERT_EMAIL_TO:
+            _rq.post(
+                "https://api.resend.com/emails",
+                headers={"Authorization": f"Bearer {config.RESEND_API_KEY}"},
+                json={
+                    "from": config.ALERT_EMAIL_FROM,
+                    "to": [config.ALERT_EMAIL_TO],
+                    "subject": "LIVE EXECUTION ALERT",
+                    "text": message,
+                },
+                timeout=10,
+            )
+    except Exception:
+        logger.exception("Ops email notify failed")
 
 
 # ---------------------------------------------------------------------------
