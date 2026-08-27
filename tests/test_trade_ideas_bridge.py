@@ -148,6 +148,93 @@ class TradeIdeasBridgeTests(unittest.TestCase):
         self.assertEqual((idea or {})["product_id"], "ETH-USD")
         self.assertIsNone(trade_ideas_bridge.get_idea(999))
 
+    def test_idea_stream_skips_unsized_and_polls_after_id(self) -> None:
+        conn = sqlite3.connect(self.db_path)
+        conn.execute(
+            """
+            INSERT INTO ideas
+                (id, source, product_id, direction, title, blurb, signal_key,
+                 created_at)
+            VALUES (6, 'spike', 'SOL-USD', 'long', 'No levels', 'x', 'spike:1',
+                    '2026-08-27T12:00:00Z')
+            """
+        )
+        conn.execute(
+            """
+            INSERT INTO ideas
+                (id, source, product_id, direction, title, blurb, signal_key,
+                 entry, stop_loss, take_profits_json, sent_at, created_at)
+            VALUES (7, 'session', 'BTC-USD', 'short', 'NY open', 'setup',
+                    'session:1', 65000.0, 66000.0, '[64000.0]',
+                    NULL, '2026-08-27T13:00:00Z')
+            """
+        )
+        conn.commit()
+        conn.close()
+
+        payload = trade_ideas_bridge.idea_stream(limit=40)
+        self.assertIsNotNone(payload)
+        assert payload is not None
+        ids = [c["id"] for c in payload["ideas"]]
+        self.assertIn(5, ids)
+        self.assertIn(7, ids)
+        self.assertNotIn(6, ids)
+        card = next(c for c in payload["ideas"] if c["id"] == 5)
+        self.assertEqual(card["source_label"], "NEWS")
+        self.assertFalse(card["telegram_sent"])
+        self.assertNotIn("chart_path", card)
+        self.assertNotIn("signal_key", card)
+
+        newer = trade_ideas_bridge.idea_stream(after_id=5)
+        assert newer is not None
+        self.assertEqual([c["id"] for c in newer["ideas"]], [7])
+
+    def test_idea_funnel_counts_mint_vs_telegram_vs_decisions(self) -> None:
+        conn = sqlite3.connect(self.db_path)
+        conn.execute(
+            "UPDATE ideas SET created_at = '2026-08-27T01:00:00Z' WHERE id = 5"
+        )
+        conn.execute(
+            """
+            INSERT INTO ideas
+                (id, source, product_id, direction, title, blurb, signal_key,
+                 entry, stop_loss, sent_at, created_at)
+            VALUES (8, 'news', 'ETH-USD', 'long', 'Sent', 'b', 'news:2',
+                    100.0, 95.0, '2026-08-27T02:00:00Z', '2026-08-27T02:00:00Z')
+            """
+        )
+        conn.execute(
+            """
+            INSERT INTO decisions (idea_id, user_id, decision, decided_at)
+            VALUES (5, 42, 'accept', '2026-08-27T03:00:00Z'),
+                   (8, 42, 'reject', '2026-08-27T03:01:00Z'),
+                   (8, 7, 'accept', '2026-08-27T03:02:00Z')
+            """
+        )
+        conn.commit()
+        conn.close()
+
+        funnel = trade_ideas_bridge.idea_funnel(day="2026-08-27")
+        self.assertIsNotNone(funnel)
+        assert funnel is not None
+        self.assertEqual(funnel["minted"], 2)
+        self.assertEqual(funnel["sized"], 2)
+        self.assertEqual(funnel["telegram_sent"], 1)
+        self.assertEqual(funnel["not_on_telegram"], 1)
+        self.assertEqual(funnel["accepts"], 2)
+        self.assertEqual(funnel["rejects"], 1)
+        self.assertEqual(funnel["unique_users"], 2)
+
+    def test_idea_stream_attaches_my_decision(self) -> None:
+        trade_ideas_bridge.record_decision(5, 42, "accept")
+        payload = trade_ideas_bridge.idea_stream(user_id=42)
+        assert payload is not None
+        card = next(c for c in payload["ideas"] if c["id"] == 5)
+        self.assertEqual(card["my_decision"], "accept")
+        other = trade_ideas_bridge.idea_stream(user_id=99)
+        assert other is not None
+        self.assertIsNone(next(c for c in other["ideas"] if c["id"] == 5)["my_decision"])
+
     def test_reply_copy_per_status(self) -> None:
         self.assertIn(
             "Accepted",

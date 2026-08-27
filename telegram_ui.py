@@ -11,6 +11,7 @@ CB_OPEN = "ui:open"
 CB_OPEN_SIZE_PREFIX = "ui:open:"
 CB_METRICS = "ui:metrics"
 CB_MY_BOOK = "ui:mybook"
+CB_FEED = "ui:feed"
 CB_RESEARCH = "ui:research"
 CB_REFRESH = "ui:refresh"
 
@@ -50,7 +51,10 @@ def main_keyboard() -> InlineKeyboardMarkup:
             InlineKeyboardButton("Open account", callback_data=CB_OPEN),
             InlineKeyboardButton("My Metrics", callback_data=CB_METRICS),
         ],
-        [InlineKeyboardButton("My book", callback_data=CB_MY_BOOK)],
+        [
+            InlineKeyboardButton("My book", callback_data=CB_MY_BOOK),
+            InlineKeyboardButton("Idea feed", callback_data=CB_FEED),
+        ],
     ]
     dash = config.DASHBOARD_PUBLIC_URL
     if dash:

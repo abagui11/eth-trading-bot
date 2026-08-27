@@ -4,7 +4,7 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
   <title>Republic Technologies Intelligence</title>
-  <link rel="stylesheet" href="/static/style.css?v=news3">
+  <link rel="stylesheet" href="/static/style.css?v=mill1">
 </head>
 <body>
   {% macro tip_badge(label, class_name='badge-none') -%}
@@ -196,31 +196,32 @@
   <div class="wrap">
     <header>
       <h1>Republic Technologies Intelligence</h1>
-      <p class="sub">What the brain is ingesting — multi-horizon posture, cycle thesis, ranked news, and live tape. HQ trade logic is unchanged.</p>
+      <p class="sub">Brain is the vision layer. It feeds three products: HQ trades, yield generation, and the trade mill.</p>
     </header>
 
     <nav class="hub-tabs" role="tablist">
       <button type="button" class="hub-tab is-active" data-tab="brain" role="tab" aria-selected="true">Brain</button>
       <button type="button" class="hub-tab" data-tab="trading" role="tab" aria-selected="false">Trading Log</button>
       <button type="button" class="hub-tab" data-tab="yield" role="tab" aria-selected="false">Yield Generation</button>
+      <button type="button" class="hub-tab" data-tab="mill" role="tab" aria-selected="false">Trade mill</button>
     </nav>
 
     <div id="tab-brain" class="hub-panel" role="tabpanel">
       <section class="card" id="sleeve-strip">
-        <h2>Live sleeves</h2>
+        <h2>Product sleeves</h2>
         <div class="metrics">
-          <div class="metric">
+          <div class="metric sleeve-jump" data-tab="yield" role="button" tabindex="0">
             <div class="label">Yield NAV</div>
             <div class="value" id="sleeve-yield-nav">{% if yield_enabled %}…{% else %}—{% endif %}</div>
           </div>
-          <div class="metric">
+          <div class="metric sleeve-jump" data-tab="trading" role="button" tabindex="0">
             <div class="label">HQ live P&amp;L</div>
             {% set hq = live_performance.by_source.get('hq') %}
             <div class="value {{ 'pos' if hq and hq.pnl_usd >= 0 else ('neg' if hq else '') }}" id="sleeve-hq-pnl">
               {% if hq %}{{ "%+.2f"|format(hq.pnl_usd) }} · {{ hq.open }} open{% else %}no fills{% endif %}
             </div>
           </div>
-          <div class="metric">
+          <div class="metric sleeve-jump" data-tab="mill" role="button" tabindex="0">
             <div class="label">Mill live P&amp;L</div>
             {% set mill = live_performance.by_source.get('mill') %}
             <div class="value {{ 'pos' if mill and mill.pnl_usd >= 0 else ('neg' if mill else '') }}" id="sleeve-mill-pnl">
@@ -228,7 +229,7 @@
             </div>
           </div>
         </div>
-        <p class="sub" style="margin-top:8px">Real capital only — paper books are excluded. Details in the Trading Log and Yield Generation tabs.</p>
+        <p class="sub" style="margin-top:8px">Real capital only. Trading Log is HQ. Yield Generation is the stable book. Trade mill is the consumer idea stream plus the small live clip that tests those ideas.</p>
       </section>
 
       <section class="card" id="brain-tape">
@@ -468,12 +469,14 @@
 
     <div id="tab-trading" class="hub-panel" role="tabpanel" hidden>
     <section class="card" id="live-book-card">
-      <h2>Live book (Coinbase US futures — HQ sleeve)</h2>
+      <h2>HQ live book (Coinbase US futures)</h2>
+      <p class="sub" style="margin-bottom:10px">If this sleeve works, the intelligence is good. Mill clips live on the Trade mill tab — they are never mixed in here.</p>
+      {% set hq_live = live_performance.by_source.get('hq') %}
       <div class="metrics" style="margin-bottom:10px">
         <div class="metric">
           <div class="label">Realized P&amp;L</div>
-          <div class="value {{ 'pos' if live_performance.total_pnl_usd >= 0 else 'neg' }}">
-            {{ "%+.2f"|format(live_performance.total_pnl_usd) }}
+          <div class="value {{ 'pos' if hq_live and hq_live.pnl_usd >= 0 else ('neg' if hq_live else '') }}">
+            {% if hq_live %}{{ "%+.2f"|format(hq_live.pnl_usd) }}{% else %}no fills{% endif %}
           </div>
         </div>
         <div class="metric">
@@ -870,8 +873,119 @@
       </section>
     </div><!-- /tab-yield -->
 
+    <div id="tab-mill" class="hub-panel" role="tabpanel" hidden>
+      <section class="card" id="mill-clip-card">
+        <h2>Trade mill · live clip (internal)</h2>
+        <p class="sub" style="margin-bottom:10px">
+          Consumer ideas also go to Telegram (rate-capped) and <a href="/feed">/feed</a>.
+          A tiny Coinbase sleeve tests whether those ideas are any good — independent of Accept.
+          ${{ "%.0f"|format(mill_policy.notional_usd) }} per ETH clip · ${{ "%.0f"|format(mill_policy.sleeve_usd) }} sleeve ·
+          {% if mill_policy.max_fills_per_day %}{{ mill_policy.max_fills_per_day }} fills/day · {% endif %}max {{ mill_policy.max_open }} open (one at a time at 1x) ·
+          next mint after a close · −${{ "%.0f"|format(mill_policy.daily_loss_limit_usd) }} day halt.
+        </p>
+        {% set mill_live = live_performance.by_source.get('mill') %}
+        <div class="metrics" style="margin-bottom:10px">
+          <div class="metric">
+            <div class="label">Clip realized P&amp;L</div>
+            <div class="value {{ 'pos' if mill_live and mill_live.pnl_usd >= 0 else ('neg' if mill_live else '') }}" id="mill-clip-pnl">
+              {% if mill_live %}{{ "%+.2f"|format(mill_live.pnl_usd) }}{% else %}no fills{% endif %}
+            </div>
+          </div>
+          <div class="metric">
+            <div class="label">Open clips</div>
+            <div class="value" id="mill-clip-open">{{ mill_open|length }}</div>
+          </div>
+          <div class="metric">
+            <div class="label">Closed clips</div>
+            <div class="value" id="mill-clip-closed">{{ mill_closed|length }}{% if mill_live and mill_live.win_rate is not none %} · {{ (mill_live.win_rate * 100)|round|int }}% win{% endif %}</div>
+          </div>
+        </div>
+        <p class="sub news-section">Open mill clips</p>
+        <p class="sub" id="mill-live-open-empty"{% if mill_open %} hidden{% endif %}>No open mill clips.</p>
+        <div class="table-scroll" id="mill-live-open-table"{% if not mill_open %} hidden{% endif %}>
+          <table>
+            <thead>
+              <tr><th>Opened</th><th>Instrument</th><th>Side</th><th>Qty</th><th>Entry</th><th>Stop</th></tr>
+            </thead>
+            <tbody id="mill-live-open">
+              {% for t in mill_open %}
+              <tr>
+                <td>{{ (t.opened_at or '')[:16] }}</td>
+                <td>{{ t.instrument }}</td>
+                <td>{{ t.side }}</td>
+                <td>{{ "%.4f"|format(t.qty) }}</td>
+                <td>${{ "%.2f"|format(t.entry) }}</td>
+                <td>{% if t.stop_loss %}${{ "%.2f"|format(t.stop_loss) }}{% else %}—{% endif %}</td>
+              </tr>
+              {% endfor %}
+            </tbody>
+          </table>
+        </div>
+        <p class="sub news-section">Closed mill clips</p>
+        <p class="sub" id="mill-live-closed-empty"{% if mill_closed %} hidden{% endif %}>No closed mill clips yet. Fills appear here when the mill live path takes a nano ETH contract.</p>
+        <div class="table-scroll" id="mill-live-closed-table"{% if not mill_closed %} hidden{% endif %}>
+          <table>
+            <thead>
+              <tr><th>Closed</th><th>Instrument</th><th>Side</th><th>Entry</th><th>Exit</th><th>P&amp;L</th><th>Reason</th></tr>
+            </thead>
+            <tbody id="mill-live-closed">
+              {% for t in mill_closed %}
+              <tr>
+                <td>{{ (t.closed_at or '')[:16] }}</td>
+                <td>{{ t.instrument }}</td>
+                <td>{{ t.side }}</td>
+                <td>${{ "%.2f"|format(t.entry) }}</td>
+                <td>{% if t.exit_price %}${{ "%.2f"|format(t.exit_price) }}{% else %}—{% endif %}</td>
+                <td class="{{ 'pos-row' if (t.pnl_usd or 0) >= 0 else 'neg-row' }}">{{ "%+.2f"|format(t.pnl_usd or 0) }}</td>
+                <td>{{ t.close_reason or '—' }}</td>
+              </tr>
+              {% endfor %}
+            </tbody>
+          </table>
+        </div>
+      </section>
+
+      <section class="card feed-funnel" id="mill-funnel">
+        <h2>Today’s idea funnel</h2>
+        <div class="metrics feed-metrics">
+          <div class="metric"><div class="label">Minted</div><div class="value" id="fn-minted">—</div></div>
+          <div class="metric"><div class="label">On Telegram</div><div class="value" id="fn-sent">—</div></div>
+          <div class="metric"><div class="label">Not DMed</div><div class="value" id="fn-queued">—</div></div>
+          <div class="metric"><div class="label">Accepts</div><div class="value pos" id="fn-accepts">—</div></div>
+          <div class="metric"><div class="label">Rejects</div><div class="value" id="fn-rejects">—</div></div>
+          <div class="metric"><div class="label">Users</div><div class="value" id="fn-users">—</div></div>
+        </div>
+        <p class="sub" id="fn-hint">Telegram DMs are capped. The stream below is every sized mill idea.</p>
+      </section>
+
+      <section class="card" id="mill-paper-card">
+        <h2>House mill paper</h2>
+        {% if mill_paper.available %}
+        {% set ms = mill_paper.summary %}
+        <p class="sub" style="margin-bottom:10px">Every minted idea, not just the live clips. Same book as Telegram /performance.</p>
+        <div class="metrics">
+          <div class="metric"><div class="label">Open</div><div class="value">{{ ms.open }}</div></div>
+          <div class="metric"><div class="label">Closed</div><div class="value">{{ ms.closed }}</div></div>
+          <div class="metric">
+            <div class="label">Win rate</div>
+            <div class="value">{% if ms.win_rate is not none %}{{ (ms.win_rate * 100)|round|int }}%{% else %}—{% endif %}</div>
+          </div>
+          <div class="metric">
+            <div class="label">Σ paper PnL</div>
+            <div class="value {{ 'pos' if ms.pnl_pct_sum >= 0 else 'neg' }}">{{ '%+.2f'|format(ms.pnl_pct_sum) }}%</div>
+          </div>
+        </div>
+        {% else %}
+        <p class="sub">Mill database not mounted on this host (set <code>IDEAS_DB</code>).</p>
+        {% endif %}
+      </section>
+
+      <p class="sub feed-status" id="mill-feed-status"></p>
+      <div id="mill-feed" class="feed-list"></div>
+    </div><!-- /tab-mill -->
+
     <footer>
-      Paper trading only — not financial advice. Brain + tape refresh every 60s.
+      Not financial advice. Brain + tape refresh every 60s. Consumer votes live on <a href="/feed">/feed</a>.
     </footer>
   </div>
 
@@ -917,21 +1031,43 @@
         brain: document.getElementById('tab-brain'),
         trading: document.getElementById('tab-trading'),
         yield: document.getElementById('tab-yield'),
+        mill: document.getElementById('tab-mill'),
       };
+      function activate(name, pushHash) {
+        if (!panels[name]) name = 'brain';
+        tabs.forEach(function (b) {
+          var on = b.getAttribute('data-tab') === name;
+          b.classList.toggle('is-active', on);
+          b.setAttribute('aria-selected', on ? 'true' : 'false');
+        });
+        Object.keys(panels).forEach(function (key) {
+          if (panels[key]) panels[key].hidden = key !== name;
+        });
+        if (pushHash) {
+          var next = '#' + name;
+          if (location.hash !== next) history.replaceState(null, '', next);
+        }
+        if (name === 'yield') refreshYield();
+        if (name === 'mill') refreshMill();
+      }
       tabs.forEach(function (btn) {
         btn.addEventListener('click', function () {
-          var name = btn.getAttribute('data-tab');
-          tabs.forEach(function (b) {
-            var on = b === btn;
-            b.classList.toggle('is-active', on);
-            b.setAttribute('aria-selected', on ? 'true' : 'false');
-          });
-          Object.keys(panels).forEach(function (key) {
-            if (panels[key]) panels[key].hidden = key !== name;
-          });
-          if (name === 'yield') refreshYield();
+          activate(btn.getAttribute('data-tab'), true);
         });
       });
+      document.querySelectorAll('.sleeve-jump').forEach(function (el) {
+        el.addEventListener('click', function () {
+          activate(el.getAttribute('data-tab'), true);
+        });
+        el.addEventListener('keydown', function (ev) {
+          if (ev.key === 'Enter' || ev.key === ' ') {
+            ev.preventDefault();
+            activate(el.getAttribute('data-tab'), true);
+          }
+        });
+      });
+      var fromHash = (location.hash || '').replace('#', '');
+      activate(fromHash || 'brain', false);
     })();
 
     var yieldLoaded = false;
@@ -1022,6 +1158,202 @@
     if (document.getElementById('sleeve-yield-nav')) {
       window.addEventListener('load', function () { refreshYield(); }, { once: true });
       setInterval(function () { if (yieldLoaded) refreshYield(); }, 120000);
+    }
+
+    var millPollStarted = false;
+    var millLatestId = 0;
+    var millKnown = {};
+
+    function millEsc(s) {
+      return String(s == null ? '' : s)
+        .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
+        .replace(/"/g, '&quot;');
+    }
+    function millPx(v) {
+      if (v == null || v === '') return '—';
+      return '$' + Number(v).toLocaleString(undefined, { maximumFractionDigits: 2 });
+    }
+    function millAge(iso) {
+      if (!iso) return '';
+      var t = Date.parse(iso);
+      if (!t) return iso;
+      var mins = Math.round((Date.now() - t) / 60000);
+      if (mins < 1) return 'just now';
+      if (mins < 60) return mins + 'm ago';
+      var hrs = Math.round(mins / 60);
+      if (hrs < 48) return hrs + 'h ago';
+      return Math.round(hrs / 24) + 'd ago';
+    }
+    function millCardHtml(idea) {
+      var dir = String(idea.direction || '').toLowerCase();
+      var dirCls = dir === 'long' ? 'badge-good' : (dir === 'short' ? 'badge-bad' : 'badge-none');
+      var tps = (idea.take_profits || []).slice(0, 3).map(function (tp, i) {
+        return '<span>TP' + (i + 1) + ' ' + millEsc(millPx(tp)) + '</span>';
+      }).join('');
+      var extra = idea.telegram_sent
+        ? '<span class="badge badge-none" title="Also sent as a Telegram DM">DM</span>'
+        : '<span class="badge badge-warn" title="Minted but not DMed — Telegram rate cap">feed only</span>';
+      var conf = idea.confidence != null ? Math.round(Number(idea.confidence) * 100) + '%' : '';
+      return (
+        '<article class="card feed-card" data-id="' + idea.id + '">' +
+          '<div class="feed-card-top">' +
+            '<div>' +
+              '<span class="badge badge-none">' + millEsc(idea.source_label || idea.source) + '</span>' +
+              extra +
+              '<span class="badge ' + dirCls + '">' + millEsc((idea.direction || '').toUpperCase()) + '</span>' +
+              '<strong> ' + millEsc(idea.product_id) + '</strong>' +
+              (conf ? '<span class="sub"> · ' + millEsc(conf) + '</span>' : '') +
+            '</div>' +
+            '<span class="sub">' + millEsc(millAge(idea.created_at)) + '</span>' +
+          '</div>' +
+          '<h3 class="feed-title">' + millEsc(idea.title) + '</h3>' +
+          (idea.blurb ? '<p class="news-blurb">' + millEsc(idea.blurb) + '</p>' : '') +
+          '<div class="feed-levels">' +
+            '<span>Entry ' + millEsc(millPx(idea.entry)) + '</span>' +
+            '<span>SL ' + millEsc(millPx(idea.stop_loss)) + '</span>' +
+            tps +
+          '</div>' +
+        '</article>'
+      );
+    }
+    function millSetTable(tbodyId, emptyId, tableId, html, hasRows) {
+      var tbody = document.getElementById(tbodyId);
+      var empty = document.getElementById(emptyId);
+      var table = document.getElementById(tableId);
+      if (tbody) tbody.innerHTML = html;
+      if (empty) empty.hidden = hasRows;
+      if (table) table.hidden = !hasRows;
+    }
+    async function refreshMillClip() {
+      var res = await fetch('/api/trades/live?source=mill&limit=20');
+      if (!res.ok) throw new Error('HTTP ' + res.status);
+      var data = await res.json();
+      var mill = (data.performance && data.performance.by_source && data.performance.by_source.mill) || null;
+      var pnlEl = document.getElementById('mill-clip-pnl');
+      var strip = document.getElementById('sleeve-mill-pnl');
+      var openN = (data.open || []).length;
+      var closedN = (data.closed || []).length;
+      var pnlTxt = mill ? (fmtSigned(mill.pnl_usd) + ' · ' + mill.open + ' open') : 'no fills';
+      var pnlCls = mill && mill.pnl_usd >= 0 ? 'pos' : (mill ? 'neg' : '');
+      if (pnlEl) {
+        pnlEl.textContent = mill ? fmtSigned(mill.pnl_usd) : 'no fills';
+        pnlEl.className = 'value ' + pnlCls;
+      }
+      if (strip) {
+        strip.textContent = mill ? pnlTxt : 'no fills';
+        strip.className = 'value ' + pnlCls;
+      }
+      var openEl = document.getElementById('mill-clip-open');
+      if (openEl) openEl.textContent = String(openN);
+      var closedEl = document.getElementById('mill-clip-closed');
+      if (closedEl) {
+        var wr = mill && mill.win_rate != null ? ' · ' + Math.round(mill.win_rate * 100) + '% win' : '';
+        closedEl.textContent = String(closedN) + wr;
+      }
+      var openHtml = (data.open || []).map(function (t) {
+        return '<tr><td>' + millEsc(String(t.opened_at || '').slice(0, 16)) + '</td><td>' +
+          millEsc(t.instrument) + '</td><td>' + millEsc(t.side) + '</td><td>' +
+          Number(t.qty || 0).toFixed(4) + '</td><td>' + millEsc(millPx(t.entry)) + '</td><td>' +
+          (t.stop_loss ? millEsc(millPx(t.stop_loss)) : '—') + '</td></tr>';
+      }).join('');
+      millSetTable('mill-live-open', 'mill-live-open-empty', 'mill-live-open-table', openHtml, openN > 0);
+      var closedHtml = (data.closed || []).map(function (t) {
+        var pnl = Number(t.pnl_usd || 0);
+        var cls = pnl >= 0 ? 'pos-row' : 'neg-row';
+        return '<tr><td>' + millEsc(String(t.closed_at || '').slice(0, 16)) + '</td><td>' +
+          millEsc(t.instrument) + '</td><td>' + millEsc(t.side) + '</td><td>' +
+          millEsc(millPx(t.entry)) + '</td><td>' +
+          (t.exit_price ? millEsc(millPx(t.exit_price)) : '—') +
+          '</td><td class="' + cls + '">' + fmtSigned(pnl) + '</td><td>' +
+          millEsc(t.close_reason || '—') + '</td></tr>';
+      }).join('');
+      millSetTable('mill-live-closed', 'mill-live-closed-empty', 'mill-live-closed-table', closedHtml, closedN > 0);
+    }
+    async function refreshMillFunnel() {
+      var res = await fetch('/api/ideas/funnel');
+      if (!res.ok) return;
+      var fn = await res.json();
+      var hint = document.getElementById('fn-hint');
+      if (!fn || !fn.available) {
+        if (hint) hint.textContent = 'Mill database not mounted on this host (set IDEAS_DB).';
+        return;
+      }
+      var set = function (id, v) {
+        var el = document.getElementById(id);
+        if (el) el.textContent = v;
+      };
+      set('fn-minted', fn.minted);
+      set('fn-sent', fn.telegram_sent);
+      set('fn-queued', fn.not_on_telegram);
+      set('fn-accepts', fn.accepts);
+      set('fn-rejects', fn.rejects);
+      set('fn-users', fn.unique_users);
+    }
+    async function refreshMillStream() {
+      var status = document.getElementById('mill-feed-status');
+      var el = document.getElementById('mill-feed');
+      if (!el) return;
+      var url = '/api/ideas/stream?limit=40';
+      if (millLatestId) url += '&after_id=' + encodeURIComponent(millLatestId);
+      var res = await fetch(url);
+      if (!res.ok) throw new Error('HTTP ' + res.status);
+      var data = await res.json();
+      if (!data.available) {
+        if (!millLatestId) el.innerHTML = '<p class="sub">Mill database not mounted on this host (set IDEAS_DB).</p>';
+        return;
+      }
+      var ideas = data.ideas || [];
+      if (!millLatestId) {
+        millKnown = {};
+        if (!ideas.length) {
+          el.innerHTML = '<p class="sub">No sized mill ideas yet.</p>';
+          if (status) status.textContent = '';
+          return;
+        }
+        var html = '';
+        for (var i = 0; i < ideas.length; i++) {
+          millKnown[ideas[i].id] = true;
+          if (ideas[i].id > millLatestId) millLatestId = ideas[i].id;
+          html += millCardHtml(ideas[i]);
+        }
+        el.innerHTML = html;
+      } else {
+        for (var j = ideas.length - 1; j >= 0; j--) {
+          var idea = ideas[j];
+          if (millKnown[idea.id]) continue;
+          millKnown[idea.id] = true;
+          var wrap = document.createElement('div');
+          wrap.innerHTML = millCardHtml(idea);
+          var node = wrap.firstChild;
+          if (node) {
+            node.classList.add('feed-new');
+            if (el.firstChild) el.insertBefore(node, el.firstChild);
+            else el.appendChild(node);
+          }
+          if (idea.id > millLatestId) millLatestId = idea.id;
+        }
+      }
+      if (status) status.textContent = '';
+    }
+    async function refreshMill() {
+      try {
+        await Promise.all([refreshMillClip(), refreshMillFunnel(), refreshMillStream()]);
+      } catch (e) {
+        var st = document.getElementById('mill-feed-status');
+        if (st) st.textContent = 'Mill refresh failed: ' + e.message;
+      }
+      if (!millPollStarted) {
+        millPollStarted = true;
+        setInterval(function () {
+          var panel = document.getElementById('tab-mill');
+          if (panel && !panel.hidden) refreshMill();
+        }, 15000);
+      }
+    }
+    if (document.getElementById('sleeve-mill-pnl')) {
+      window.addEventListener('load', function () {
+        refreshMillClip().catch(function () {});
+      }, { once: true });
     }
 
     (function initPaperJournalToggle() {

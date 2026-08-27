@@ -217,9 +217,11 @@ class MillExecuteRequest(BaseModel):
 
 @router.post("/execute/mill")
 async def execute_mill(body: MillExecuteRequest) -> dict:
-    """Mirror a mill house fill onto the live mill sleeve ($80/idea, 2 open,
-    2 fills/day — enforced inside execute.py). EXECUTION_MODE=off → no-op.
-    Never affects the mill's paper book; this is fire-and-forget for the mill.
+    """Mirror a mill house fill onto the live mill sleeve.
+
+    Sleeve, open-count, leverage, and daily-loss halt are enforced in
+    execute.py. A closed clip frees the slot for the next mint. EXECUTION_MODE=off
+    → no-op. Never affects the mill's paper book; fire-and-forget for the mill.
     """
     if body.direction not in ("long", "short"):
         raise HTTPException(status_code=422, detail="direction must be long|short")

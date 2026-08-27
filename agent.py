@@ -190,18 +190,12 @@ def run_cycle() -> list[tuple[Suggestion, list[str]]] | None:
             )
             # Live mirror (EXECUTION_MODE=shadow|live). Never blocks the
             # paper path — failures log + halt inside execute.
-            if suggestion.action != "no_trade":
-                import execute
-
-                execute.maybe_execute_live(
-                    suggestion,
-                    spots.get(product_id, price),
-                    cycle_id=product_cycle_id,
-                    source="hq",
-                )
             offer_id = None
             card_summary = None
             if suggestion.action != "no_trade":
+                import execute
+                import vault
+
                 try:
                     card_summary = display_summary.generate_display_summary(
                         suggestion
@@ -211,6 +205,22 @@ def run_cycle() -> list[tuple[Suggestion, list[str]]] | None:
                         "Display summary generation failed for %s", product_cycle_id
                     )
                     card_summary = None
+                hq_title = display_summary.friendly_title(suggestion)
+                if not display_summary.is_watchdog_suggestion(suggestion):
+                    hq_title = f"High Quality · {hq_title}"
+                vault.take(
+                    suggestion,
+                    cycle_id=product_cycle_id,
+                    spot=spots.get(product_id, price),
+                    title=hq_title,
+                    blurb=card_summary,
+                )
+                execute.maybe_execute_live(
+                    suggestion,
+                    spots.get(product_id, price),
+                    cycle_id=product_cycle_id,
+                    source="hq",
+                )
                 house_pos_id = user_books.find_house_position_id_for_cycle(
                     product_cycle_id
                 )

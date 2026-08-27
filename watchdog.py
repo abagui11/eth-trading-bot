@@ -893,6 +893,25 @@ def run_watchdog() -> list[Suggestion] | None:
                     cycle_id=cycle_id,
                     spots=spots,
                 )
+                offer_id = None
+                card_summary = None
+                house_pos_id = user_books.find_house_position_id_for_cycle(cycle_id)
+                try:
+                    card_summary = display_summary.generate_display_summary(suggestion)
+                except Exception:
+                    logger.exception(
+                        "Display summary generation failed for %s", cycle_id
+                    )
+                    card_summary = None
+                import vault as hq_vault
+
+                hq_vault.take(
+                    suggestion,
+                    cycle_id=cycle_id,
+                    spot=spots.get(product_id, live_spot),
+                    title=display_summary.friendly_title(suggestion),
+                    blurb=card_summary,
+                )
                 # Watchdog live fills need BOTH EXECUTION_MODE=shadow|live and
                 # the separate watchdog-live gate (paper execute is not enough).
                 if bot_config.watchdog_live_enabled():
@@ -904,16 +923,6 @@ def run_watchdog() -> list[Suggestion] | None:
                         cycle_id=cycle_id,
                         source="hq",
                     )
-                offer_id = None
-                card_summary = None
-                house_pos_id = user_books.find_house_position_id_for_cycle(cycle_id)
-                try:
-                    card_summary = display_summary.generate_display_summary(suggestion)
-                except Exception:
-                    logger.exception(
-                        "Display summary generation failed for %s", cycle_id
-                    )
-                    card_summary = None
                 offer = user_books.create_trade_offer(
                     cycle_id=cycle_id,
                     suggestion=suggestion,

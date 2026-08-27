@@ -700,6 +700,273 @@ def format_close_reply(
     return "Couldn’t close that position right now — try again shortly."
 
 
+_SOURCE_LABEL = {
+    "news": "NEWS",
+    "zmove": "SPIKE",
+    "spike": "SPIKE",
+    "funding": "FUNDING",
+    "session": "SESSION",
+    "cascade": "CASCADE",
+}
+
+
+def _utc_today() -> str:
+    return datetime.now(timezone.utc).strftime("%Y-%m-%d")
+
+
+def _parse_take_profits(raw: Any) -> list[float]:
+    if isinstance(raw, list):
+        out: list[float] = []
+        for item in raw:
+            try:
+                out.append(float(item))
+            except (TypeError, ValueError):
+                continue
+        return out
+    if not raw:
+        return []
+    try:
+        parsed = json.loads(str(raw))
+    except (json.JSONDecodeError, TypeError, ValueError):
+        return []
+    return _parse_take_profits(parsed)
+
+
+def public_idea_card(
+    row: dict[str, Any], *, my_decision: str | None = None
+) -> dict[str, Any]:
+    """User-facing idea payload — no filesystem paths, no internal keys."""
+    source = str(row.get("source") or "")
+    title = str(row.get("lay_title") or row.get("title") or "").strip()
+    blurb = str(row.get("lay_blurb") or row.get("blurb") or "").strip()
+    tps = row.get("take_profits")
+    if tps is None:
+        tps = _parse_take_profits(row.get("take_profits_json"))
+    sent_at = row.get("sent_at")
+    return {
+        "id": int(row["id"]),
+        "source": source,
+        "source_label": _SOURCE_LABEL.get(source, source.upper() or "IDEA"),
+        "product_id": str(row.get("product_id") or ""),
+        "direction": str(row.get("direction") or ""),
+        "title": title,
+        "blurb": blurb,
+        "stance_context": str(row.get("stance_context") or "").strip() or None,
+        "confidence": row.get("confidence"),
+        "entry": row.get("entry"),
+        "stop_loss": row.get("stop_loss"),
+        "take_profits": list(tps or []),
+        "risk_reward": row.get("risk_reward"),
+        "status": str(row.get("status") or ""),
+        "created_at": row.get("created_at"),
+        "telegram_sent": bool(sent_at),
+        "my_decision": my_decision,
+    }
+
+
+def _decision_map(conn: sqlite3.Connection, user_id: int, idea_ids: list[int]) -> dict[int, str]:
+    if not idea_ids:
+        return {}
+    placeholders = ",".join("?" * len(idea_ids))
+    rows = conn.execute(
+        f"""
+        SELECT idea_id, decision FROM decisions
+        WHERE user_id = ? AND idea_id IN ({placeholders})
+        """,
+        (int(user_id), *idea_ids),
+    ).fetchall()
+    return {int(r["idea_id"]): str(r["decision"]) for r in rows}
+
+
+def idea_stream(
+    *,
+    limit: int = 40,
+    after_id: int | None = None,
+    user_id: int | None = None,
+) -> dict[str, Any] | None:
+    """Shared mill stream: every sized long/short, not just Telegram broadcasts.
+
+    ``after_id`` returns newer cards oldest-first for polling; otherwise the
+    latest ``limit`` cards newest-first.
+    """
+    conn = _connect()
+    if conn is None:
+        return None
+    cap = max(1, min(int(limit), 100))
+    try:
+        with conn:
+            tables = {
+                str(r[0])
+                for r in conn.execute(
+                    "SELECT name FROM sqlite_master WHERE type='table'"
+                ).fetchall()
+            }
+            if "ideas" not in tables:
+                return {"available": True, "ideas": [], "latest_id": 0}
+
+            if after_id is not None:
+                rows = conn.execute(
+                    """
+                    SELECT * FROM ideas
+                    WHERE direction IN ('long', 'short')
+                      AND entry IS NOT NULL
+                      AND id > ?
+                    ORDER BY id ASC
+                    LIMIT ?
+                    """,
+                    (int(after_id), cap),
+                ).fetchall()
+            else:
+                rows = conn.execute(
+                    """
+                    SELECT * FROM ideas
+                    WHERE direction IN ('long', 'short')
+                      AND entry IS NOT NULL
+                    ORDER BY id DESC
+                    LIMIT ?
+                    """,
+                    (cap,),
+                ).fetchall()
+
+            raw = [dict(r) for r in rows]
+            idea_ids = [int(r["id"]) for r in raw]
+            mine: dict[int, str] = {}
+            if user_id is not None and "decisions" in tables:
+                mine = _decision_map(conn, user_id, idea_ids)
+
+            latest_row = conn.execute("SELECT MAX(id) AS n FROM ideas").fetchone()
+            latest_id = int(latest_row["n"] or 0) if latest_row else 0
+
+        ideas = [
+            public_idea_card(row, my_decision=mine.get(int(row["id"])))
+            for row in raw
+        ]
+        return {
+            "available": True,
+            "ideas": ideas,
+            "latest_id": latest_id,
+        }
+    except sqlite3.Error:
+        logger.exception("idea stream read failed")
+        return None
+    finally:
+        conn.close()
+
+
+def idea_funnel(*, day: str | None = None) -> dict[str, Any] | None:
+    """Mint vs Telegram vs Accept/Reject counts — the volume bottleneck meter."""
+    conn = _connect()
+    if conn is None:
+        return None
+    date = day or _utc_today()
+    prefix = f"{date}%"
+    try:
+        with conn:
+            tables = {
+                str(r[0])
+                for r in conn.execute(
+                    "SELECT name FROM sqlite_master WHERE type='table'"
+                ).fetchall()
+            }
+            empty = {
+                "available": True,
+                "as_of_date": date,
+                "minted": 0,
+                "sized": 0,
+                "telegram_sent": 0,
+                "not_on_telegram": 0,
+                "accepts": 0,
+                "rejects": 0,
+                "unique_users": 0,
+            }
+            if "ideas" not in tables:
+                return empty
+
+            minted = int(
+                conn.execute(
+                    "SELECT COUNT(*) AS n FROM ideas WHERE created_at LIKE ?",
+                    (prefix,),
+                ).fetchone()["n"]
+            )
+            sized = int(
+                conn.execute(
+                    """
+                    SELECT COUNT(*) AS n FROM ideas
+                    WHERE created_at LIKE ?
+                      AND direction IN ('long', 'short')
+                      AND entry IS NOT NULL
+                    """,
+                    (prefix,),
+                ).fetchone()["n"]
+            )
+            telegram_sent = int(
+                conn.execute(
+                    """
+                    SELECT COUNT(*) AS n FROM ideas
+                    WHERE created_at LIKE ? AND sent_at IS NOT NULL
+                    """,
+                    (prefix,),
+                ).fetchone()["n"]
+            )
+            not_on_telegram = int(
+                conn.execute(
+                    """
+                    SELECT COUNT(*) AS n FROM ideas
+                    WHERE created_at LIKE ?
+                      AND direction IN ('long', 'short')
+                      AND entry IS NOT NULL
+                      AND sent_at IS NULL
+                    """,
+                    (prefix,),
+                ).fetchone()["n"]
+            )
+            accepts = rejects = unique_users = 0
+            if "decisions" in tables:
+                accepts = int(
+                    conn.execute(
+                        """
+                        SELECT COUNT(*) AS n FROM decisions
+                        WHERE decided_at LIKE ? AND decision = 'accept'
+                        """,
+                        (prefix,),
+                    ).fetchone()["n"]
+                )
+                rejects = int(
+                    conn.execute(
+                        """
+                        SELECT COUNT(*) AS n FROM decisions
+                        WHERE decided_at LIKE ? AND decision = 'reject'
+                        """,
+                        (prefix,),
+                    ).fetchone()["n"]
+                )
+                unique_users = int(
+                    conn.execute(
+                        """
+                        SELECT COUNT(DISTINCT user_id) AS n FROM decisions
+                        WHERE decided_at LIKE ?
+                        """,
+                        (prefix,),
+                    ).fetchone()["n"]
+                )
+        return {
+            "available": True,
+            "as_of_date": date,
+            "minted": minted,
+            "sized": sized,
+            "telegram_sent": telegram_sent,
+            "not_on_telegram": not_on_telegram,
+            "accepts": accepts,
+            "rejects": rejects,
+            "unique_users": unique_users,
+        }
+    except sqlite3.Error:
+        logger.exception("idea funnel read failed")
+        return None
+    finally:
+        conn.close()
+
+
 def user_book_close_keyboard(
     report: dict[str, Any] | None, *, max_buttons: int = 8
 ):

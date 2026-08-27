@@ -227,17 +227,28 @@ class ExecuteLiveTests(unittest.TestCase):
         )
         self.assertIsNone(result)
 
-    def test_mill_daily_fill_cap(self) -> None:
+    def test_mill_daily_fill_cap_off_by_default(self) -> None:
+        self.assertEqual(bot_config.LIVE_MILL_MAX_FILLS_PER_DAY, 0)
         today = execute._today()
-        live_ledger.set_meta(
-            "mill_fills_date", f"{today}:{bot_config.LIVE_MILL_MAX_FILLS_PER_DAY}"
-        )
+        live_ledger.set_meta("mill_fills_date", f"{today}:9")
         result = execute.maybe_execute_live(
             _hq_suggestion(order_block_ref="ob-m"),
             2000.0,
             cycle_id="c1",
             source="mill",
         )
+        self.assertIsNotNone(result)
+
+    def test_mill_daily_fill_cap_when_enabled(self) -> None:
+        today = execute._today()
+        live_ledger.set_meta("mill_fills_date", f"{today}:2")
+        with patch.object(bot_config, "LIVE_MILL_MAX_FILLS_PER_DAY", 2):
+            result = execute.maybe_execute_live(
+                _hq_suggestion(order_block_ref="ob-m"),
+                2000.0,
+                cycle_id="c1",
+                source="mill",
+            )
         self.assertIsNone(result)
 
     def test_mill_shadow_sizing(self) -> None:

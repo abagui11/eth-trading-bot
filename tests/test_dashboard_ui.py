@@ -261,6 +261,19 @@ class DashboardUiSmokeTests(unittest.TestCase):
         self.assertIn('<div class="news-feed" id="brain-news-feed">', brain_card)
         self.assertIn("News desk", brain_card)
 
+    def test_hub_has_four_product_tabs(self) -> None:
+        html = self.client.get("/").text
+        self.assertIn('data-tab="brain"', html)
+        self.assertIn('data-tab="trading"', html)
+        self.assertIn('data-tab="yield"', html)
+        self.assertIn('data-tab="mill"', html)
+        self.assertIn('id="tab-mill"', html)
+        self.assertIn("Trade mill · live clip (internal)", html)
+        self.assertIn("HQ live book", html)
+        mill_card = html.split('id="mill-clip-card"', 1)[1].split("</section>", 1)[0]
+        self.assertIn("nano ETH", mill_card)
+        self.assertIn("/feed", mill_card)
+
 
 if __name__ == "__main__":
     unittest.main()

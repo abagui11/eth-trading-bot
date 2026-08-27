@@ -146,6 +146,15 @@ class DashboardApiTests(unittest.TestCase):
         self.assertEqual(resp.status_code, 200)
         self.assertNotIn("secret_user", resp.text)
         self.assertNotIn("subscribers", resp.text.lower())
+        self.assertIn('data-tab="brain"', resp.text)
+        self.assertIn('data-tab="trading"', resp.text)
+        self.assertIn('data-tab="yield"', resp.text)
+        self.assertIn('data-tab="mill"', resp.text)
+        self.assertIn("Trade mill", resp.text)
+        self.assertIn("live clip (internal)", resp.text)
+        self.assertIn('id="tab-mill"', resp.text)
+        self.assertIn("HQ live book", resp.text)
+        self.assertIn("/api/trades/live?source=mill", resp.text)
 
     def test_api_status_includes_score(self) -> None:
         resp = self.client.get("/api/status")
@@ -194,6 +203,160 @@ class DashboardApiTests(unittest.TestCase):
         self.assertIn("My book", resp.text)
         self.assertIn("$1000", resp.text)
         self.assertIn("me_session", resp.cookies)
+
+    def test_feed_page_is_public(self) -> None:
+        resp = self.client.get("/feed")
+        self.assertEqual(resp.status_code, 200)
+        self.assertIn("Idea feed", resp.text)
+        self.assertIn("Viewing", resp.text)
+        self.assertNotIn("secret_user", resp.text)
+
+    def test_idea_stream_unauthenticated(self) -> None:
+        resp = self.client.get("/api/ideas/stream")
+        self.assertEqual(resp.status_code, 200)
+        data = resp.json()
+        self.assertFalse(data["signed_in"])
+        self.assertIn("ideas", data)
+
+    def test_idea_decision_requires_session(self) -> None:
+        resp = self.client.post(
+            "/api/ideas/5/decision", json={"decision": "accept"}
+        )
+        self.assertEqual(resp.status_code, 401)
+
+
+class IdeaFeedApiTests(unittest.TestCase):
+    """Feed + decision API against a mill SQLite (the public stream)."""
+
+    def setUp(self) -> None:
+        self._tmpdir = tempfile.TemporaryDirectory(ignore_cleanup_errors=True)
+        root = Path(self._tmpdir.name)
+        self._db = root / "ledger.db"
+        self._ideas = root / "ideas.db"
+        self._charts = root / "charts"
+        self._charts.mkdir()
+
+        sqlite3.connect(self._db).close()
+        conn = sqlite3.connect(self._ideas)
+        conn.executescript(
+            """
+            CREATE TABLE ideas (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                source TEXT NOT NULL,
+                product_id TEXT NOT NULL,
+                direction TEXT NOT NULL,
+                title TEXT NOT NULL,
+                blurb TEXT NOT NULL,
+                signal_key TEXT NOT NULL UNIQUE,
+                stance_context TEXT,
+                confidence REAL,
+                meta_json TEXT,
+                status TEXT NOT NULL DEFAULT 'offered',
+                entry REAL,
+                stop_loss REAL,
+                take_profits_json TEXT,
+                risk_reward REAL,
+                chart_path TEXT,
+                sent_at TEXT,
+                created_at TEXT NOT NULL
+            );
+            CREATE TABLE decisions (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                idea_id INTEGER NOT NULL,
+                user_id INTEGER NOT NULL,
+                decision TEXT NOT NULL,
+                decided_at TEXT NOT NULL,
+                UNIQUE (idea_id, user_id)
+            );
+            INSERT INTO ideas
+                (id, source, product_id, direction, title, blurb, signal_key,
+                 entry, stop_loss, take_profits_json, created_at)
+            VALUES (5, 'news', 'ETH-USD', 'long', 'Fixture', 'blurb', 'news:1',
+                    100.0, 95.0, '[110.0]', '2026-08-27T00:00:00Z');
+            """
+        )
+        conn.commit()
+        conn.close()
+
+        import config
+
+        self._patches = [
+            patch.object(config, "LEDGER_DB", self._db),
+            patch.object(config, "CHARTS_DIR", self._charts),
+            patch.object(config, "ROOT_DIR", root),
+            patch.object(config, "ME_TOKEN_SECRET", "test-secret"),
+            patch.object(config, "PAYWALL_ENABLED", False),
+            patch.dict("os.environ", {"IDEAS_DB": str(self._ideas)}, clear=False),
+        ]
+        for item in self._patches:
+            item.start()
+        data.reset_spot_cache()
+        from dashboard.app import create_app
+
+        self.client = TestClient(create_app())
+
+    def tearDown(self) -> None:
+        data.reset_spot_cache()
+        self.client.close()
+        for item in reversed(self._patches):
+            item.stop()
+        self._tmpdir.cleanup()
+
+    def test_stream_returns_sized_cards(self) -> None:
+        resp = self.client.get("/api/ideas/stream")
+        self.assertEqual(resp.status_code, 200)
+        body = resp.json()
+        self.assertTrue(body["available"])
+        self.assertEqual(len(body["ideas"]), 1)
+        self.assertEqual(body["ideas"][0]["id"], 5)
+        self.assertEqual(body["ideas"][0]["product_id"], "ETH-USD")
+        self.assertFalse(body["signed_in"])
+
+    def test_funnel_endpoint(self) -> None:
+        resp = self.client.get("/api/ideas/funnel")
+        self.assertEqual(resp.status_code, 200)
+        body = resp.json()
+        self.assertTrue(body["available"])
+        self.assertIn("minted", body)
+        self.assertIn("telegram_sent", body)
+        self.assertIn("not_on_telegram", body)
+
+    def test_accept_via_magic_link_cookie(self) -> None:
+        import user_books
+
+        user_books.init_db()
+        token = user_books.create_me_token(4242, ttl_sec=600)
+        page = self.client.get(f"/feed?t={token}")
+        self.assertEqual(page.status_code, 200)
+        self.assertIn("Signed in", page.text)
+        self.assertIn("me_session", page.cookies)
+
+        resp = self.client.post(
+            "/api/ideas/5/decision", json={"decision": "accept"}
+        )
+        self.assertEqual(resp.status_code, 200)
+        body = resp.json()
+        self.assertEqual(body["status"], "recorded")
+        self.assertEqual(body["decision"], "accept")
+
+        stream = self.client.get("/api/ideas/stream").json()
+        self.assertEqual(stream["ideas"][0]["my_decision"], "accept")
+
+        dup = self.client.post(
+            "/api/ideas/5/decision", json={"decision": "reject"}
+        )
+        self.assertEqual(dup.status_code, 200)
+        self.assertEqual(dup.json()["status"], "duplicate")
+
+    def test_vault_snapshot_and_empty_stream(self) -> None:
+        snap = self.client.get("/api/vault/snapshot")
+        self.assertEqual(snap.status_code, 200)
+        body = snap.json()
+        self.assertIn("policy", body)
+        self.assertEqual(body["policy"]["notional_per_name_usd"], 1000.0)
+        stream = self.client.get("/api/vault/stream")
+        self.assertEqual(stream.status_code, 200)
+        self.assertEqual(stream.json()["ideas"], [])
 
 
 if __name__ == "__main__":

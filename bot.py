@@ -472,6 +472,27 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
         )
         return
 
+    if data == telegram_ui.CB_FEED:
+        url = user_books.feed_url(user_id)
+        if url:
+            text = (
+                "Idea feed — every mill card, same stream for everyone.\n\n"
+                f"Open the feed: {url}\n"
+                "Accept / Reject on the page writes to your paper book. "
+                "(Link expires in about an hour; tap Idea feed again for a fresh one.)"
+            )
+        else:
+            text = (
+                "Idea feed needs DASHBOARD_PUBLIC_URL set on the server.\n"
+                "Telegram Accept / Reject on idea cards still works."
+            )
+        await context.bot.send_message(
+            chat_id,
+            text,
+            reply_markup=telegram_ui.main_keyboard(),
+        )
+        return
+
     if data.startswith(telegram_ui.CB_TRADE_YES_PREFIX):
         offer_id = data[len(telegram_ui.CB_TRADE_YES_PREFIX) :]
         spots = research.get_spot_prices()
@@ -610,7 +631,7 @@ async def cmd_help(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 
     await update.message.reply_text(
         "Commands:\n"
-        "/start — welcome + menu (Open account, My Metrics, My book, Journal, Research)\n"
+        "/start — welcome + menu (Open account, My Metrics, My book, Idea feed, Journal, Research)\n"
         "/status — current suggestion + paper PnL\n"
         "/performance — volume idea book (realized + unrealized)\n"
         "/me — your accepted-idea portfolio PnL (Close buttons on open trades)\n"

@@ -1,0 +1,383 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <title>Idea feed — Republic</title>
+  <link rel="stylesheet" href="/static/style.css?v=feed2">
+</head>
+<body>
+  <div class="wrap feed-wrap">
+    <header class="feed-header">
+      <div>
+        <p class="feed-kicker"><span class="feed-live" aria-hidden="true"></span> Two rails · same stream for everyone</p>
+        <h1>Idea feed</h1>
+        <p class="sub">High Quality vault ideas size the house sleeve. Mill cards are the high-volume paper stream. Telegram DMs stay capped. House mill clip P&amp;L is on the hub <a href="/#mill">Trade mill</a> tab.</p>
+      </div>
+      <div class="feed-session">
+        {% if signed_in %}
+        <span class="badge badge-good">Signed in</span>
+        <a class="sub" href="/me">My book →</a>
+        {% else %}
+        <span class="badge badge-none">Viewing</span>
+        <p class="sub">Tap <strong>Idea feed</strong> in Telegram to Accept / Reject.</p>
+        {% endif %}
+        <p class="sub"><a href="/">← Intelligence hub</a></p>
+      </div>
+    </header>
+
+    <section class="card feed-funnel" id="vault-strip">
+      <h2>HQ vault</h2>
+      <div class="metrics feed-metrics">
+        <div class="metric"><div class="label">NAV</div><div class="value" id="vq-nav">—</div></div>
+        <div class="metric"><div class="label">Per name</div><div class="value" id="vq-clip">—</div></div>
+        <div class="metric"><div class="label">Open</div><div class="value" id="vq-open">—</div></div>
+        <div class="metric"><div class="label">Heat</div><div class="value" id="vq-heat">—</div></div>
+        <div class="metric"><div class="label">Today PnL</div><div class="value" id="vq-pnl">—</div></div>
+        <div class="metric"><div class="label">Hold</div><div class="value" id="vq-hold">—</div></div>
+      </div>
+      <p class="sub" id="vq-hint">Critic-passed ICT only. Mill ideas never enter. Follow while the allocation is open.</p>
+    </section>
+    <div id="hq-feed" class="feed-list"></div>
+
+    <section class="card feed-funnel" id="funnel">
+      <h2>Mill · today’s funnel</h2>
+      <div class="metrics feed-metrics">
+        <div class="metric"><div class="label">Minted</div><div class="value" id="fn-minted">—</div></div>
+        <div class="metric"><div class="label">On Telegram</div><div class="value" id="fn-sent">—</div></div>
+        <div class="metric"><div class="label">Not DMed</div><div class="value" id="fn-queued">—</div></div>
+        <div class="metric"><div class="label">Accepts</div><div class="value pos" id="fn-accepts">—</div></div>
+        <div class="metric"><div class="label">Rejects</div><div class="value" id="fn-rejects">—</div></div>
+        <div class="metric"><div class="label">Users</div><div class="value" id="fn-users">—</div></div>
+      </div>
+      <p class="sub" id="fn-hint">Minted vs Telegram shows the DM cap. The feed lists every sized idea.</p>
+    </section>
+
+    <div id="feed-status" class="sub feed-status"></div>
+    <div id="feed" class="feed-list"></div>
+  </div>
+
+  <script>
+    (function () {
+      var signedIn = {{ 'true' if signed_in else 'false' }};
+      var latestId = 0;
+      var latestHqId = 0;
+      var known = {};
+      var knownHq = {};
+      var POLL_MS = 15000;
+
+      function esc(s) {
+        return String(s == null ? '' : s)
+          .replace(/&/g, '&amp;')
+          .replace(/</g, '&lt;')
+          .replace(/>/g, '&gt;')
+          .replace(/"/g, '&quot;');
+      }
+
+      function fmtPx(v) {
+        if (v == null || v === '') return '—';
+        var n = Number(v);
+        if (!isFinite(n)) return '—';
+        if (Math.abs(n) >= 1000) return n.toLocaleString(undefined, { maximumFractionDigits: 2 });
+        return String(Math.round(n * 10000) / 10000);
+      }
+
+      function fmtUsd(v) {
+        if (v == null || v === '') return '—';
+        var n = Number(v);
+        if (!isFinite(n)) return '—';
+        return '$' + n.toLocaleString(undefined, { maximumFractionDigits: 0 });
+      }
+
+      function fmtConf(v) {
+        if (v == null || v === '') return '';
+        var n = Number(v);
+        if (!isFinite(n)) return '';
+        return Math.round(n * 100) + '%';
+      }
+
+      function age(iso) {
+        if (!iso) return '';
+        var t = Date.parse(iso);
+        if (!isFinite(t)) return '';
+        var sec = Math.max(0, Math.round((Date.now() - t) / 1000));
+        if (sec < 60) return sec + 's ago';
+        if (sec < 3600) return Math.round(sec / 60) + 'm ago';
+        if (sec < 86400) return Math.round(sec / 3600) + 'h ago';
+        return Math.round(sec / 86400) + 'd ago';
+      }
+
+      function cardHtml(idea, rail) {
+        var dir = String(idea.direction || '').toLowerCase();
+        var dirCls = dir === 'long' ? 'badge-good' : (dir === 'short' ? 'badge-bad' : 'badge-none');
+        var decided = idea.my_decision;
+        var isHq = rail === 'hq';
+        var actions;
+        if (decided === 'accept') {
+          actions = '<span class="badge badge-good">' + (isHq ? 'Following' : 'Accepted') + '</span>';
+        } else if (decided === 'reject') {
+          actions = '<span class="badge badge-none">Rejected</span>';
+        } else if (isHq && idea.followable === false) {
+          actions = '<span class="sub">Closed — no longer followable</span>';
+        } else if (signedIn) {
+          actions =
+            '<button type="button" class="btn feed-accept" data-act="accept">' +
+            (isHq ? 'Follow' : 'Accept') + '</button>' +
+            '<button type="button" class="btn feed-reject" data-act="reject">Reject</button>';
+        } else {
+          actions = '<span class="sub">Sign in via Telegram to vote</span>';
+        }
+        var tps = (idea.take_profits || []).slice(0, 3).map(function (tp, i) {
+          return '<span>TP' + (i + 1) + ' ' + esc(fmtPx(tp)) + '</span>';
+        }).join('');
+        var extraBadge = isHq
+          ? '<span class="badge badge-warn">High Quality</span>'
+          : (idea.telegram_sent
+            ? '<span class="badge badge-none" title="Also sent as a Telegram DM">DM</span>'
+            : '<span class="badge badge-warn" title="Minted but not DMed — Telegram rate cap">feed only</span>');
+        var conf = fmtConf(idea.confidence);
+        var sleeve = '';
+        if (isHq && idea.notional_usd != null) {
+          sleeve = '<div class="feed-levels"><span>Vault ' + esc(fmtUsd(idea.notional_usd)) +
+            ' (' + Math.round(Number(idea.deploy_pct || 0) * 100) + '% NAV)</span>' +
+            '<span>' + esc(idea.hold_horizon || 'swing') + ' hold</span></div>';
+        }
+        var sourceLabel = isHq ? 'VAULT' : (idea.source_label || idea.source);
+        return (
+          '<article class="card feed-card' + (isHq ? ' feed-card-hq' : '') + '" data-id="' + idea.id + '">' +
+            '<div class="feed-card-top">' +
+              '<div>' +
+                '<span class="badge badge-none">' + esc(sourceLabel) + '</span>' +
+                extraBadge +
+                '<span class="badge ' + dirCls + '">' + esc((idea.direction || '').toUpperCase()) + '</span>' +
+                '<strong>' + esc(idea.product_id) + '</strong>' +
+                (conf ? '<span class="sub"> · ' + esc(conf) + '</span>' : '') +
+              '</div>' +
+              '<span class="sub">' + esc(age(idea.created_at)) + '</span>' +
+            '</div>' +
+            '<h3 class="feed-title">' + esc(idea.title) + '</h3>' +
+            (idea.blurb ? '<p class="news-blurb">' + esc(idea.blurb) + '</p>' : '') +
+            '<div class="feed-levels">' +
+              '<span>Entry ' + esc(fmtPx(idea.entry)) + '</span>' +
+              '<span>SL ' + esc(fmtPx(idea.stop_loss)) + '</span>' +
+              tps +
+            '</div>' +
+            sleeve +
+            '<div class="feed-actions" data-idea="' + idea.id + '" data-rail="' + rail + '">' + actions + '</div>' +
+          '</article>'
+        );
+      }
+
+      function renderFunnel(fn) {
+        if (!fn || !fn.available) {
+          document.getElementById('fn-hint').textContent =
+            'Mill database not mounted on this host (set IDEAS_DB).';
+          return;
+        }
+        document.getElementById('fn-minted').textContent = fn.minted;
+        document.getElementById('fn-sent').textContent = fn.telegram_sent;
+        document.getElementById('fn-queued').textContent = fn.not_on_telegram;
+        document.getElementById('fn-accepts').textContent = fn.accepts;
+        document.getElementById('fn-rejects').textContent = fn.rejects;
+        document.getElementById('fn-users').textContent = fn.unique_users;
+      }
+
+      function renderVault(snap) {
+        if (!snap || !snap.policy) return;
+        var p = snap.policy;
+        document.getElementById('vq-nav').textContent = fmtUsd(snap.nav_usd);
+        document.getElementById('vq-clip').textContent = fmtUsd(p.notional_per_name_usd);
+        document.getElementById('vq-open').textContent = (snap.open_count || 0) + '/' + p.max_open;
+        document.getElementById('vq-heat').textContent = Math.round((snap.heat_pct || 0) * 100) + '%';
+        var pnlEl = document.getElementById('vq-pnl');
+        var pnl = Number(snap.realized_pnl_today || 0);
+        pnlEl.textContent = (pnl >= 0 ? '+' : '') + fmtUsd(Math.abs(pnl)).replace('$', '$');
+        pnlEl.className = 'value ' + (pnl >= 0 ? 'pos' : 'neg');
+        document.getElementById('vq-hold').textContent = p.hold_horizon || 'swing';
+        var hint = 'Critic-passed ICT only · mill excluded · 1x · follow while open.';
+        if (snap.halted) hint = 'HALTED: ' + (snap.halt_reason || 'live halt');
+        if (p.premium_gated) hint += ' Premium gate is on.';
+        document.getElementById('vq-hint').textContent = hint;
+      }
+
+      function prependInto(el, ideas, seen, rail, latestRef) {
+        for (var i = 0; i < ideas.length; i++) {
+          var idea = ideas[i];
+          if (seen[idea.id]) continue;
+          seen[idea.id] = true;
+          var wrap = document.createElement('div');
+          wrap.innerHTML = cardHtml(idea, rail);
+          var node = wrap.firstChild;
+          node.classList.add('feed-new');
+          if (el.firstChild) el.insertBefore(node, el.firstChild);
+          else el.appendChild(node);
+          if (idea.id > latestRef.value) latestRef.value = idea.id;
+        }
+      }
+
+      function renderList(el, ideas, seen, rail, emptyText, latestRef) {
+        el.innerHTML = '';
+        if (!ideas.length) {
+          el.innerHTML = '<p class="sub">' + emptyText + '</p>';
+          return;
+        }
+        var html = '';
+        for (var i = 0; i < ideas.length; i++) {
+          seen[ideas[i].id] = true;
+          if (ideas[i].id > latestRef.value) latestRef.value = ideas[i].id;
+          html += cardHtml(ideas[i], rail);
+        }
+        el.innerHTML = html;
+      }
+
+      function setStatus(text) {
+        document.getElementById('feed-status').textContent = text || '';
+      }
+
+      function loadStream(afterId) {
+        var url = '/api/ideas/stream?limit=40';
+        if (afterId) url += '&after_id=' + encodeURIComponent(afterId);
+        return fetch(url, { credentials: 'same-origin' }).then(function (r) { return r.json(); });
+      }
+
+      function loadHq(afterId) {
+        var url = '/api/vault/stream?limit=20';
+        if (afterId) url += '&after_id=' + encodeURIComponent(afterId);
+        return fetch(url, { credentials: 'same-origin' }).then(function (r) { return r.json(); });
+      }
+
+      function loadFunnel() {
+        return fetch('/api/ideas/funnel', { credentials: 'same-origin' })
+          .then(function (r) { return r.json(); })
+          .then(renderFunnel)
+          .catch(function () {});
+      }
+
+      function loadVaultSnap() {
+        return fetch('/api/vault/snapshot', { credentials: 'same-origin' })
+          .then(function (r) { return r.json(); })
+          .then(renderVault)
+          .catch(function () {});
+      }
+
+      function poll() {
+        var millRef = { value: latestId };
+        var hqRef = { value: latestHqId };
+        if (latestId) {
+          loadStream(latestId).then(function (data) {
+            signedIn = !!data.signed_in;
+            prependInto(document.getElementById('feed'), data.ideas || [], known, 'mill', millRef);
+            latestId = millRef.value;
+            setStatus(data.available === false ? 'Mill DB unavailable.' : '');
+          }).catch(function () {
+            setStatus('Feed refresh failed — retrying.');
+          });
+        }
+        loadHq(latestHqId || null).then(function (data) {
+          prependInto(document.getElementById('hq-feed'), data.ideas || [], knownHq, 'hq', hqRef);
+          latestHqId = hqRef.value || data.latest_id || latestHqId;
+        }).catch(function () {});
+        loadFunnel();
+        loadVaultSnap();
+      }
+
+      function boot() {
+        var millRef = { value: 0 };
+        var hqRef = { value: 0 };
+        Promise.all([
+          loadStream(),
+          fetch('/api/ideas/funnel', { credentials: 'same-origin' }).then(function (r) { return r.json(); }),
+          loadHq(),
+          fetch('/api/vault/snapshot', { credentials: 'same-origin' }).then(function (r) { return r.json(); })
+        ]).then(function (pair) {
+          var data = pair[0];
+          signedIn = !!data.signed_in;
+          renderList(
+            document.getElementById('feed'),
+            data.ideas || [],
+            known,
+            'mill',
+            'No sized mill ideas yet.',
+            millRef
+          );
+          latestId = data.latest_id || millRef.value;
+          renderFunnel(pair[1]);
+          var hq = pair[2] || {};
+          renderList(
+            document.getElementById('hq-feed'),
+            hq.ideas || [],
+            knownHq,
+            'hq',
+            'No HQ vault allocations yet. They appear when ICT admits a trade.',
+            hqRef
+          );
+          latestHqId = hq.latest_id || hqRef.value;
+          renderVault(pair[3]);
+          if (data.available === false) setStatus('Mill DB unavailable on this host.');
+        }).catch(function () {
+          setStatus('Could not load the idea stream.');
+        });
+      }
+
+      function bindDecisions(el) {
+        el.addEventListener('click', function (ev) {
+          var btn = ev.target.closest('[data-act]');
+          if (!btn) return;
+          var wrap = btn.closest('.feed-actions');
+          if (!wrap) return;
+          var ideaId = wrap.getAttribute('data-idea');
+          var rail = wrap.getAttribute('data-rail') || 'mill';
+          var decision = btn.getAttribute('data-act');
+          var url = rail === 'hq'
+            ? '/api/vault/' + ideaId + '/decision'
+            : '/api/ideas/' + ideaId + '/decision';
+          btn.disabled = true;
+          fetch(url, {
+            method: 'POST',
+            credentials: 'same-origin',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ decision: decision })
+          }).then(function (r) {
+            return r.json().then(function (body) {
+              return { ok: r.ok, status: r.status, body: body };
+            });
+          }).then(function (res) {
+            if (res.status === 401) {
+              wrap.innerHTML = '<span class="sub">Open this page from Telegram (Idea feed) to vote.</span>';
+              signedIn = false;
+              return;
+            }
+            if (!res.ok) {
+              wrap.innerHTML = '<span class="sub">' + esc((res.body && (res.body.detail || res.body.message)) || 'Could not record') + '</span>';
+              return;
+            }
+            var status = res.body.status;
+            var decided = res.body.decision;
+            if (status === 'duplicate') {
+              wrap.innerHTML = '<span class="badge badge-none">Already decided</span>';
+              return;
+            }
+            if (status === 'closed') {
+              wrap.innerHTML = '<span class="sub">No longer open to follow.</span>';
+              return;
+            }
+            wrap.innerHTML = decided === 'accept'
+              ? '<span class="badge badge-good">' + (rail === 'hq' ? 'Following' : 'Accepted') + '</span>'
+              : '<span class="badge badge-none">Rejected</span>';
+            if (rail === 'mill') loadFunnel();
+            else loadVaultSnap();
+          }).catch(function () {
+            btn.disabled = false;
+            setStatus('Decision failed — try again.');
+          });
+        });
+      }
+
+      bindDecisions(document.getElementById('feed'));
+      bindDecisions(document.getElementById('hq-feed'));
+      boot();
+      setInterval(poll, POLL_MS);
+    })();
+  </script>
+</body>
+</html>

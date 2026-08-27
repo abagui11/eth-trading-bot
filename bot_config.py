@@ -114,10 +114,12 @@ WATCHDOG_LIVE_META_KEY = "watchdog_live_enabled"
 # clips physically cannot fill on US futures. BTC mill ideas still skip
 # (1 contract = 0.01 BTC ≈ $800 > sleeve appetite). With the $400 sleeve and
 # the 1x exposure cap, at most ONE mill position is open at a time.
+# When a clip closes, that capital is free for the next mint. Capital (sleeve
+# + open count + daily loss) is the limiter — not a daily fill count.
 LIVE_MILL_SLEEVE_USD = 400.0
 LIVE_MILL_NOTIONAL_USD = 260.0       # per idea (≈ 1 nano ETH contract)
 LIVE_MILL_MAX_OPEN = 2
-LIVE_MILL_MAX_FILLS_PER_DAY = 2
+LIVE_MILL_MAX_FILLS_PER_DAY = 0      # 0 = no daily fill cap
 LIVE_MILL_DAILY_LOSS_LIMIT_USD = 80.0
 
 # Macro headline context (RSS + webhook advisory layer).

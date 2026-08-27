@@ -3,7 +3,7 @@
 > Single source of truth for architecture and status of the Telegram trading bot.
 > See **Documentation maintenance** below — update this file (and related deploy docs) whenever behaviour changes.
 
-**Last updated:** 2026-07-25
+**Last updated:** 2026-08-27
 
 ---
 
@@ -273,7 +273,7 @@ Legend: ✅ done · 🟡 in progress · 🔧 needs work · ⬜ planned · ⚠️
 | Personal books | `user_books.py` | ✅ | open-account sizes; offers; Accept/Reject/expire; late-join; user SL/TP; `/me` tokens; `display_summary` on offers |
 | Telegram beta UI | `bot.py`, `telegram_ui.py`, `display_summary.py` | ✅ | Open account / My Metrics / My book / Journal / Research; trade Yes/No/Join/See more; concise cards (deterministic blurb by default) |
 | Decision chart | `charts.build_decision_chart` | ✅ | clean candles + red SL / green TP1 bands with % annotations; source/SL/TP-reference-aware M5 history (up to 300 bars) |
-| Dashboard | `dashboard/` | ✅ | public agent journal + participation aggregates; `/me` personal ledger |
+| Dashboard | `dashboard/` | ✅ | Intelligence hub: Brain (vision) · Trading Log (HQ live + paper) · Yield Generation · Trade mill (idea stream + nano-ETH live clip). Consumer `/feed` + `/me` |
 | Live execution | `execute.py` | ⬜ | shadow/live path not built |
 | OHLC history cache | `ohlc_cache.py` | ✅ | research/backfill; ETH+BTC H1/D1; not hot path |
 | Legacy scheduler | `scheduler.py` | ⚠️ | deprecated; use `main.py` |
@@ -344,6 +344,15 @@ Defaults from `bot_config.py` (non-secret tunables). Secrets and portfolio size 
 | `FUNDING_SWITCH_CONFIRM_PERIODS` | see `bot_config` | prints required to confirm a first switch (chop is suppressed) |
 | `LONG_THESIS_ENABLED` | `True` | daily BTC 4-year-cycle thesis + annotated chart |
 | `LONG_THESIS_INTERVAL_SEC` | `86400` | long thesis refresh cadence |
+| `LIVE_HQ_EQUITY_USD` | `2000.0` | HQ ICT live margin sleeve |
+| `LIVE_TRADE_DEPLOY_PCT` | `0.50` | 50% of HQ sleeve per idea ($1,000) |
+| `LIVE_MAX_OPEN_HQ` | `2` | skip new HQ live ideas when full |
+| `LIVE_DAILY_LOSS_LIMIT_USD` | `160.0` | HQ live halt until next UTC day |
+| `LIVE_MILL_SLEEVE_USD` | `400.0` | mill live clip sleeve (same Coinbase account, partitioned) |
+| `LIVE_MILL_NOTIONAL_USD` | `260.0` | mill live notional per idea (≈ 1 nano ETH) |
+| `LIVE_MILL_MAX_OPEN` | `2` | mill live open-position cap |
+| `LIVE_MILL_MAX_FILLS_PER_DAY` | `0` | mill live daily fill cap; `0` = none (sleeve / open / daily loss still bind). Closed clips free the slot for the next mint |
+| `LIVE_MILL_DAILY_LOSS_LIMIT_USD` | `80.0` | mill live halt until next UTC day |
 
 ---
 
@@ -359,6 +368,8 @@ Defaults from `bot_config.py` (non-secret tunables). Secrets and portfolio size 
 
 | Date | Change |
 |---|---|
+| 2026-08-27 | Mill live daily fill cap default **off** (`LIVE_MILL_MAX_FILLS_PER_DAY=0`). Capital is the limiter: when a mill clip closes, the next sized ETH mint can take the sleeve. Daily loss halt and 1x / one-open-at-a-time still apply. |
+| 2026-08-27 | Dashboard hub is four product tabs: **Brain** (vision/intelligence), **Trading Log** (HQ live + paper only), **Yield Generation**, **Trade mill** (consumer idea stream + internal nano-ETH live clip book, funnel, house mill paper). `/feed` remains the Telegram consumer page for Accept/Reject. HQ live P&L on Trading Log is no longer blended with mill clips. |
 | 2026-08-10 | **Republic Intelligence layer.** This service becomes the always-on intelligence hub feeding two consumers. New `intelligence/` package: wall-clock hourly BTC/ETH stances on H4/H1/M15 (Claude with a deterministic fallback so an artifact always lands), perp funding regime tracker (persistent bull/bear vs chop, first-switch cue), and a daily BTC 4-year-cycle thesis with annotated log chart + gold ratio. New versioned `/api/v1` router (`dashboard/intel_api.py`): stances, history, macro/zmove/funding signals, subscribers, gated HQ ideas, cycle chart — **token-only via `SERVICE_API_TOKENS`, fails closed with 503 when unset**. HQ ICT cards gated to `INTERNAL_TELEGRAM_IDS` (`HQ_IDEAS_INTERNAL_ONLY`); the ICT propose/validate/critic/audit logic and all ledger/paper writes are unchanged, so dashboard performance tracking still sees every HQ idea. New `trade_ideas_bridge.py` + `idea:accept|reject` branch in `bot.py` records the colocated mill's card decisions (the mill shares this bot's token send-only; this process owns `getUpdates`). Consumers: `yield_gen_bot` (HTF posture panel) and the `trade_ideas` mill (public volume lane). |
 | 2026-07-25 | Token-cost controls: `INCLUDE_PATTERN_IMAGES=False` (no reference PNGs on vision calls); `ANTHROPIC_MODEL_FAST` (Haiku) for macro classify/pulse, display summary, and LLM critic; `RUN_LLM_CRITIC_PRE_BROADCAST=False`, `MAX_REFINE_PASSES=1`; `USE_LLM_DISPLAY_SUMMARY=False`; overlay legend moved into cached system prompt; `anthropic_usage` log lines on Claude calls. |
 | 2026-07-23 | `/research asian_session` — BTC/ETH Asian session (21:00–04:00 ET) net-change windows for 2 weeks / 4 weeks / 2 months from live Coinbase H1; NL keywords route “asian session” asks out of freeform chat; default product BTC. |

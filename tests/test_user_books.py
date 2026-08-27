@@ -153,6 +153,10 @@ class UserBooksTests(unittest.TestCase):
         self.assertIsNotNone(url)
         assert url is not None
         self.assertTrue(url.startswith("https://dash.example/me?t="))
+        feed = user_books.feed_url(55)
+        self.assertIsNotNone(feed)
+        assert feed is not None
+        self.assertTrue(feed.startswith("https://dash.example/feed?t="))
 
     def test_missed_connection_idempotent_flag(self) -> None:
         user_books.open_paper_account(8, 1000.0)

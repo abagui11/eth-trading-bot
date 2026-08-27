@@ -94,6 +94,25 @@ class IdeaCallbackTests(unittest.TestCase):
             asyncio.run(bot_mod.on_callback(update, context))
         record.assert_not_called()
 
+    def test_feed_callback_sends_magic_link(self) -> None:
+        import bot as bot_mod
+
+        update, context = _update_for("ui:feed")
+        with (
+            patch.object(bot_mod.access, "register_user"),
+            patch.object(bot_mod.access, "is_allowed", return_value=True),
+            patch.object(
+                bot_mod.user_books,
+                "feed_url",
+                return_value="https://dash.example/feed?t=abc",
+            ),
+        ):
+            asyncio.run(bot_mod.on_callback(update, context))
+        context.bot.send_message.assert_awaited_once()
+        text = context.bot.send_message.await_args.args[1]
+        self.assertIn("https://dash.example/feed?t=abc", text)
+        self.assertIn("Idea feed", text)
+
 
 if __name__ == "__main__":
     unittest.main()

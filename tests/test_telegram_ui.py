@@ -35,6 +35,8 @@ class TelegramUiTests(unittest.TestCase):
         self.assertEqual(journal.url, "https://dash.example")
         my_book = next(button for button in buttons if button.text == "My book")
         self.assertEqual(my_book.callback_data, "ui:mybook")
+        feed = next(button for button in buttons if button.text == "Idea feed")
+        self.assertEqual(feed.callback_data, "ui:feed")
 
     def test_format_open_account_result(self) -> None:
         success = format_open_account_result(

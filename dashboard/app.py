@@ -62,6 +62,35 @@ class WatchdogExecuteBody(BaseModel):
     enabled: bool
 
 
+class IdeaDecisionBody(BaseModel):
+    decision: str
+
+
+def _resolve_telegram_id(request: Request) -> int | None:
+    token = request.query_params.get("t")
+    if token:
+        telegram_id = user_books.verify_me_token(token)
+        if telegram_id is not None:
+            return telegram_id
+    cookie = request.cookies.get(_ME_COOKIE)
+    if cookie:
+        return user_books.verify_me_token(cookie)
+    return None
+
+
+def _set_session_cookie(response: Response, request: Request, telegram_id: int) -> None:
+    token = request.query_params.get("t")
+    if not token or user_books.verify_me_token(token) != telegram_id:
+        return
+    response.set_cookie(
+        key=_ME_COOKIE,
+        value=user_books.create_session_token(telegram_id),
+        httponly=True,
+        max_age=config.ME_SESSION_TTL_SEC,
+        samesite="lax",
+    )
+
+
 def create_app() -> FastAPI:
     app = FastAPI(title="ETH/BTC Trading Agent Dashboard", docs_url=None, redoc_url=None)
 
@@ -72,6 +101,9 @@ def create_app() -> FastAPI:
     user_books.init_db()
     intel_store.init_db()
     live_ledger.init_db()
+    import vault as hq_vault
+
+    hq_vault.init_db()
 
     app.include_router(intel_router)
 
@@ -90,6 +122,9 @@ def create_app() -> FastAPI:
 
     @app.get("/", response_class=HTMLResponse)
     async def index(request: Request) -> HTMLResponse:
+        import trade_ideas_bridge
+
+        mill_paper = trade_ideas_bridge.volume_book_payload(limit=12)
         return templates.TemplateResponse(
             request,
             "index.html",
@@ -102,11 +137,19 @@ def create_app() -> FastAPI:
                 "archived_trades": data.get_archived_trades_payload(limit=15),
                 "macro": data.get_macro_payload(),
                 "brain": get_brain_payload(),
-                # Dashboard shows the HQ sleeve only; mill fills are checked
-                # via the Telegram /performance command.
                 "live_open": live_ledger.get_open_trades(source="hq"),
                 "live_closed": live_ledger.get_closed_trades(limit=15, source="hq"),
+                "mill_open": live_ledger.get_open_trades(source="mill"),
+                "mill_closed": live_ledger.get_closed_trades(limit=20, source="mill"),
                 "live_performance": live_ledger.get_live_performance(),
+                "mill_policy": {
+                    "sleeve_usd": bot_config.LIVE_MILL_SLEEVE_USD,
+                    "notional_usd": bot_config.LIVE_MILL_NOTIONAL_USD,
+                    "max_open": bot_config.LIVE_MILL_MAX_OPEN,
+                    "max_fills_per_day": bot_config.LIVE_MILL_MAX_FILLS_PER_DAY,
+                    "daily_loss_limit_usd": bot_config.LIVE_MILL_DAILY_LOSS_LIMIT_USD,
+                },
+                "mill_paper": mill_paper or {"available": False},
                 "yield_enabled": bool(config.YIELD_GEN_API_URL),
                 "yield_dashboard_url": config.YIELD_GEN_DASHBOARD_URL,
             },
@@ -179,16 +222,139 @@ def create_app() -> FastAPI:
             {"book": book or {"available": False}},
         )
 
+    @app.get("/feed", response_class=HTMLResponse)
+    async def idea_feed(request: Request) -> HTMLResponse:
+        """Public mill stream — same cards for every visitor; Accept needs login."""
+        telegram_id = _resolve_telegram_id(request)
+        response = templates.TemplateResponse(
+            request,
+            "feed.html",
+            {
+                "signed_in": telegram_id is not None,
+                "telegram_id": telegram_id,
+            },
+        )
+        if telegram_id is not None:
+            _set_session_cookie(response, request, telegram_id)
+        return response
+
+    @app.get("/api/ideas/stream")
+    async def api_idea_stream(
+        request: Request, limit: int = 40, after_id: int | None = None
+    ) -> dict:
+        import trade_ideas_bridge
+
+        telegram_id = _resolve_telegram_id(request)
+        payload = trade_ideas_bridge.idea_stream(
+            limit=min(max(limit, 1), 100),
+            after_id=after_id,
+            user_id=telegram_id,
+        )
+        if payload is None:
+            return {
+                "available": False,
+                "ideas": [],
+                "latest_id": 0,
+                "signed_in": telegram_id is not None,
+            }
+        payload["signed_in"] = telegram_id is not None
+        return payload
+
+    @app.get("/api/ideas/funnel")
+    async def api_idea_funnel() -> dict:
+        import trade_ideas_bridge
+
+        payload = trade_ideas_bridge.idea_funnel()
+        if payload is None:
+            return {"available": False}
+        return payload
+
+    @app.post("/api/ideas/{idea_id}/decision")
+    async def api_idea_decision(
+        request: Request, idea_id: int, body: IdeaDecisionBody
+    ) -> dict:
+        import access
+        import trade_ideas_bridge
+
+        telegram_id = _resolve_telegram_id(request)
+        if telegram_id is None:
+            raise HTTPException(
+                status_code=401,
+                detail="Open the feed from Telegram (Idea feed button) to Accept or Reject.",
+            )
+        if not access.is_allowed(telegram_id):
+            raise HTTPException(status_code=403, detail="Not authorized.")
+        if body.decision not in ("accept", "reject"):
+            raise HTTPException(status_code=422, detail="decision must be accept or reject")
+        status = trade_ideas_bridge.record_decision(
+            int(idea_id), telegram_id, body.decision
+        )
+        if status == "unavailable":
+            raise HTTPException(status_code=503, detail="Idea book unavailable.")
+        if status == "unknown_idea":
+            raise HTTPException(status_code=404, detail="Idea not found.")
+        return {
+            "ok": status == "recorded",
+            "status": status,
+            "decision": body.decision,
+            "idea_id": int(idea_id),
+            "message": trade_ideas_bridge.format_decision_reply(
+                status, body.decision, int(idea_id)
+            ),
+        }
+
+    @app.get("/api/vault/snapshot")
+    async def api_vault_snapshot() -> dict:
+        import vault as hq_vault
+
+        return hq_vault.snapshot()
+
+    @app.get("/api/vault/stream")
+    async def api_vault_stream(
+        request: Request, limit: int = 20, after_id: int | None = None
+    ) -> dict:
+        import vault as hq_vault
+
+        telegram_id = _resolve_telegram_id(request)
+        payload = hq_vault.stream(
+            limit=min(max(limit, 1), 50),
+            after_id=after_id,
+            user_id=telegram_id,
+        )
+        payload["signed_in"] = telegram_id is not None
+        return payload
+
+    @app.post("/api/vault/{allocation_id}/decision")
+    async def api_vault_decision(
+        request: Request, allocation_id: int, body: IdeaDecisionBody
+    ) -> dict:
+        import access
+        import vault as hq_vault
+
+        telegram_id = _resolve_telegram_id(request)
+        if telegram_id is None:
+            raise HTTPException(
+                status_code=401,
+                detail="Open the feed from Telegram (Idea feed button) to follow vault allocations.",
+            )
+        if not access.is_allowed(telegram_id):
+            raise HTTPException(status_code=403, detail="Not authorized.")
+        if body.decision not in ("accept", "reject"):
+            raise HTTPException(status_code=422, detail="decision must be accept or reject")
+        spots = data.get_live_spots()
+        result = hq_vault.follow(
+            int(allocation_id),
+            telegram_id,
+            body.decision,
+            spots=spots.get("spots") if isinstance(spots, dict) else spots,
+        )
+        if result["status"] == "unknown_idea":
+            raise HTTPException(status_code=404, detail="Vault allocation not found.")
+        return result
+
     @app.get("/me", response_class=HTMLResponse)
     async def me(request: Request) -> Response:
-        telegram_id: int | None = None
-        token = request.query_params.get("t")
-        if token:
-            telegram_id = user_books.verify_me_token(token)
-        if telegram_id is None:
-            cookie = request.cookies.get(_ME_COOKIE)
-            if cookie:
-                telegram_id = user_books.verify_me_token(cookie)
+        telegram_id = _resolve_telegram_id(request)
         if telegram_id is None:
             return templates.TemplateResponse(
                 request,
@@ -218,14 +384,7 @@ def create_app() -> FastAPI:
             "me.html",
             {"authorized": True, "me": payload, "error": None},
         )
-        if token:
-            response.set_cookie(
-                key=_ME_COOKIE,
-                value=user_books.create_session_token(telegram_id),
-                httponly=True,
-                max_age=config.ME_SESSION_TTL_SEC,
-                samesite="lax",
-            )
+        _set_session_cookie(response, request, telegram_id)
         return response
 
     @app.get("/api/spot")

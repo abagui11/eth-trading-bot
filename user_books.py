@@ -917,6 +917,50 @@ def accept_offer(
     return result
 
 
+def open_from_vault(
+    telegram_id: int,
+    *,
+    allocation_id: int,
+    cycle_id: str,
+    suggestion: Suggestion,
+    spots: dict[str, float] | None = None,
+) -> dict:
+    """Size a personal paper clip from an admitted HQ vault allocation.
+
+    Uses the user's demo equity × TRADE_DEPLOY_PCT (personal scale). House vault
+    notional is a separate sleeve and is never pulled from user cash.
+    """
+    init_db()
+    if get_account(telegram_id) is None:
+        return {"ok": False, "reason": "no_account"}
+    if suggestion.entry is None or suggestion.stop_loss is None:
+        return {"ok": False, "reason": "missing_levels"}
+    offer = {
+        "offer_id": f"vault:{int(allocation_id)}",
+        "cycle_id": str(cycle_id),
+    }
+    entry = float(suggestion.entry)
+    resolved = dict(spots or {})
+    resolved.setdefault(suggestion.product_id, entry)
+    with _connect() as conn:
+        result = _open_user_position(
+            conn,
+            telegram_id=telegram_id,
+            offer=offer,
+            suggestion=suggestion,
+            entry_price=entry,
+            entry_mode="vault_follow",
+            spots=resolved,
+        )
+        if not result.get("ok"):
+            conn.rollback()
+            return result
+        conn.commit()
+    result["status"] = "vault_follow"
+    result["offer_id"] = offer["offer_id"]
+    return result
+
+
 def late_join_offer(
     offer_id: str,
     telegram_id: int,
@@ -1307,6 +1351,15 @@ def me_url(telegram_id: int) -> str | None:
         return None
     token = create_me_token(telegram_id)
     return f"{base.rstrip('/')}/me?{urlencode({'t': token})}"
+
+
+def feed_url(telegram_id: int) -> str | None:
+    """Magic link into the public idea feed, signed in as this Telegram user."""
+    base = config.DASHBOARD_PUBLIC_URL
+    if not base:
+        return None
+    token = create_me_token(telegram_id)
+    return f"{base.rstrip('/')}/feed?{urlencode({'t': token})}"
 
 
 def create_session_token(telegram_id: int) -> str:

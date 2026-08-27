@@ -179,52 +179,67 @@ def _execute(
         logger.warning("Live skip: no instrument mapping for %s", product_id)
         return None
 
-    open_trades = live_ledger.get_open_trades(source=source)
-    max_open = (
-        bot_config.LIVE_MAX_OPEN_HQ if source == "hq" else bot_config.LIVE_MILL_MAX_OPEN
-    )
-    if len(open_trades) >= max_open:
-        logger.info("Live skip: %s sleeve full (%d open)", source, len(open_trades))
-        return None
-
-    # One live position per M5 order block: the paper book fills an idea in
-    # two tranches (0.25 / 0.50), but live takes the idea ONCE at full size.
-    ob_ref = suggestion.order_block_ref
-    if ob_ref and any((t.get("notes") or "") == f"ob:{ob_ref}" for t in open_trades):
-        logger.info("Live skip: already live on OB %s", ob_ref)
-        return None
-
-    if source == "mill":
-        fills = live_ledger.get_meta(_MILL_FILLS_KEY) or ""
-        date, _, count_raw = fills.partition(":")
-        count = int(count_raw) if date == _today() and count_raw.isdigit() else 0
-        if count >= bot_config.LIVE_MILL_MAX_FILLS_PER_DAY:
-            logger.info("Live skip: mill daily fill cap reached")
-            return None
-
     side = "long" if suggestion.action in ("deriv_buy", "spot_buy") else "short"
     entry = suggestion.entry or spot_price
-    notional = _live_notional_usd(source)
+    ob_ref = suggestion.order_block_ref
 
-    # 1x cap: total sleeve exposure (open + new) must stay ≤ sleeve × leverage.
-    sleeve = (
-        bot_config.LIVE_HQ_EQUITY_USD
-        if source == "hq"
-        else bot_config.LIVE_MILL_SLEEVE_USD
-    )
-    open_notional = sum(
-        float(t["qty"]) * float(t["entry"]) for t in open_trades
-    )
-    if open_notional + notional > sleeve * bot_config.LIVE_MAX_LEVERAGE:
-        logger.info(
-            "Live skip: %s exposure %.0f + %.0f exceeds %.0f×%.1fx",
-            source, open_notional, notional, sleeve, bot_config.LIVE_MAX_LEVERAGE,
+    if source == "hq":
+        import vault
+
+        cid = str(cycle_id or "")
+        alloc = vault.get_by_cycle(cid) if cid else None
+        if alloc is None:
+            alloc = vault.take(
+                suggestion,
+                cycle_id=cid or f"hq-{_today()}",
+                spot=spot_price,
+            )
+        if not alloc.get("admitted"):
+            logger.info("Vault skip: %s", alloc.get("skip_reason"))
+            return None
+        notional = float(alloc["notional_usd"])
+        qty = float(alloc["qty"] or 0)
+        if qty <= 0:
+            return None
+        open_trades = live_ledger.get_open_trades(source="hq")
+        if ob_ref and any((t.get("notes") or "") == f"ob:{ob_ref}" for t in open_trades):
+            logger.info("Live skip: already live on OB %s", ob_ref)
+            return None
+    else:
+        open_trades = live_ledger.get_open_trades(source=source)
+        max_open = bot_config.LIVE_MILL_MAX_OPEN
+        if len(open_trades) >= max_open:
+            logger.info("Live skip: %s sleeve full (%d open)", source, len(open_trades))
+            return None
+
+        if ob_ref and any((t.get("notes") or "") == f"ob:{ob_ref}" for t in open_trades):
+            logger.info("Live skip: already live on OB %s", ob_ref)
+            return None
+
+        cap = bot_config.LIVE_MILL_MAX_FILLS_PER_DAY
+        if cap > 0:
+            fills = live_ledger.get_meta(_MILL_FILLS_KEY) or ""
+            date, _, count_raw = fills.partition(":")
+            count = int(count_raw) if date == _today() and count_raw.isdigit() else 0
+            if count >= cap:
+                logger.info("Live skip: mill daily fill cap reached")
+                return None
+
+        notional = _live_notional_usd(source)
+        sleeve = bot_config.LIVE_MILL_SLEEVE_USD
+        open_notional = sum(
+            float(t["qty"]) * float(t["entry"]) for t in open_trades
         )
-        return None
+        if open_notional + notional > sleeve * bot_config.LIVE_MAX_LEVERAGE:
+            logger.info(
+                "Live skip: %s exposure %.0f + %.0f exceeds %.0f×%.1fx",
+                source, open_notional, notional, sleeve, bot_config.LIVE_MAX_LEVERAGE,
+            )
+            return None
 
-    qty = _live_qty(product_id, notional, entry)
-    if qty is None:
-        return None
+        qty = _live_qty(product_id, notional, entry)
+        if qty is None:
+            return None
 
     order_payload = {
         "instrument": instrument,
