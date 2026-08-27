@@ -42,6 +42,12 @@ class ExecuteLiveTests(unittest.TestCase):
             patch.object(config, "EXECUTION_MODE", "shadow"),
             # halt_live notifies ops (Telegram/email) — keep unit tests offline.
             patch.object(execute, "_notify_ops"),
+            # Instrument resolution hits the products API — keep tests offline.
+            patch.object(
+                execute,
+                "INSTRUMENT_MAP",
+                {"ETH-USD": "ETP-20DEC30-CDE", "BTC-USD": "BIP-20DEC30-CDE"},
+            ),
         ]
         for p in self._patches:
             p.start()
@@ -84,7 +90,7 @@ class ExecuteLiveTests(unittest.TestCase):
         # $2,000 sleeve × 50% = $1,000 notional → 0.5 ETH at $2,000.
         self.assertAlmostEqual(result["notional_usd"], 1000.0)
         self.assertAlmostEqual(result["qty"], 0.5)
-        self.assertEqual(result["instrument"], "ETH_USDC-PERPETUAL")
+        self.assertEqual(result["instrument"], "ETP-20DEC30-CDE")
 
     def test_live_qty_floor_skips_dust(self) -> None:
         # Mill $80 clip on BTC at $90k → 0.00089 BTC < 0.001 floor → skip.
@@ -234,13 +240,13 @@ class ExecuteLiveTests(unittest.TestCase):
         )
         self.assertIsNone(result)
 
-    def test_mill_shadow_sizing(self) -> None:
+    def test_mill_clip_below_contract_floor_skips(self) -> None:
+        # Mill $80 clip → 0.04 ETH, below one nano contract (0.1 ETH) — the
+        # mill sleeve cannot fill on US futures until its notional is raised.
         result = execute.maybe_execute_live(
             _hq_suggestion(entry=2000.0), 2000.0, cycle_id="c1", source="mill"
         )
-        self.assertIsNotNone(result)
-        self.assertAlmostEqual(result["notional_usd"], 80.0)
-        self.assertAlmostEqual(result["qty"], 0.04)
+        self.assertIsNone(result)
 
     def test_halt_blocks_and_daily_halt_expires(self) -> None:
         execute.halt_live("daily_loss:hq:-200.00")

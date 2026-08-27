@@ -134,7 +134,7 @@ YIELD_GEN_DASHBOARD_URL: str | None = (
     _optional("YIELD_GEN_DASHBOARD_URL") or _optional("YIELD_GEN_API_URL")
 )
 
-# --- Live execution (Coinbase Deribit-powered derivatives gateway) -----------
+# --- Live execution (Coinbase US futures via Advanced Trade REST) ------------
 # off    = paper only (default, safe)
 # shadow = log the exact live order we WOULD send, place nothing
 # live   = place real orders (requires CDP key below)
@@ -146,7 +146,7 @@ if EXECUTION_MODE not in ("off", "shadow", "live"):
 # CDP API key: View + Trade permissions ONLY — never Transfer.
 COINBASE_CDP_API_KEY_NAME: str | None = _optional("COINBASE_CDP_API_KEY_NAME")
 COINBASE_CDP_PRIVATE_KEY: str | None = _optional("COINBASE_CDP_PRIVATE_KEY")
-# New Deribit-powered gateway (INTX retires 2026-09-09 — do not point at it).
+# Unused since the US-futures rework (kept so old .env files still load).
 COINBASE_DERIV_API_URL: str | None = _optional("COINBASE_DERIV_API_URL")
 
 # Critical live-execution alerts (halt / failed stop) also go out by email.

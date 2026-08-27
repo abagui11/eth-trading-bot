@@ -90,7 +90,7 @@ WATCHDOG_ALLOW_SHORTS = False
 # Scale-in only when unrealized P&L >= this multiple of 1R (entry→stop distance).
 SCALE_IN_MIN_R = 0.5
 
-# --- Live execution sleeves (Coinbase perps via the Deribit gateway) ----------
+# --- Live execution sleeves (Coinbase US futures — CDE nano contracts) --------
 # All LIVE_* values are live-only. Paper sizing (TRADE_DEPLOY_PCT=0.25,
 # PRODUCT_QTY_CAPS) is untouched — never reuse paper equity for live size.
 LIVE_HQ_EQUITY_USD = 2000.0          # HQ ICT margin sleeve
@@ -99,11 +99,11 @@ LIVE_MAX_OPEN_HQ = 2                 # skip new ideas when full (no FIFO kill)
 LIVE_DAILY_LOSS_LIMIT_USD = 160.0    # 8% of sleeve → halt until next UTC day
 LIVE_MAX_LEVERAGE = 1.0              # notional ≤ sleeve × 1 (1x; hard cap 2x)
 LIVE_SCALE_IN_ENABLED = False        # 0.718 adds are paper-only on live
-# Live qty floors per product — PRODUCT_QTY_CAPS mins (ETH 0.25 ≈ $1,100) are
-# LARGER than a $1,000 live clip, so live uses its own floors.
+# Live qty floors per product = one CDE nano contract (orders are whole
+# contracts; anything smaller cannot execute). ETH 0.1 ≈ $250, BTC 0.01 ≈ $800.
 LIVE_PRODUCT_QTY_FLOORS: dict[str, float] = {
-    "ETH-USD": 0.02,
-    "BTC-USD": 0.001,
+    "ETH-USD": 0.1,
+    "BTC-USD": 0.01,
 }
 # Watchdog live execution is gated separately from paper execute.
 WATCHDOG_LIVE_ENABLED = False

@@ -1,4 +1,8 @@
-"""Live execution for HQ ICT and mill ideas — Coinbase perps (Deribit gateway).
+"""Live execution for HQ ICT and mill ideas — Coinbase US futures (CDE).
+
+Fills route to CFTC-regulated CDE nano futures via the Advanced Trade REST
+API (see coinbase_deriv.py). Orders are whole contracts (0.1 ETH / 0.01 BTC),
+so actual filled size can be smaller than the requested notional.
 
 Design rules (non-negotiable):
   - ICT propose → validate → critic → stop math is UNCHANGED. This module only
@@ -251,10 +255,12 @@ def _execute(
         logger.error("Live entry rejected: %s", exc)
         return None
 
-    fill_price = float(
-        ((order or {}).get("order") or {}).get("average_price") or entry
-    )
-    order_id = str(((order or {}).get("order") or {}).get("order_id") or "")
+    order_info = (order or {}).get("order") or {}
+    fill_price = float(order_info.get("average_price") or entry)
+    order_id = str(order_info.get("order_id") or "")
+    # Contract flooring means the real fill can be smaller than requested —
+    # stop and ledger must use the actual filled quantity.
+    qty = float(order_info.get("filled_qty") or qty)
 
     # Stop first, questions later: reject → flatten + halt.
     try:
@@ -386,47 +392,48 @@ def _notify_ops(message: str) -> None:
 # ---------------------------------------------------------------------------
 
 def smoke_test(place_order: bool = False) -> int:
-    """Auth → instruments → account summary; optionally a $10 round-trip."""
+    """Auth → instruments → balances; optionally a 1-contract round-trip."""
     logging.basicConfig(level=logging.INFO, format="%(levelname)s %(message)s")
     gw = get_gateway()
 
     print(f"Gateway: {gw.base_url}")
-    print("1) public/auth token exchange…", end=" ")
+    print("1) key_permissions auth check…", end=" ")
     gw.auth_check()
     print("OK")
 
-    print("2) public/get_instruments…", end=" ")
-    instruments = gw.get_instruments("USDC")
+    print("2) futures products…", end=" ")
+    instruments = gw.get_instruments()
     names = {i.get("instrument_name") for i in instruments}
     for want in INSTRUMENT_MAP.values():
         status = "OK" if want in names else "MISSING"
         print(f"\n   {want}: {status}", end="")
     print()
 
-    print("3) private/get_account_summary…", end=" ")
-    summary = gw.get_account_summary("USDC")
+    print("3) futures balance summary…", end=" ")
+    summary = gw.get_account_summary()
     print(
-        f"OK — equity {summary.get('equity')} USDC, "
-        f"available {summary.get('available_funds')}"
+        f"OK — equity {summary.get('equity')} USD, "
+        f"buying power {summary.get('available_funds')}"
     )
 
     if not place_order:
-        print("\nDry smoke passed. Re-run with --order for the $10 round-trip.")
+        print("\nDry smoke passed. Re-run with --order for a 1-contract round-trip.")
         return 0
 
+    # Smallest possible live test: one nano ETH contract (0.1 ETH ≈ $250).
     instrument = INSTRUMENT_MAP["ETH-USD"]
     ticker = gw.get_ticker(instrument)
     mark = float(ticker.get("mark_price") or 0)
     if mark <= 0:
         print("No mark price — aborting order test.")
         return 1
-    qty = round(10.0 / mark, 6)
+    qty = gw.contract_size(instrument)
     stop_px = round(mark * 0.98, 2)
-    print(f"4) $10 test order: buy {qty} {instrument} @ market (mark {mark})")
+    print(f"4) 1-contract test: buy {qty} {instrument} @ market (mark {mark})")
     gw.place_market_order(
         instrument=instrument, side="buy", amount=qty, label="smoke-entry"
     )
-    print(f"5) reduce-only stop @ {stop_px}")
+    print(f"5) resting stop @ {stop_px}")
     gw.place_stop_market(
         instrument=instrument,
         side="sell",
