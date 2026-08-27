@@ -690,6 +690,85 @@ class PaperPositionTests(unittest.TestCase):
         self.assertEqual(archived_book["epoch_label"], "legacy_test")
         self.assertEqual(archived_book["starting_usd"], 5000.0)
 
+    def test_trim_trades_opened_before_reverses_july_pnl(self) -> None:
+        paper.update(
+            Suggestion(
+                action="deriv_buy",
+                size=1000.0,
+                entry=2000.0,
+                stop_loss=1900.0,
+                take_profits=[2200.0],
+                risk_reward=2.0,
+                rationale="july loser",
+                product_id="ETH-USD",
+            ),
+            spot_price=2000.0,
+            cycle_id="july_open",
+        )
+        paper.update(
+            Suggestion.no_trade("stop"),
+            spot_price=1900.0,
+            cycle_id="july_close",
+        )
+        paper.update(
+            Suggestion(
+                action="deriv_buy",
+                size=1000.0,
+                entry=2500.0,
+                stop_loss=2400.0,
+                take_profits=[2700.0],
+                risk_reward=2.0,
+                rationale="august winner",
+                product_id="ETH-USD",
+            ),
+            spot_price=2500.0,
+            cycle_id="aug_open",
+        )
+        paper.update(
+            Suggestion.no_trade("tp"),
+            spot_price=2700.0,
+            cycle_id="aug_close",
+        )
+        import sqlite3
+
+        with sqlite3.connect(config.LEDGER_DB) as conn:
+            conn.execute(
+                "UPDATE paper_trades SET ts = '2026-07-15T12:00:00Z' "
+                "WHERE cycle_id IN ('july_open', 'july_close')"
+            )
+            conn.execute(
+                "UPDATE paper_trades SET ts = '2026-08-10T12:00:00Z' "
+                "WHERE cycle_id IN ('aug_open', 'aug_close')"
+            )
+            conn.execute(
+                "UPDATE paper_positions SET opened_at = '2026-07-15T12:00:00Z' "
+                "WHERE open_cycle_id = 'july_open'"
+            )
+            conn.execute(
+                "UPDATE paper_positions SET opened_at = '2026-08-10T12:00:00Z' "
+                "WHERE open_cycle_id = 'aug_open'"
+            )
+            conn.commit()
+
+        before = paper.get_closed_trades(limit=20)
+        self.assertEqual(len(before), 2)
+        july_pnl = sum(
+            float(t["realized_pnl_usd"])
+            for t in before
+            if str(t.get("opened_at") or "").startswith("2026-07")
+        )
+        cash_before = float(paper.get_state()["cash_usd"])
+
+        summary = paper.trim_trades_opened_before("2026-08-01T00:00:00Z")
+        self.assertEqual(summary["dropped_closed"], 1)
+        after = paper.get_closed_trades(limit=20)
+        self.assertEqual(len(after), 1)
+        self.assertTrue(str(after[0]["opened_at"]).startswith("2026-08"))
+        cash_after = float(paper.get_state()["cash_usd"])
+        self.assertAlmostEqual(cash_after, cash_before - july_pnl, places=2)
+        epoch = paper.get_epoch_info()
+        self.assertEqual(epoch["epoch_started_at"], "2026-08-01T00:00:00Z")
+
 
 class PairClosedTradesTests(unittest.TestCase):
     """_pair_closed_trades is pure — feed it ledger rows directly."""

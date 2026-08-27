@@ -709,13 +709,13 @@
     </section>
     {% endif %}
 
-    <section class="card">
+    <section class="card journal-card">
       <h2>Eva paper book · v2 (live)</h2>
-      <p class="sub" style="margin-bottom:10px">
+      <p class="sub journal-intro">
         Paper book v2 — the same Eva paper version that is currently live.
         House/agent reference book, not subscriber capital. Live Coinbase fills are in the Eva live book above.
       </p>
-      <div class="metrics">
+      <div class="metrics" style="margin-bottom:10px">
         <div class="metric">
           <div class="label">Equity</div>
           <div class="value">${{ "%.2f"|format(performance.equity_usd) }}</div>
@@ -753,7 +753,7 @@
           </div>
         </div>
       </div>
-      <p class="sub" style="margin-top:10px">
+      <p class="sub" style="margin-bottom:10px">
         ${{ "%.0f"|format(performance.starting_usd) }} start
         {% if performance.epoch.epoch_label %}({{ performance.epoch.epoch_label }}){% endif %}
         · {{ performance.closed_trade_count }} closed · {{ performance.open_count }} open
@@ -773,14 +773,7 @@
         · epoch since {{ performance.epoch.epoch_started_at }}
         {% endif %}
       </p>
-    </section>
-
-    {% if positions or closed_trades %}
-    <section class="card journal-card">
-      <h2>Paper journal · v2</h2>
-      <p class="sub journal-intro">
-        Simulated fills for the live v2 book — excluded from Eva live P&amp;L above.
-      </p>
+      {% if positions or closed_trades %}
       <button type="button" class="load-more" id="paper-journal-toggle" aria-expanded="false">Show paper journal</button>
       <div id="paper-journal-body" hidden>
 
@@ -803,8 +796,10 @@
       <button type="button" class="load-more" id="load-more-closed" data-offset="{{ closed_trades|length }}">Load more closed trades</button>
       {% endif %}
       </div>
+      {% else %}
+      <p class="sub">No v2 paper trades to list.</p>
+      {% endif %}
     </section>
-    {% endif %}
 
     {% if archived_performance.available or archived_trades %}
     <section class="card journal-card journal-archived">

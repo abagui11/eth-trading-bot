@@ -278,6 +278,10 @@ class DashboardUiSmokeTests(unittest.TestCase):
         self.assertIn("ICT decisions Eva makes", html)
         self.assertIn("Eva paper book · v2", html)
         self.assertIn("currently live", html)
+        self.assertIn("id=\"paper-journal-toggle\"", html)
+        self.assertIn("id=\"paper-journal-body\" hidden", html)
+        self.assertIn("Show paper journal", html)
+        self.assertNotIn("Paper journal · v2", html)
         mill_card = html.split('id="mill-clip-card"', 1)[1].split("</section>", 1)[0]
         self.assertIn("nano ETH", mill_card)
         self.assertIn("/feed", mill_card)

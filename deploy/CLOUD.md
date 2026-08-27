@@ -100,6 +100,8 @@ For the beta, keep `PAYWALL_ENABLED=false`. Anyone with the bot link can send `/
 
 Optional: set `ME_TOKEN_SECRET` in `.env` for `/me` HMAC links (defaults to `TELEGRAM_BOT_TOKEN` if unset).
 
+Live Coinbase (CDE nano futures) needs `EXECUTION_MODE=live` and a CDP key. **Always double-quote** `COINBASE_CDP_PRIVATE_KEY` — systemd `EnvironmentFile` mangles unquoted `\n` in a PEM (it strips the backslash). `config.py` also re-reads that key from `.env` so a mangled process env cannot win. Restart `eth-agent` and `eth-dashboard` after any `.env` edit.
+
 **Open account** creates a personal demo paper book ($500 / $1,000 / $2,500 once). Demo capital — not real funding. Legacy users who Funded before are migrated to a $1,000 personal account (`python deploy/migrate_personal_accounts.py`, also runs on `paper.init_db`). Trade suggestions arrive as a **concise card** (decision chart + friendly caption with Accept / Reject / **See more**). Only Accept deploys that user's cash. **See more** loads the detailed charts and full audited rationale. The public dashboard shows the **agent/house** journal plus participation aggregates; personal equity is on `/me` via **My book**.
 
 ### 6. Start the service
@@ -229,6 +231,16 @@ sudo systemctl restart eth-agent eth-dashboard
 ```
 
 This moves all `paper_trades` / `paper_positions` into archive tables (label `legacy_1k`), resets cash to $5,000, and seeds the house row in `paper_contributions`. New ETH and BTC trades use a fixed **25% of live paper equity** (`TRADE_DEPLOY_PCT`) with product-specific quantity caps. A subscriber's later **Fund** action adds a separate fake $1,000 deposit to this same book. The dashboard shows archived trades in a separate section.
+
+To drop v2 fills that opened in July 2026 (experiment start 2026-08-01) without touching v1 archive:
+
+```bash
+sudo -u ethagent /opt/eth-trading-agent/.venv/bin/python \
+  /opt/eth-trading-agent/deploy/trim_paper_july.py --dry-run
+sudo -u ethagent /opt/eth-trading-agent/.venv/bin/python \
+  /opt/eth-trading-agent/deploy/trim_paper_july.py --yes
+sudo systemctl restart eth-dashboard
+```
 
 Dry-run first (no writes):
 

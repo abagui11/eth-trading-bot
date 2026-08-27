@@ -143,6 +143,7 @@ flowchart TD
     BC -->|send|     OFFER[user_books.create_trade_offer]
     OFFER --> SUM[display_summary deterministic blurb<br/>optional LLM if USE_LLM_DISPLAY_SUMMARY]
     SUM --> BDM[notify.broadcast<br/>decision chart + concise card<br/>Accept/Reject/See more]
+    BDM --> XT[twitter_post.announce_hq<br/>same decision chart image]
 ```
 
 ---
@@ -337,7 +338,7 @@ Defaults from `bot_config.py` (non-secret tunables). Secrets and portfolio size 
 | `HQ_IDEAS_INTERNAL_ONLY` | `False` | HQ (abstention-first ICT) cards now DM **all public subscribers** with Accept/Reject and a "High Quality" title label (2026-08-12); set `True` to gate back to `INTERNAL_TELEGRAM_IDS`. Ledger + house paper book record every idea either way |
 | `DAILY_PERFORMANCE_POST_ENABLED` | `True` | once-daily performance digest ("you'd be up X%" + winner breakdown) posted as an X thread and mirrored to Telegram subscribers |
 | `DAILY_DIGEST_HOUR_UTC` | `21` | daily digest post time (UTC) |
-| `TWITTER_ENABLED` (env) | `false` | X announcement mirror for HQ cards + daily digest (OAuth 1.0a keys in `.env`; announcement-only, no Accept/Reject on X). The trade_ideas mill mirrors its broadcast idea cards with the same keys |
+| `TWITTER_ENABLED` (env) | `false` | X announcement mirror for HQ cards + daily digest (OAuth 1.0a keys in `.env`; announcement-only, no Accept/Reject on X). HQ and mill tweets attach the Telegram decision chart when it rendered. The trade_ideas mill mirrors its broadcast idea cards with the same keys |
 | `FUNDING_ENABLED` | `True` | perp funding regime tracker (Binance prints for BTC/ETH) |
 | `FUNDING_INTERVAL_SEC` | `3600` | funding refresh cadence (prints land every 8h) |
 | `FUNDING_PERSIST_PERIODS` | see `bot_config` | prints required before a regime counts as persistent |
@@ -368,6 +369,8 @@ Defaults from `bot_config.py` (non-secret tunables). Secrets and portfolio size 
 
 | Date | Change |
 |---|---|
+| 2026-08-27 | Eva paper v2: metrics + journal share one card (same layout as v1). July 2026 v2 fills trimmed so the live book / topline start 2026-08-01 (`deploy/trim_paper_july.py`). |
+| 2026-08-27 | HQ and mill X posts attach the Telegram decision-chart image (chunked `/2/media/upload`, v1.1 fallback). Text still ships if the upload fails. |
 | 2026-08-27 | Eva Trades paper journal: v2 (live) vs v1 (archived) labeled; archived list collapsed like the paper journal; both books show win rate, realized P&amp;L, avg/trade, profit factor. |
 | 2026-08-27 | Mill live daily fill cap default **off** (`LIVE_MILL_MAX_FILLS_PER_DAY=0`). Capital is the limiter: when a mill clip closes, the next sized ETH mint can take the sleeve. Daily loss halt and 1x / one-open-at-a-time still apply. |
 | 2026-08-27 | Dashboard hub is four product tabs: **Brain** (vision/intelligence), **Trading Log** (HQ live + paper only), **Yield Generation**, **Trade mill** (consumer idea stream + internal nano-ETH live clip book, funnel, house mill paper). `/feed` remains the Telegram consumer page for Accept/Reject. HQ live P&L on Trading Log is no longer blended with mill clips. |

@@ -5,10 +5,30 @@ from __future__ import annotations
 import os
 from pathlib import Path
 
-from dotenv import load_dotenv
+from dotenv import dotenv_values, load_dotenv
 
 _ENV_PATH = Path(__file__).resolve().parent / ".env"
 load_dotenv(_ENV_PATH)
+
+
+def overlay_dotenv_keys(env_path: Path, environ: dict[str, str], *keys: str) -> None:
+    """Copy selected keys from a .env file over the process environment.
+
+    systemd EnvironmentFile mangles unquoted PEM ``\\n`` sequences (it strips
+    the backslash). python-dotenv will not override variables systemd already
+    injected, so live JWT signing must re-read ``COINBASE_CDP_PRIVATE_KEY``
+    from the file.
+    """
+    if not env_path.is_file():
+        return
+    file_vals = dotenv_values(env_path)
+    for key in keys:
+        raw = file_vals.get(key)
+        if raw:
+            environ[key] = raw
+
+
+overlay_dotenv_keys(_ENV_PATH, os.environ, "COINBASE_CDP_PRIVATE_KEY")
 
 _REQUIRED_KEYS = (
     "ANTHROPIC_API_KEY",

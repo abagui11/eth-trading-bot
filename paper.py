@@ -1951,6 +1951,101 @@ def update(
     return get_state()
 
 
+def trim_trades_opened_before(
+    cutoff_iso: str,
+    *,
+    new_epoch_started_at: str | None = None,
+) -> dict:
+    """Remove live-book paper trades that opened before ``cutoff_iso``.
+
+    Used to start the v2 experiment at a later date (e.g. 2026-08-01) without
+    archiving into v1. Closed-trade realized P&L is reversed out of cash;
+    still-open pre-cutoff positions return their entry notional. Metrics then
+    recompute from the remaining log.
+    """
+    init_db()
+    cutoff = str(cutoff_iso)
+    epoch_start = new_epoch_started_at or cutoff
+    with _connect() as conn:
+        state = dict(conn.execute("SELECT * FROM paper_state WHERE id = 1").fetchone())
+        cash = float(state["cash_usd"])
+        rows = [
+            dict(row)
+            for row in conn.execute("SELECT * FROM paper_trades ORDER BY id ASC")
+        ]
+        closed = _pair_closed_trades(rows)
+        dropped_closed = [
+            t for t in closed if str(t.get("opened_at") or "") < cutoff
+        ]
+        realized = sum(float(t.get("realized_pnl_usd") or 0) for t in dropped_closed)
+        cash -= realized
+
+        pos_ids: set[int] = set()
+        for row in rows:
+            if row.get("event") != "open":
+                continue
+            if str(row.get("ts") or "") >= cutoff:
+                continue
+            pid = row.get("position_id")
+            if pid is not None:
+                pos_ids.add(int(pid))
+
+        restored_open = 0.0
+        dropped_open = 0
+        for pos in list(_fetch_open_positions(conn)):
+            opened = str(pos.get("opened_at") or "")
+            if opened >= cutoff:
+                continue
+            qty = _pos_qty(pos)
+            entry = float(pos["avg_entry"])
+            restored_open += qty * entry
+            pos_ids.add(int(pos["id"]))
+            dropped_open += 1
+
+        cash += restored_open
+        trade_deleted = 0
+        if pos_ids:
+            placeholders = ",".join("?" * len(pos_ids))
+            cur = conn.execute(
+                f"DELETE FROM paper_trades WHERE position_id IN ({placeholders})",
+                tuple(pos_ids),
+            )
+            trade_deleted += int(cur.rowcount or 0)
+            conn.execute(
+                f"DELETE FROM paper_positions WHERE id IN ({placeholders})",
+                tuple(pos_ids),
+            )
+        orphan = conn.execute(
+            """
+            DELETE FROM paper_trades
+            WHERE ts < ? AND (position_id IS NULL OR position_id = 0)
+            """,
+            (cutoff,),
+        )
+        trade_deleted += int(orphan.rowcount or 0)
+
+        conn.execute(
+            """
+            UPDATE paper_state
+            SET cash_usd = ?, epoch_started_at = ?
+            WHERE id = 1
+            """,
+            (cash, epoch_start),
+        )
+        conn.commit()
+
+    return {
+        "cutoff": cutoff,
+        "dropped_closed": len(dropped_closed),
+        "dropped_open": dropped_open,
+        "trade_rows_deleted": trade_deleted,
+        "realized_reversed_usd": round(realized, 2),
+        "open_notional_restored_usd": round(restored_open, 2),
+        "cash_usd": round(cash, 2),
+        "epoch_started_at": epoch_start,
+    }
+
+
 def archive_epoch_and_reset(
     *,
     starting_usd: float | None = None,

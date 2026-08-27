@@ -63,6 +63,80 @@ def test_post_tweet_noop_when_disabled(monkeypatch):
     assert twitter_post.post_tweet("hello") is None
 
 
+def _enable_twitter(monkeypatch) -> None:
+    monkeypatch.setattr(config, "TWITTER_ENABLED", True)
+    monkeypatch.setattr(config, "TWITTER_API_KEY", "k")
+    monkeypatch.setattr(config, "TWITTER_API_SECRET", "s")
+    monkeypatch.setattr(config, "TWITTER_ACCESS_TOKEN", "t")
+    monkeypatch.setattr(config, "TWITTER_ACCESS_TOKEN_SECRET", "ts")
+    monkeypatch.setattr(twitter_post, "_oauth", lambda: None)
+
+
+class _Resp:
+    def __init__(self, status: int, payload: dict | None = None, text: str = "") -> None:
+        self.status_code = status
+        self._payload = payload or {}
+        self.text = text or str(payload or "")
+
+    def json(self) -> dict:
+        return self._payload
+
+
+def test_announce_hq_attaches_decision_chart(monkeypatch, tmp_path):
+    _enable_twitter(monkeypatch)
+    structure = tmp_path / "cycle_H4_structure.png"
+    decision = tmp_path / "cycle_M5_decision.png"
+    structure.write_bytes(b"struct")
+    decision.write_bytes(b"\x89PNG\r\n\x1a\ndecision")
+    calls: list[dict] = []
+
+    def fake_post(url, **kwargs):
+        calls.append({"url": url, **kwargs})
+        if url == twitter_post._TWEETS_URL:
+            return _Resp(201, {"data": {"id": "hq1"}})
+        params = kwargs.get("params") or {}
+        if params.get("command") == "INIT":
+            return _Resp(200, {"data": {"id": "media-dec"}})
+        if params.get("command") == "APPEND":
+            return _Resp(204)
+        if params.get("command") == "FINALIZE":
+            return _Resp(200, {"data": {"id": "media-dec"}})
+        return _Resp(500, text="unexpected")
+
+    monkeypatch.setattr(twitter_post.requests, "post", fake_post)
+    tweet_id = twitter_post.announce_hq(
+        _suggestion(),
+        summary="Bullish structure holds.",
+        chart_paths=[str(structure), str(decision)],
+    )
+    assert tweet_id == "hq1"
+    tweet_call = next(c for c in calls if c["url"] == twitter_post._TWEETS_URL)
+    assert tweet_call["json"]["media"]["media_ids"] == ["media-dec"]
+    append = next(
+        c
+        for c in calls
+        if (c.get("params") or {}).get("command") == "APPEND"
+    )
+    assert "decision" in append["files"]["media"][0]
+
+
+def test_announce_hq_text_only_when_upload_fails(monkeypatch, tmp_path):
+    _enable_twitter(monkeypatch)
+    chart = tmp_path / "cycle_decision.png"
+    chart.write_bytes(b"png")
+    bodies: list[dict] = []
+
+    def fake_post(url, **kwargs):
+        if url == twitter_post._TWEETS_URL:
+            bodies.append(kwargs.get("json") or {})
+            return _Resp(201, {"data": {"id": "hq2"}})
+        return _Resp(403, text="forbidden")
+
+    monkeypatch.setattr(twitter_post.requests, "post", fake_post)
+    assert twitter_post.announce_hq(_suggestion(), chart_paths=[str(chart)]) == "hq2"
+    assert "media" not in bodies[0]
+
+
 def _digest() -> dict:
     return {
         "total_pnl_pct": 12.4,

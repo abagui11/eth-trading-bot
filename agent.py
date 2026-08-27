@@ -283,7 +283,11 @@ def run_cycle() -> list[tuple[Suggestion, list[str]]] | None:
                         internal_only=bot_config.HQ_IDEAS_INTERNAL_ONLY,
                     )
                     # Announcement-only mirror on X (no Accept/Reject there).
-                    twitter_post.announce_hq(suggestion, summary=card_summary)
+                    twitter_post.announce_hq(
+                        suggestion,
+                        summary=card_summary,
+                        chart_paths=output_paths,
+                    )
                 else:
                     logger.info(
                         "Skipping subscriber broadcast — %s for cycle %s",
