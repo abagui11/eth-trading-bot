@@ -339,7 +339,7 @@ sudo systemctl restart eth-agent eth-dashboard
 
 The first hourly cycle may also send the one-time launch notice to subscribers.
 
-The dashboard is the intelligence hub. Four tabs: **Brain** (vision / tape / news), **Trading Log** (HQ live + house paper), **Yield Generation** (stable book mirror), **Trade mill** (consumer idea stream plus the internal nano-ETH live clip that tests those ideas). Telegram **Idea feed** still opens `/feed` for Accept/Reject. Dual ETH/BTC spots, chart-read score tooltips, and a **Macro news monitor** sit on Brain / Trading Log as before.
+The dashboard is the intelligence hub. Four tabs: **Brain** (vision / tape / news), **Eva Trades** (HQ ICT live + house paper — Eva is the ICT product), **Yield Generation** (stable book mirror), **Trade mill** (consumer idea stream plus the internal nano-ETH live clip that tests those ideas). Telegram **Idea feed** still opens `/feed` for Accept/Reject. Dual ETH/BTC spots, chart-read score tooltips, and a **Macro news monitor** sit on Brain / Eva Trades as before.
 
 ### Macro headline webhook (optional push ingest)
 

@@ -196,12 +196,12 @@
   <div class="wrap">
     <header>
       <h1>Republic Technologies Intelligence</h1>
-      <p class="sub">Brain is the vision layer. It feeds three products: HQ trades, yield generation, and the trade mill.</p>
+      <p class="sub">Brain is the vision layer. It feeds three products: Eva, yield generation, and the trade mill.</p>
     </header>
 
     <nav class="hub-tabs" role="tablist">
       <button type="button" class="hub-tab is-active" data-tab="brain" role="tab" aria-selected="true">Brain</button>
-      <button type="button" class="hub-tab" data-tab="trading" role="tab" aria-selected="false">Trading Log</button>
+      <button type="button" class="hub-tab" data-tab="trading" role="tab" aria-selected="false">Eva Trades</button>
       <button type="button" class="hub-tab" data-tab="yield" role="tab" aria-selected="false">Yield Generation</button>
       <button type="button" class="hub-tab" data-tab="mill" role="tab" aria-selected="false">Trade mill</button>
     </nav>
@@ -215,7 +215,7 @@
             <div class="value" id="sleeve-yield-nav">{% if yield_enabled %}…{% else %}—{% endif %}</div>
           </div>
           <div class="metric sleeve-jump" data-tab="trading" role="button" tabindex="0">
-            <div class="label">HQ live P&amp;L</div>
+            <div class="label">Eva live P&amp;L</div>
             {% set hq = live_performance.by_source.get('hq') %}
             <div class="value {{ 'pos' if hq and hq.pnl_usd >= 0 else ('neg' if hq else '') }}" id="sleeve-hq-pnl">
               {% if hq %}{{ "%+.2f"|format(hq.pnl_usd) }} · {{ hq.open }} open{% else %}no fills{% endif %}
@@ -229,7 +229,7 @@
             </div>
           </div>
         </div>
-        <p class="sub" style="margin-top:8px">Real capital only. Trading Log is HQ. Yield Generation is the stable book. Trade mill is the consumer idea stream plus the small live clip that tests those ideas.</p>
+        <p class="sub" style="margin-top:8px">Real capital only. Eva Trades is the ICT book. Yield Generation is the stable book. Trade mill is the consumer idea stream plus the small live clip that tests those ideas.</p>
       </section>
 
       <section class="card" id="brain-tape">
@@ -468,9 +468,17 @@
     </div>
 
     <div id="tab-trading" class="hub-panel" role="tabpanel" hidden>
+    <section class="card" id="eva-intro">
+      <h2>Eva Trades</h2>
+      <p class="sub">
+        Eva is the HQ product. These are the ICT decisions Eva makes from the brain —
+        abstention-first, more capital at risk than the mill.
+        If this book works, the intelligence is good.
+      </p>
+    </section>
     <section class="card" id="live-book-card">
-      <h2>HQ live book (Coinbase US futures)</h2>
-      <p class="sub" style="margin-bottom:10px">If this sleeve works, the intelligence is good. Mill clips live on the Trade mill tab — they are never mixed in here.</p>
+      <h2>Eva live book (Coinbase US futures)</h2>
+      <p class="sub" style="margin-bottom:10px">Mill clips live on the Trade mill tab — they are never mixed in here.</p>
       {% set hq_live = live_performance.by_source.get('hq') %}
       <div class="metrics" style="margin-bottom:10px">
         <div class="metric">
@@ -702,7 +710,7 @@
     {% endif %}
 
     <section class="card">
-      <h2>Agent book (house · paper)</h2>
+      <h2>Eva paper book (house)</h2>
       <div class="metrics">
         <div class="metric">
           <div class="label">Equity</div>
@@ -1034,6 +1042,7 @@
         mill: document.getElementById('tab-mill'),
       };
       function activate(name, pushHash) {
+        if (name === 'eva') name = 'trading';
         if (!panels[name]) name = 'brain';
         tabs.forEach(function (b) {
           var on = b.getAttribute('data-tab') === name;
@@ -1044,7 +1053,8 @@
           if (panels[key]) panels[key].hidden = key !== name;
         });
         if (pushHash) {
-          var next = '#' + name;
+          var hashName = name === 'trading' ? 'eva' : name;
+          var next = '#' + hashName;
           if (location.hash !== next) history.replaceState(null, '', next);
         }
         if (name === 'yield') refreshYield();

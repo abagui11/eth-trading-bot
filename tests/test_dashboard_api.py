@@ -153,7 +153,8 @@ class DashboardApiTests(unittest.TestCase):
         self.assertIn("Trade mill", resp.text)
         self.assertIn("live clip (internal)", resp.text)
         self.assertIn('id="tab-mill"', resp.text)
-        self.assertIn("HQ live book", resp.text)
+        self.assertIn("Eva Trades", resp.text)
+        self.assertIn("Eva live book", resp.text)
         self.assertIn("/api/trades/live?source=mill", resp.text)
 
     def test_api_status_includes_score(self) -> None:

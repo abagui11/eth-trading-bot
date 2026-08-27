@@ -273,7 +273,7 @@ Legend: ✅ done · 🟡 in progress · 🔧 needs work · ⬜ planned · ⚠️
 | Personal books | `user_books.py` | ✅ | open-account sizes; offers; Accept/Reject/expire; late-join; user SL/TP; `/me` tokens; `display_summary` on offers |
 | Telegram beta UI | `bot.py`, `telegram_ui.py`, `display_summary.py` | ✅ | Open account / My Metrics / My book / Journal / Research; trade Yes/No/Join/See more; concise cards (deterministic blurb by default) |
 | Decision chart | `charts.build_decision_chart` | ✅ | clean candles + red SL / green TP1 bands with % annotations; source/SL/TP-reference-aware M5 history (up to 300 bars) |
-| Dashboard | `dashboard/` | ✅ | Intelligence hub: Brain (vision) · Trading Log (HQ live + paper) · Yield Generation · Trade mill (idea stream + nano-ETH live clip). Consumer `/feed` + `/me` |
+| Dashboard | `dashboard/` | ✅ | Intelligence hub: Brain (vision) · Eva Trades (HQ ICT live + paper) · Yield Generation · Trade mill (idea stream + nano-ETH live clip). Consumer `/feed` + `/me` |
 | Live execution | `execute.py` | ⬜ | shadow/live path not built |
 | OHLC history cache | `ohlc_cache.py` | ✅ | research/backfill; ETH+BTC H1/D1; not hot path |
 | Legacy scheduler | `scheduler.py` | ⚠️ | deprecated; use `main.py` |
@@ -368,6 +368,7 @@ Defaults from `bot_config.py` (non-secret tunables). Secrets and portfolio size 
 
 | Date | Change |
 |---|---|
+| 2026-08-27 | Hub **Trading Log** tab renamed **Eva Trades** — Eva is the HQ ICT product; the tab shows Eva's live and paper books. Hash `#eva`. |
 | 2026-08-27 | Mill live daily fill cap default **off** (`LIVE_MILL_MAX_FILLS_PER_DAY=0`). Capital is the limiter: when a mill clip closes, the next sized ETH mint can take the sleeve. Daily loss halt and 1x / one-open-at-a-time still apply. |
 | 2026-08-27 | Dashboard hub is four product tabs: **Brain** (vision/intelligence), **Trading Log** (HQ live + paper only), **Yield Generation**, **Trade mill** (consumer idea stream + internal nano-ETH live clip book, funnel, house mill paper). `/feed` remains the Telegram consumer page for Accept/Reject. HQ live P&L on Trading Log is no longer blended with mill clips. |
 | 2026-08-10 | **Republic Intelligence layer.** This service becomes the always-on intelligence hub feeding two consumers. New `intelligence/` package: wall-clock hourly BTC/ETH stances on H4/H1/M15 (Claude with a deterministic fallback so an artifact always lands), perp funding regime tracker (persistent bull/bear vs chop, first-switch cue), and a daily BTC 4-year-cycle thesis with annotated log chart + gold ratio. New versioned `/api/v1` router (`dashboard/intel_api.py`): stances, history, macro/zmove/funding signals, subscribers, gated HQ ideas, cycle chart — **token-only via `SERVICE_API_TOKENS`, fails closed with 503 when unset**. HQ ICT cards gated to `INTERNAL_TELEGRAM_IDS` (`HQ_IDEAS_INTERNAL_ONLY`); the ICT propose/validate/critic/audit logic and all ledger/paper writes are unchanged, so dashboard performance tracking still sees every HQ idea. New `trade_ideas_bridge.py` + `idea:accept|reject` branch in `bot.py` records the colocated mill's card decisions (the mill shares this bot's token send-only; this process owns `getUpdates`). Consumers: `yield_gen_bot` (HTF posture panel) and the `trade_ideas` mill (public volume lane). |

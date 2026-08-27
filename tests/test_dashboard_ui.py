@@ -245,7 +245,7 @@ class DashboardUiSmokeTests(unittest.TestCase):
         self.assertIn('class="news-source">cnbc.com<', macro_card)
         self.assertIn('class="news-source">Reuters<', macro_card)
         self.assertIn('class="news-age"', macro_card)
-        # Trading-Log-only information survives the redesign.
+        # Eva Trades tab still has the macro monitor.
         self.assertIn("Active (injected into agent)", macro_card)
         self.assertIn("Recent ingested", macro_card)
         self.assertIn("kw 3", macro_card)
@@ -269,7 +269,9 @@ class DashboardUiSmokeTests(unittest.TestCase):
         self.assertIn('data-tab="mill"', html)
         self.assertIn('id="tab-mill"', html)
         self.assertIn("Trade mill · live clip (internal)", html)
-        self.assertIn("HQ live book", html)
+        self.assertIn("Eva Trades", html)
+        self.assertIn("Eva live book", html)
+        self.assertIn("ICT decisions Eva makes", html)
         mill_card = html.split('id="mill-clip-card"', 1)[1].split("</section>", 1)[0]
         self.assertIn("nano ETH", mill_card)
         self.assertIn("/feed", mill_card)
