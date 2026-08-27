@@ -93,7 +93,7 @@ class ExecuteLiveTests(unittest.TestCase):
         self.assertEqual(result["instrument"], "ETP-20DEC30-CDE")
 
     def test_live_qty_floor_skips_dust(self) -> None:
-        # Mill $80 clip on BTC at $90k → 0.00089 BTC < 0.001 floor → skip.
+        # Mill $260 clip on BTC at $90k → 0.0029 BTC < 0.01 contract → skip.
         result = execute.maybe_execute_live(
             _hq_suggestion(product_id="BTC-USD", entry=90000.0, stop_loss=88000.0),
             90000.0,
@@ -240,13 +240,14 @@ class ExecuteLiveTests(unittest.TestCase):
         )
         self.assertIsNone(result)
 
-    def test_mill_clip_below_contract_floor_skips(self) -> None:
-        # Mill $80 clip → 0.04 ETH, below one nano contract (0.1 ETH) — the
-        # mill sleeve cannot fill on US futures until its notional is raised.
+    def test_mill_shadow_sizing(self) -> None:
+        # Mill $260 clip → 0.13 ETH at $2,000, above the 0.1 contract floor.
         result = execute.maybe_execute_live(
             _hq_suggestion(entry=2000.0), 2000.0, cycle_id="c1", source="mill"
         )
-        self.assertIsNone(result)
+        self.assertIsNotNone(result)
+        self.assertAlmostEqual(result["notional_usd"], 260.0)
+        self.assertAlmostEqual(result["qty"], 0.13)
 
     def test_halt_blocks_and_daily_halt_expires(self) -> None:
         execute.halt_live("daily_loss:hq:-200.00")

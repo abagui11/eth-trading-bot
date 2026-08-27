@@ -110,8 +110,12 @@ WATCHDOG_LIVE_ENABLED = False
 WATCHDOG_LIVE_META_KEY = "watchdog_live_enabled"
 
 # Volume-mill tiny live sleeve (same Coinbase account, internal partition).
+# Notional must cover one CDE nano ETH contract (0.1 ETH ≈ $250-300) — smaller
+# clips physically cannot fill on US futures. BTC mill ideas still skip
+# (1 contract = 0.01 BTC ≈ $800 > sleeve appetite). With the $400 sleeve and
+# the 1x exposure cap, at most ONE mill position is open at a time.
 LIVE_MILL_SLEEVE_USD = 400.0
-LIVE_MILL_NOTIONAL_USD = 80.0        # per idea
+LIVE_MILL_NOTIONAL_USD = 260.0       # per idea (≈ 1 nano ETH contract)
 LIVE_MILL_MAX_OPEN = 2
 LIVE_MILL_MAX_FILLS_PER_DAY = 2
 LIVE_MILL_DAILY_LOSS_LIMIT_USD = 80.0

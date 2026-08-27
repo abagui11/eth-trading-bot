@@ -102,8 +102,10 @@ def create_app() -> FastAPI:
                 "archived_trades": data.get_archived_trades_payload(limit=15),
                 "macro": data.get_macro_payload(),
                 "brain": get_brain_payload(),
-                "live_open": live_ledger.get_open_trades(),
-                "live_closed": live_ledger.get_closed_trades(limit=15),
+                # Dashboard shows the HQ sleeve only; mill fills are checked
+                # via the Telegram /performance command.
+                "live_open": live_ledger.get_open_trades(source="hq"),
+                "live_closed": live_ledger.get_closed_trades(limit=15, source="hq"),
                 "live_performance": live_ledger.get_live_performance(),
                 "yield_enabled": bool(config.YIELD_GEN_API_URL),
                 "yield_dashboard_url": config.YIELD_GEN_DASHBOARD_URL,
@@ -121,11 +123,13 @@ def create_app() -> FastAPI:
         return get_yield_payload()
 
     @app.get("/api/trades/live")
-    async def api_live_trades(limit: int = 50, offset: int = 0) -> dict:
+    async def api_live_trades(
+        limit: int = 50, offset: int = 0, source: str = "hq"
+    ) -> dict:
         return {
-            "open": live_ledger.get_open_trades(),
+            "open": live_ledger.get_open_trades(source=source or None),
             "closed": live_ledger.get_closed_trades(
-                limit=min(limit, 100), offset=max(offset, 0)
+                limit=min(limit, 100), offset=max(offset, 0), source=source or None
             ),
             "performance": live_ledger.get_live_performance(),
         }
