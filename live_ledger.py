@@ -48,6 +48,7 @@ CREATE TABLE IF NOT EXISTS yield_nav_snapshots (
     debt_usd REAL NOT NULL,
     pt_usd REAL NOT NULL,
     health_factor REAL,
+    eth_price_usd REAL,
     created_at TEXT NOT NULL
 );
 """
@@ -66,6 +67,13 @@ def _connect() -> sqlite3.Connection:
 def init_db() -> None:
     with _connect() as conn:
         conn.executescript(_SCHEMA)
+        cols = {
+            r[1] for r in conn.execute("PRAGMA table_info(yield_nav_snapshots)")
+        }
+        if "eth_price_usd" not in cols:
+            conn.execute(
+                "ALTER TABLE yield_nav_snapshots ADD COLUMN eth_price_usd REAL"
+            )
 
 
 # ---------------------------------------------------------------------------
@@ -224,6 +232,7 @@ def record_yield_nav(
     debt_usd: float,
     pt_usd: float,
     health_factor: float | None,
+    eth_price_usd: float | None = None,
 ) -> bool:
     """Upsert today's NAV row (one per UTC day, latest reading wins).
 
@@ -236,14 +245,15 @@ def record_yield_nav(
             """
             INSERT INTO yield_nav_snapshots (
                 snapshot_date, nav_usd, collateral_usd, debt_usd, pt_usd,
-                health_factor, created_at
-            ) VALUES (?, ?, ?, ?, ?, ?, ?)
+                health_factor, eth_price_usd, created_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT(snapshot_date) DO UPDATE SET
                 nav_usd = excluded.nav_usd,
                 collateral_usd = excluded.collateral_usd,
                 debt_usd = excluded.debt_usd,
                 pt_usd = excluded.pt_usd,
                 health_factor = excluded.health_factor,
+                eth_price_usd = COALESCE(excluded.eth_price_usd, yield_nav_snapshots.eth_price_usd),
                 created_at = excluded.created_at
             """,
             (
@@ -253,10 +263,24 @@ def record_yield_nav(
                 float(debt_usd),
                 float(pt_usd),
                 health_factor,
+                float(eth_price_usd) if eth_price_usd else None,
                 _now_iso(),
             ),
         )
         return cur.rowcount > 0
+
+
+def backfill_yield_eth_price(snapshot_date: str, eth_price_usd: float) -> None:
+    """Fill ETH/USD on a historical NAV row when it was recorded without a price."""
+    with _connect() as conn:
+        conn.execute(
+            """
+            UPDATE yield_nav_snapshots
+               SET eth_price_usd = ?
+             WHERE snapshot_date = ? AND eth_price_usd IS NULL
+            """,
+            (float(eth_price_usd), snapshot_date),
+        )
 
 
 def get_yield_nav_series(limit: int = 90) -> list[dict[str, Any]]:

@@ -911,9 +911,19 @@
             <div class="value" id="yield-nav">…</div>
           </div>
           <div class="metric">
-            <div class="label">Health factor</div>
-            <div class="value" id="yield-hf">…</div>
+            <div class="label">Yield projected</div>
+            <div class="value" id="yield-proj">…</div>
           </div>
+          <div class="metric">
+            <div class="label">Yield earned</div>
+            <div class="value" id="yield-earned">…</div>
+          </div>
+          <div class="metric">
+            <div class="label">Earn ETH</div>
+            <div class="value" id="yield-pnl-eth">…</div>
+          </div>
+        </div>
+        <div class="metrics" style="margin-top:8px">
           <div class="metric">
             <div class="label">P&amp;L since go-live</div>
             <div class="value" id="yield-pnl">…</div>
@@ -921,6 +931,10 @@
           <div class="metric">
             <div class="label">P&amp;L 1d</div>
             <div class="value" id="yield-pnl-1d">…</div>
+          </div>
+          <div class="metric">
+            <div class="label">Health factor</div>
+            <div class="value" id="yield-hf">…</div>
           </div>
         </div>
         <div class="metrics" style="margin-top:8px">
@@ -1157,6 +1171,26 @@
       var n = Number(v);
       return (n >= 0 ? '+' : '') + n.toFixed(2);
     }
+    function fmtApy(v) {
+      if (v == null) return '';
+      return (Number(v) * 100).toFixed(2) + '%';
+    }
+    function fmtEthSigned(v) {
+      if (v == null) return '—';
+      var n = Number(v);
+      var abs = Math.abs(n).toFixed(4) + ' ETH';
+      if (n > 0) return '+' + abs;
+      if (n < 0) return '-' + abs;
+      return abs;
+    }
+    function tone(id, v) {
+      var el = document.getElementById(id);
+      if (!el) return;
+      el.classList.remove('pos', 'neg');
+      if (v == null || !Number.isFinite(Number(v))) return;
+      if (Number(v) > 0) el.classList.add('pos');
+      if (Number(v) < 0) el.classList.add('neg');
+    }
     async function refreshYield() {
       var status = document.getElementById('yield-status');
       if (!status) return;
@@ -1176,12 +1210,21 @@
           if (el) el.textContent = txt;
         };
         setText('yield-nav', fmtMoney(y.nav_usd));
+        setText('yield-proj', y.yield_projected_usd == null
+          ? '—'
+          : fmtMoney(y.yield_projected_usd) + '/yr' + (y.yield_projected_apy != null ? ' · ' + fmtApy(y.yield_projected_apy) : ''));
+        setText('yield-earned', fmtMoney(y.yield_earned_usd));
+        setText('yield-pnl-eth', fmtEthSigned(y.pnl_eth));
         setText('yield-hf', y.health_factor != null ? Number(y.health_factor).toFixed(3) : 'no debt');
         setText('yield-pnl', fmtSigned(y.pnl_since_golive_usd));
         setText('yield-pnl-1d', fmtSigned(y.pnl_1d_usd));
         setText('yield-collateral', fmtMoney(y.collateral_usd));
         setText('yield-debt', fmtMoney(y.debt_usd));
         setText('yield-pt', fmtMoney(y.pt_usd));
+        tone('yield-earned', y.yield_earned_usd);
+        tone('yield-pnl-eth', y.pnl_eth);
+        tone('yield-pnl', y.pnl_since_golive_usd);
+        tone('yield-pnl-1d', y.pnl_1d_usd);
         if (strip) strip.textContent = fmtMoney(y.nav_usd);
 
         var monitors = document.getElementById('yield-monitors');

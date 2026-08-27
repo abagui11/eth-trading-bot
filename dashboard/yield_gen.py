@@ -10,6 +10,7 @@ of raising into the page render.
 from __future__ import annotations
 
 import logging
+from datetime import date, datetime, timezone
 from typing import Any
 
 import requests
@@ -19,7 +20,7 @@ import live_ledger
 
 logger = logging.getLogger(__name__)
 
-_TIMEOUT_SEC = 8
+_TIMEOUT_SEC = 15
 
 
 def _fetch_json(path: str) -> dict[str, Any] | None:
@@ -33,6 +34,102 @@ def _fetch_json(path: str) -> dict[str, Any] | None:
     except Exception as exc:  # noqa: BLE001 — fail-soft into the tab
         logger.warning("yield_gen fetch %s failed: %s", path, exc)
         return None
+
+
+def _f(value: Any) -> float | None:
+    if value is None or value == "":
+        return None
+    try:
+        n = float(value)
+    except (TypeError, ValueError):
+        return None
+    return n if n == n else None  # NaN check
+
+
+def _eth_usd_on_date(iso_date: str) -> float | None:
+    """CoinGecko daily ETH/USD. Fail-soft — used only to backfill go-live price."""
+    try:
+        d = datetime.strptime(iso_date[:10], "%Y-%m-%d")
+    except ValueError:
+        return None
+    stamped = d.strftime("%d-%m-%Y")
+    try:
+        res = requests.get(
+            "https://api.coingecko.com/api/v3/coins/ethereum/history",
+            params={"date": stamped, "localization": "false"},
+            timeout=10,
+        )
+        res.raise_for_status()
+        px = (
+            res.json()
+            .get("market_data", {})
+            .get("current_price", {})
+            .get("usd")
+        )
+        n = float(px)
+        return n if n > 0 else None
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("ETH history fetch failed for %s: %s", iso_date, exc)
+        return None
+
+
+def derive_yield_metrics(
+    *,
+    nav_usd: float,
+    projected_usd: float | None,
+    projected_apy: float | None,
+    nav_eth_now: float | None,
+    eth_price_now: float | None,
+    go_live_date: str | None,
+    nav_start_usd: float | None,
+    eth_price_start: float | None,
+    today: date | None = None,
+) -> dict[str, Any]:
+    """Carry run-rate + ETH-NAV earnings from a go-live baseline."""
+    today = today or datetime.now(timezone.utc).date()
+    earned_usd = None
+    days = None
+    if projected_usd is not None and go_live_date:
+        try:
+            start = date.fromisoformat(go_live_date[:10])
+            days = max((today - start).days, 0)
+            earned_usd = round(projected_usd * days / 365.0, 2)
+        except ValueError:
+            days = None
+
+    if nav_eth_now is None and eth_price_now and eth_price_now > 0:
+        nav_eth_now = nav_usd / eth_price_now
+
+    nav_eth_start = None
+    pnl_eth = None
+    if (
+        nav_start_usd is not None
+        and eth_price_start is not None
+        and eth_price_start > 0
+    ):
+        nav_eth_start = nav_start_usd / eth_price_start
+        if nav_eth_now is not None:
+            pnl_eth = round(nav_eth_now - nav_eth_start, 6)
+
+    return {
+        "yield_projected_usd": (
+            round(projected_usd, 2) if projected_usd is not None else None
+        ),
+        "yield_projected_apy": projected_apy,
+        "yield_earned_usd": earned_usd,
+        "days_since_golive": days,
+        "nav_eth": round(nav_eth_now, 6) if nav_eth_now is not None else None,
+        "nav_eth_start": (
+            round(nav_eth_start, 6) if nav_eth_start is not None else None
+        ),
+        "pnl_eth": pnl_eth,
+        "go_live_date": go_live_date,
+        "nav_start_usd": (
+            round(nav_start_usd, 2) if nav_start_usd is not None else None
+        ),
+        "eth_price_start_usd": eth_price_start,
+        "eth_price_usd": eth_price_now,
+    }
 
 
 def get_yield_payload() -> dict[str, Any]:
@@ -94,10 +191,19 @@ def get_yield_payload() -> dict[str, Any]:
     ]
     alerting = [m for m in monitors if m.get("state") not in (None, "OK")]
 
+    topline = positions.get("topline") if isinstance(positions.get("topline"), dict) else {}
+    eth_now = _f((topline or {}).get("ethPriceUsd"))
+    projected_usd = _f((topline or {}).get("projectedUsd"))
+    projected_apy = _f((topline or {}).get("projectedApy"))
+    nav_eth_now = _f((topline or {}).get("navEthNow"))
+
     # ---- Daily NAV snapshot + P&L since go-live ----
     nav_series: list[dict[str, Any]] = []
     pnl_since_golive = None
     pnl_1d = None
+    go_live_date = None
+    nav_start_usd = None
+    eth_price_start = None
     if positions.get("enabled"):
         try:
             live_ledger.init_db()
@@ -111,16 +217,37 @@ def get_yield_payload() -> dict[str, Any]:
                     debt_usd=debt,
                     pt_usd=pt_total,
                     health_factor=worst_hf,
+                    eth_price_usd=eth_now,
                 )
             nav_series = live_ledger.get_yield_nav_series(limit=90)
             if nav_series:
-                first = float(nav_series[0]["nav_usd"])
-                if first:
-                    pnl_since_golive = round(nav - first, 2)
+                first = nav_series[0]
+                go_live_date = str(first.get("snapshot_date") or "") or None
+                nav_start_usd = _f(first.get("nav_usd"))
+                eth_price_start = _f(first.get("eth_price_usd"))
+                if nav_start_usd:
+                    pnl_since_golive = round(nav - nav_start_usd, 2)
                 if len(nav_series) >= 2:
                     pnl_1d = round(nav - float(nav_series[-2]["nav_usd"]), 2)
+                if eth_price_start is None and go_live_date:
+                    eth_price_start = _eth_usd_on_date(go_live_date)
+                    if eth_price_start:
+                        live_ledger.backfill_yield_eth_price(
+                            go_live_date, eth_price_start
+                        )
         except Exception as exc:  # noqa: BLE001
             logger.warning("yield NAV snapshot failed: %s", exc)
+
+    carry = derive_yield_metrics(
+        nav_usd=nav,
+        projected_usd=projected_usd,
+        projected_apy=projected_apy,
+        nav_eth_now=nav_eth_now,
+        eth_price_now=eth_now,
+        go_live_date=go_live_date,
+        nav_start_usd=nav_start_usd,
+        eth_price_start=eth_price_start,
+    )
 
     # ---- Plan summary ----
     plan_summary: dict[str, Any] | None = None
@@ -153,9 +280,14 @@ def get_yield_payload() -> dict[str, Any]:
         "alerting": alerting,
         "plan": plan_summary,
         "nav_series": [
-            {"date": r["snapshot_date"], "nav_usd": r["nav_usd"]}
+            {
+                "date": r["snapshot_date"],
+                "nav_usd": r["nav_usd"],
+                "eth_price_usd": r.get("eth_price_usd"),
+            }
             for r in nav_series
         ],
         "fetched_at": positions.get("fetchedAt"),
         "errors": (positions.get("errors") or [])[:3],
+        **carry,
     }
