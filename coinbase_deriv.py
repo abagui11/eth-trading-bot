@@ -390,6 +390,17 @@ class DerivGateway:
         )
         return {"order": {"order_id": order_id}}
 
+    def cancel_orders(self, order_ids: list[str]) -> Any:
+        """Cancel specific orders by id — immune to open-order listing lag."""
+        if not order_ids:
+            return []
+        out = self._request(
+            "POST",
+            f"{_BROKERAGE}/orders/batch_cancel",
+            body={"order_ids": order_ids},
+        )
+        return out.get("results") or out
+
     def cancel_all_by_instrument(self, instrument: str) -> Any:
         res = self._request(
             "GET",

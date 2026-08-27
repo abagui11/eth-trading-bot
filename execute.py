@@ -434,16 +434,29 @@ def smoke_test(place_order: bool = False) -> int:
         instrument=instrument, side="buy", amount=qty, label="smoke-entry"
     )
     print(f"5) resting stop @ {stop_px}")
-    gw.place_stop_market(
+    stop = gw.place_stop_market(
         instrument=instrument,
         side="sell",
         amount=qty,
         trigger_price=stop_px,
         label="smoke-stop",
     )
+    stop_id = str(((stop or {}).get("order") or {}).get("order_id") or "")
     print("6) cancel stop + flatten")
+    # Cancel by id — a just-placed order may not appear in the open-orders
+    # listing yet (eventual consistency), so cancel_all alone can miss it.
+    if stop_id:
+        gw.cancel_orders([stop_id])
     gw.cancel_all_by_instrument(instrument)
     gw.close_position(instrument)
+    import time as _time
+
+    for _ in range(5):  # verify nothing is left resting
+        _time.sleep(1.0)
+        leftovers = gw.cancel_all_by_instrument(instrument)
+        if not leftovers:
+            break
+        print(f"   cancelled {len(leftovers)} leftover order(s)")
     print("Smoke round-trip complete — verify a flat book on Coinbase.")
     return 0
 
