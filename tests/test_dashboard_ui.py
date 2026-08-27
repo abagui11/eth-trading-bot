@@ -100,10 +100,14 @@ class DashboardUiSmokeTests(unittest.TestCase):
                     "equity_usd": 5000.0,
                     "total_pnl_usd": 0.0,
                     "total_pnl_pct": 0.0,
+                    "realized_pnl_usd": 0.0,
+                    "avg_pnl_usd": None,
+                    "profit_factor": None,
                     "win_rate_pct": 0.0,
                     "starting_usd": 5000.0,
                     "closed_trade_count": 1,
                     "open_count": 1,
+                    "open_by_product": {},
                     "chart_read": {"avg_score_30d": None, "issue_rate_pct": 0},
                     "epoch": {
                         "epoch_label": "5k_usd",
@@ -272,9 +276,44 @@ class DashboardUiSmokeTests(unittest.TestCase):
         self.assertIn("Eva Trades", html)
         self.assertIn("Eva live book", html)
         self.assertIn("ICT decisions Eva makes", html)
+        self.assertIn("Eva paper book · v2", html)
+        self.assertIn("currently live", html)
         mill_card = html.split('id="mill-clip-card"', 1)[1].split("</section>", 1)[0]
         self.assertIn("nano ETH", mill_card)
         self.assertIn("/feed", mill_card)
+
+    def test_archived_journal_is_collapsed_with_v1_metrics(self) -> None:
+        summary = {
+            "available": True,
+            "epoch_label": "legacy_1k",
+            "starting_usd": 1000.0,
+            "ended_at": "2026-07-16T00:00:00Z",
+            "closed_trade_count": 1,
+            "win_rate_pct": 100.0,
+            "realized_pnl_usd": 50.0,
+            "realized_pnl_pct": 5.0,
+            "avg_pnl_usd": 50.0,
+            "avg_win_usd": 50.0,
+            "avg_loss_usd": None,
+            "profit_factor": None,
+        }
+        with (
+            patch(
+                "dashboard.data.get_archived_trades_payload",
+                return_value=[_sample_trade()],
+            ),
+            patch(
+                "dashboard.data.get_archived_performance_payload",
+                return_value=summary,
+            ),
+        ):
+            html = self.client.get("/").text
+        self.assertIn("Archived trades · v1", html)
+        self.assertIn("Paper book v1", html)
+        self.assertIn("id=\"archived-journal-toggle\"", html)
+        self.assertIn("id=\"archived-journal-body\" hidden", html)
+        self.assertIn("Show v1 journal", html)
+        self.assertIn("legacy_1k", html)
 
 
 if __name__ == "__main__":

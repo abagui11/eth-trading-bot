@@ -75,9 +75,20 @@ def build_performance(
         unrealized += float(pos.get("unrealized_pnl_usd") or 0)
 
     realized = sum(float(t.get("realized_pnl_usd") or 0) for t in closed)
+    win_pnls = [
+        float(t.get("realized_pnl_usd") or 0)
+        for t in closed
+        if float(t.get("realized_pnl_usd") or 0) > 0
+    ]
+    loss_pnls = [
+        float(t.get("realized_pnl_usd") or 0)
+        for t in closed
+        if float(t.get("realized_pnl_usd") or 0) < 0
+    ]
+    n = len(closed)
+    loss_abs = abs(sum(loss_pnls))
     total_pnl = equity - starting
-    wins = sum(1 for t in closed if float(t.get("realized_pnl_usd") or 0) > 0)
-    win_rate = round(wins / len(closed) * 100, 1) if closed else 0.0
+    win_rate = round(len(win_pnls) / n * 100, 1) if n else 0.0
 
     score_stats = audit.get_score_aggregates()
     open_by_product: dict[str, int] = {}
@@ -121,8 +132,12 @@ def build_performance(
         "total_pnl_pct": round(total_pnl / starting * 100, 2) if starting else 0.0,
         "open_count": len(positions),
         "open_by_product": open_by_product,
-        "closed_trade_count": len(closed),
+        "closed_trade_count": n,
         "win_rate_pct": win_rate,
+        "avg_pnl_usd": round(realized / n, 2) if n else None,
+        "avg_win_usd": round(sum(win_pnls) / len(win_pnls), 2) if win_pnls else None,
+        "avg_loss_usd": round(sum(loss_pnls) / len(loss_pnls), 2) if loss_pnls else None,
+        "profit_factor": round(sum(win_pnls) / loss_abs, 2) if loss_abs else None,
         "chart_read": score_stats,
         "recent_trade_scores": trade_scores,
         "epoch": paper.get_epoch_info(),

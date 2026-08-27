@@ -135,6 +135,7 @@ def create_app() -> FastAPI:
                 "cycles": data.get_cycles(limit=25),
                 "closed_trades": data.get_closed_trades_payload(limit=15),
                 "archived_trades": data.get_archived_trades_payload(limit=15),
+                "archived_performance": data.get_archived_performance_payload(),
                 "macro": data.get_macro_payload(),
                 "brain": get_brain_payload(),
                 "live_open": live_ledger.get_open_trades(source="hq"),

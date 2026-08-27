@@ -1398,6 +1398,51 @@ def get_closed_trades(limit: int = 10) -> list[dict]:
     return closed[:limit]
 
 
+def get_archived_book_summary() -> dict:
+    """P&L stats for the archived paper epoch (v1), independent of the live book."""
+    init_db()
+    with _connect() as conn:
+        rows = [
+            dict(row)
+            for row in conn.execute(
+                "SELECT * FROM paper_trades_archive ORDER BY id ASC"
+            ).fetchall()
+        ]
+        epoch = conn.execute(
+            "SELECT * FROM paper_epochs ORDER BY id ASC LIMIT 1"
+        ).fetchone()
+    closed = _pair_closed_trades(rows)
+    epoch_d = dict(epoch) if epoch else {}
+    starting = float(epoch_d.get("starting_usd") or 0)
+    realized = sum(float(t.get("realized_pnl_usd") or 0) for t in closed)
+    win_pnls = [
+        float(t.get("realized_pnl_usd") or 0)
+        for t in closed
+        if float(t.get("realized_pnl_usd") or 0) > 0
+    ]
+    loss_pnls = [
+        float(t.get("realized_pnl_usd") or 0)
+        for t in closed
+        if float(t.get("realized_pnl_usd") or 0) < 0
+    ]
+    n = len(closed)
+    loss_abs = abs(sum(loss_pnls))
+    return {
+        "available": bool(rows or epoch),
+        "epoch_label": epoch_d.get("label") or "v1",
+        "starting_usd": starting,
+        "ended_at": epoch_d.get("ended_at"),
+        "closed_trade_count": n,
+        "win_rate_pct": round(len(win_pnls) / n * 100, 1) if n else 0.0,
+        "realized_pnl_usd": round(realized, 2),
+        "realized_pnl_pct": round(realized / starting * 100, 2) if starting else 0.0,
+        "avg_pnl_usd": round(realized / n, 2) if n else None,
+        "avg_win_usd": round(sum(win_pnls) / len(win_pnls), 2) if win_pnls else None,
+        "avg_loss_usd": round(sum(loss_pnls) / len(loss_pnls), 2) if loss_pnls else None,
+        "profit_factor": round(sum(win_pnls) / loss_abs, 2) if loss_abs else None,
+    }
+
+
 def get_archived_closed_trades(limit: int = 50) -> list[dict]:
     """Closed trades from archived epochs (most recent archive epoch first)."""
     init_db()

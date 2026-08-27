@@ -685,6 +685,10 @@ class PaperPositionTests(unittest.TestCase):
         epoch = paper.get_epoch_info()
         self.assertEqual(epoch["epoch_label"], "test_5k")
         self.assertEqual(epoch["prior_epoch_count"], 1)
+        archived_book = paper.get_archived_book_summary()
+        self.assertTrue(archived_book["available"])
+        self.assertEqual(archived_book["epoch_label"], "legacy_test")
+        self.assertEqual(archived_book["starting_usd"], 5000.0)
 
 
 class PairClosedTradesTests(unittest.TestCase):

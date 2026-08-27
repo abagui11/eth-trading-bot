@@ -710,7 +710,11 @@
     {% endif %}
 
     <section class="card">
-      <h2>Eva paper book (house)</h2>
+      <h2>Eva paper book · v2 (live)</h2>
+      <p class="sub" style="margin-bottom:10px">
+        Paper book v2 — the same Eva paper version that is currently live.
+        House/agent reference book, not subscriber capital. Live Coinbase fills are in the Eva live book above.
+      </p>
       <div class="metrics">
         <div class="metric">
           <div class="label">Equity</div>
@@ -723,21 +727,34 @@
           </div>
         </div>
         <div class="metric">
+          <div class="label">Realized</div>
+          <div class="value {{ 'pos' if performance.realized_pnl_usd >= 0 else 'neg' }}">
+            {{ "%+.2f"|format(performance.realized_pnl_usd) }}
+          </div>
+        </div>
+        <div class="metric">
           <div class="label">Win rate</div>
           <div class="value">{{ performance.win_rate_pct }}%</div>
         </div>
         <div class="metric">
-          <div class="label">Avg chart-read (30d)</div>
+          <div class="label">Avg / closed</div>
           <div class="value">
-            {% if performance.chart_read.avg_score_30d is not none %}
-            {{ performance.chart_read.avg_score_30d }}/100
+            {% if performance.avg_pnl_usd is not none %}
+            {{ "%+.2f"|format(performance.avg_pnl_usd) }}
+            {% else %}—{% endif %}
+          </div>
+        </div>
+        <div class="metric">
+          <div class="label">Profit factor</div>
+          <div class="value">
+            {% if performance.profit_factor is not none %}
+            {{ "%.2f"|format(performance.profit_factor) }}
             {% else %}—{% endif %}
           </div>
         </div>
       </div>
       <p class="sub" style="margin-top:10px">
-        House/agent reference book (not user capital)
-        · ${{ "%.0f"|format(performance.starting_usd) }} start
+        ${{ "%.0f"|format(performance.starting_usd) }} start
         {% if performance.epoch.epoch_label %}({{ performance.epoch.epoch_label }}){% endif %}
         · {{ performance.closed_trade_count }} closed · {{ performance.open_count }} open
         {% if performance.open_by_product %}
@@ -747,6 +764,10 @@
         {% endfor %}
         )
         {% endif %}
+        · chart-read
+        {% if performance.chart_read.avg_score_30d is not none %}
+        {{ performance.chart_read.avg_score_30d }}/100
+        {% else %}—{% endif %}
         · issue rate {{ performance.chart_read.issue_rate_pct }}%
         {% if performance.epoch.epoch_started_at %}
         · epoch since {{ performance.epoch.epoch_started_at }}
@@ -756,9 +777,9 @@
 
     {% if positions or closed_trades %}
     <section class="card journal-card">
-      <h2>Paper journal (reference book)</h2>
+      <h2>Paper journal · v2</h2>
       <p class="sub journal-intro">
-        Simulated fills only — excluded from live P&amp;L above.
+        Simulated fills for the live v2 book — excluded from Eva live P&amp;L above.
       </p>
       <button type="button" class="load-more" id="paper-journal-toggle" aria-expanded="false">Show paper journal</button>
       <div id="paper-journal-body" hidden>
@@ -785,15 +806,65 @@
     </section>
     {% endif %}
 
-    {% if archived_trades %}
+    {% if archived_performance.available or archived_trades %}
     <section class="card journal-card journal-archived">
-      <h2>Archived trades (prior epoch)</h2>
-      <p class="sub">Legacy book — preserved for reference; not included in P&amp;L above.</p>
+      <h2>Archived trades · v1</h2>
+      <p class="sub journal-intro">
+        Paper book v1 — the first Eva paper epoch, archived when the book reset to v2.
+        Not included in v2 P&amp;L above.
+      </p>
+      {% set ap = archived_performance %}
+      <div class="metrics" style="margin-bottom:10px">
+        <div class="metric">
+          <div class="label">Start</div>
+          <div class="value">${{ "%.0f"|format(ap.starting_usd) }}</div>
+        </div>
+        <div class="metric">
+          <div class="label">Realized P&amp;L</div>
+          <div class="value {{ 'pos' if ap.realized_pnl_usd >= 0 else 'neg' }}">
+            {{ "%+.2f"|format(ap.realized_pnl_usd) }}
+            {% if ap.starting_usd %}({{ "%+.1f"|format(ap.realized_pnl_pct) }}%){% endif %}
+          </div>
+        </div>
+        <div class="metric">
+          <div class="label">Win rate</div>
+          <div class="value">{{ ap.win_rate_pct }}%</div>
+        </div>
+        <div class="metric">
+          <div class="label">Closed</div>
+          <div class="value">{{ ap.closed_trade_count }}</div>
+        </div>
+        <div class="metric">
+          <div class="label">Avg / closed</div>
+          <div class="value">
+            {% if ap.avg_pnl_usd is not none %}{{ "%+.2f"|format(ap.avg_pnl_usd) }}{% else %}—{% endif %}
+          </div>
+        </div>
+        <div class="metric">
+          <div class="label">Profit factor</div>
+          <div class="value">
+            {% if ap.profit_factor is not none %}{{ "%.2f"|format(ap.profit_factor) }}{% else %}—{% endif %}
+          </div>
+        </div>
+      </div>
+      {% if ap.epoch_label or ap.ended_at %}
+      <p class="sub" style="margin-bottom:10px">
+        {% if ap.epoch_label %}{{ ap.epoch_label }}{% endif %}
+        {% if ap.ended_at %} · archived {{ ap.ended_at[:10] }}{% endif %}
+      </p>
+      {% endif %}
+      {% if archived_trades %}
+      <button type="button" class="load-more" id="archived-journal-toggle" aria-expanded="false">Show v1 journal</button>
+      <div id="archived-journal-body" hidden>
       <div class="trade-list">
         {% for t in archived_trades %}
         {{ trade_card(t, 'archived') }}
         {% endfor %}
       </div>
+      </div>
+      {% else %}
+      <p class="sub">No closed v1 trades to list.</p>
+      {% endif %}
     </section>
     {% endif %}
 
@@ -1366,17 +1437,19 @@
       }, { once: true });
     }
 
-    (function initPaperJournalToggle() {
-      var btn = document.getElementById('paper-journal-toggle');
-      var body = document.getElementById('paper-journal-body');
+    function bindJournalToggle(btnId, bodyId, showText, hideText) {
+      var btn = document.getElementById(btnId);
+      var body = document.getElementById(bodyId);
       if (!btn || !body) return;
       btn.addEventListener('click', function () {
         var open = body.hidden;
         body.hidden = !open;
         btn.setAttribute('aria-expanded', open ? 'true' : 'false');
-        btn.textContent = open ? 'Hide paper journal' : 'Show paper journal';
+        btn.textContent = open ? hideText : showText;
       });
-    })();
+    }
+    bindJournalToggle('paper-journal-toggle', 'paper-journal-body', 'Show paper journal', 'Hide paper journal');
+    bindJournalToggle('archived-journal-toggle', 'archived-journal-body', 'Show v1 journal', 'Hide v1 journal');
 
     function stancePill(s) {
       if (!s) return '<span class="stance-pill stance-none">—</span>';

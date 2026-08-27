@@ -310,6 +310,10 @@ def get_performance_payload() -> dict[str, Any]:
     return build_performance(spots=spots)
 
 
+def get_archived_performance_payload() -> dict[str, Any]:
+    return paper.get_archived_book_summary()
+
+
 def get_macro_payload() -> dict[str, Any]:
     return macro_payload_for_dashboard()
 
