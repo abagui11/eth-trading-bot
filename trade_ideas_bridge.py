@@ -22,6 +22,8 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
+import bot_config
+
 logger = logging.getLogger(__name__)
 
 DecisionStatus = str  # recorded | duplicate | unknown_idea | unavailable
@@ -181,6 +183,147 @@ def record_decision(idea_id: int, user_id: int, decision: str) -> DecisionStatus
         return "unavailable"
     finally:
         conn.close()
+
+
+def is_fill_operator(user_id: int) -> bool:
+    """True when this Telegram id's Accept fills a real mill clip."""
+    return int(user_id) in tuple(bot_config.LIVE_MILL_FILL_TELEGRAM_IDS)
+
+
+def _mark_idea_live_fill(
+    conn: sqlite3.Connection, idea_id: int, fill_type: str, filled_by: int | None
+) -> None:
+    """Record on the mill's idea row how its live clip was entered.
+
+    The mill owns this schema; the columns are added defensively here because
+    a hub deploy can land before the mill restarts and runs its migration.
+    """
+    existing = {
+        str(r[1]) for r in conn.execute("PRAGMA table_info(ideas)").fetchall()
+    }
+    if "live_fill_type" not in existing:
+        conn.execute("ALTER TABLE ideas ADD COLUMN live_fill_type TEXT")
+    if "live_filled_by" not in existing:
+        conn.execute("ALTER TABLE ideas ADD COLUMN live_filled_by INTEGER")
+    conn.execute(
+        "UPDATE ideas SET live_fill_type = ?, live_filled_by = ? WHERE id = ?",
+        (fill_type, int(filled_by) if filled_by is not None else None, int(idea_id)),
+    )
+
+
+def request_manual_fill(idea_id: int, user_id: int) -> dict[str, Any]:
+    """Fill a real mill clip from an operator's Accept.
+
+    Blocking (SQLite + Coinbase REST) — call it off the event loop. Fail-soft:
+    any error reports a skip so the Accept itself still succeeds.
+    """
+    if not is_fill_operator(user_id):
+        return {"executed": False, "skip_reason": "not_authorized"}
+
+    conn = _connect()
+    if conn is None:
+        return {"executed": False, "skip_reason": "unavailable"}
+    try:
+        with conn:
+            row = conn.execute(
+                """
+                SELECT product_id, direction, entry, stop_loss,
+                       take_profits_json, signal_key, confidence
+                FROM ideas WHERE id = ?
+                """,
+                (int(idea_id),),
+            ).fetchone()
+    except sqlite3.Error:
+        logger.exception("manual fill idea read failed for #%s", idea_id)
+        conn.close()
+        return {"executed": False, "skip_reason": "unavailable"}
+
+    try:
+        if row is None:
+            return {"executed": False, "skip_reason": "unknown_idea"}
+        if row["entry"] is None or row["stop_loss"] is None:
+            return {"executed": False, "skip_reason": "unsized"}
+
+        import execute
+
+        verdict = execute.execute_mill_idea(
+            idea_id=int(idea_id),
+            product_id=str(row["product_id"]),
+            direction=str(row["direction"] or ""),
+            entry=float(row["entry"]),
+            stop_loss=float(row["stop_loss"]),
+            take_profits=_parse_take_profits(row["take_profits_json"]),
+            signal_key=str(row["signal_key"] or "") or None,
+            confidence=row["confidence"],
+            fill_type="manual",
+            accepted_by=int(user_id),
+        )
+        if verdict.get("executed"):
+            try:
+                with conn:
+                    _mark_idea_live_fill(conn, int(idea_id), "manual", int(user_id))
+            except sqlite3.Error:
+                logger.exception("manual fill idea tag failed for #%s", idea_id)
+        return verdict
+    except Exception:
+        logger.exception("manual fill failed for idea #%s", idea_id)
+        return {"executed": False, "skip_reason": "error"}
+    finally:
+        conn.close()
+
+
+def format_manual_fill_reply(verdict: dict[str, Any], idea_id: int) -> str | None:
+    """Operator-facing note about the live clip. None = stay quiet."""
+    capacity = verdict.get("capacity") or {}
+    open_n = capacity.get("open")
+    max_open = capacity.get("max_open")
+
+    if verdict.get("executed"):
+        result = verdict.get("result") or {}
+        mode = str(result.get("mode") or "")
+        qty = result.get("qty")
+        notional = result.get("notional_usd")
+        head = "Live clip placed" if mode == "live" else f"Live clip ({mode})"
+        bits = [f"{head} for idea #{idea_id}"]
+        if qty is not None and notional is not None:
+            bits.append(f"{float(qty):g} @ ~${float(notional):,.0f}")
+        if open_n is not None and max_open is not None:
+            bits.append(f"sleeve {open_n}/{max_open}")
+        return " · ".join(bits)
+
+    reason = str(verdict.get("skip_reason") or "")
+    if reason == "sleeve_full":
+        lines = [
+            f"Too many trades open — idea #{idea_id} was NOT filled.",
+            f"The mill sleeve is full at {open_n}/{max_open} positions.",
+        ]
+        open_trades = capacity.get("open_trades") or []
+        if open_trades:
+            lines.append("")
+            lines.append("Currently open:")
+            for t in open_trades:
+                lines.append(
+                    f"  #{t.get('id')} {t.get('product_id')} {t.get('side')} "
+                    f"@ {_fmt_px(t.get('entry'))} · {t.get('fill_type')}"
+                )
+            lines.append("")
+            lines.append("Close one to free a slot, then Accept again.")
+        return "\n".join(lines)
+    if reason == "halted":
+        return (
+            f"Idea #{idea_id} was NOT filled — live trading is halted "
+            f"({capacity.get('halted')})."
+        )
+    if reason == "unsized":
+        return f"Idea #{idea_id} has no entry/stop yet — no live clip placed."
+    if reason == "rejected":
+        return (
+            f"Idea #{idea_id} was accepted but the live clip did not go through "
+            "(exposure, contract floor, or execution mode). Check the agent log."
+        )
+    if reason in ("unavailable", "error"):
+        return f"Couldn’t reach the live sleeve for idea #{idea_id} — check the log."
+    return None
 
 
 def format_decision_reply(status: DecisionStatus, decision: str, idea_id: int) -> str:

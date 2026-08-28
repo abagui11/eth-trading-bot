@@ -395,6 +395,25 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
             trade_ideas_bridge.format_decision_reply(status, decision, idea_id),
             reply_markup=telegram_ui.main_keyboard(),
         )
+        # An Accept from a fill operator also takes a real mill clip. Runs off
+        # the event loop (SQLite + Coinbase REST) and never blocks the Accept
+        # itself — a full sleeve reports back instead of filling.
+        if (
+            decision == "accept"
+            and status == "recorded"
+            and trade_ideas_bridge.is_fill_operator(user_id)
+        ):
+            loop = asyncio.get_running_loop()
+            try:
+                verdict = await loop.run_in_executor(
+                    None, trade_ideas_bridge.request_manual_fill, idea_id, user_id
+                )
+            except Exception:
+                logger.exception("manual mill fill failed for idea %s", idea_id)
+                verdict = {"executed": False, "skip_reason": "error"}
+            note = trade_ideas_bridge.format_manual_fill_reply(verdict, idea_id)
+            if note:
+                await context.bot.send_message(chat_id, note[:4096])
         return
 
     if data == telegram_ui.CB_OPEN or data == telegram_ui.CB_FUND:

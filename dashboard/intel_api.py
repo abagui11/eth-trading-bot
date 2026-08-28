@@ -22,7 +22,6 @@ import ledger
 from intelligence import funding as intel_funding
 from intelligence import store as intel_store
 from macro import store as macro_store
-from models import Suggestion
 
 
 def _require_service_auth(authorization: str | None) -> None:
@@ -204,7 +203,7 @@ async def subscribers() -> dict:
 
 
 class MillExecuteRequest(BaseModel):
-    """Sized mill idea forwarded for a tiny live clip (mill sleeve limits)."""
+    """Sized mill idea forwarded for a live clip (mill sleeve limits)."""
 
     idea_id: int
     product_id: str
@@ -213,44 +212,47 @@ class MillExecuteRequest(BaseModel):
     stop_loss: float
     take_profits: list[float] = []
     signal_key: str | None = None
+    confidence: float | None = None
+    fill_type: str = "auto"  # auto (mill FIFO) | manual (operator Accept)
+    accepted_by: int | None = None  # Telegram id, required for manual
 
 
 @router.post("/execute/mill")
 async def execute_mill(body: MillExecuteRequest) -> dict:
-    """Mirror a mill house fill onto the live mill sleeve.
+    """Offer a sized mill idea to the live mill sleeve.
 
-    Sleeve, open-count, leverage, and daily-loss halt are enforced in
-    execute.py. A closed clip frees the slot for the next mint. EXECUTION_MODE=off
-    → no-op. Never affects the mill's paper book; fire-and-forget for the mill.
+    Conviction floor, empty-book FIFO rule, operator allowlist, sleeve,
+    open-count, leverage, and daily-loss halt are all enforced in
+    execute.execute_mill_idea. EXECUTION_MODE=off → no-op. Never affects the
+    mill's paper book; the mill treats this as fire-and-forget.
     """
     if body.direction not in ("long", "short"):
         raise HTTPException(status_code=422, detail="direction must be long|short")
+    if body.fill_type not in ("auto", "manual"):
+        raise HTTPException(status_code=422, detail="fill_type must be auto|manual")
 
     import execute
 
-    suggestion = Suggestion(
-        action="deriv_buy" if body.direction == "long" else "deriv_sell",
-        size=0.0,  # live sizing comes from LIVE_MILL_NOTIONAL_USD, not paper size
+    return execute.execute_mill_idea(
+        idea_id=body.idea_id,
+        product_id=body.product_id,
+        direction=body.direction,
         entry=body.entry,
         stop_loss=body.stop_loss,
         take_profits=list(body.take_profits or []),
-        risk_reward=None,
-        rationale=f"mill idea #{body.idea_id}",
-        product_id=body.product_id,
-        # Dedupe key: one live clip per mill idea, mirroring the OB rule.
-        order_block_ref=body.signal_key or f"mill-idea-{body.idea_id}",
+        signal_key=body.signal_key,
+        confidence=body.confidence,
+        fill_type=body.fill_type,
+        accepted_by=body.accepted_by,
     )
-    result = execute.maybe_execute_live(
-        suggestion,
-        body.entry,
-        cycle_id=f"mill_{body.idea_id}",
-        source="mill",
-    )
-    return {
-        "execution_mode": config.EXECUTION_MODE,
-        "executed": result is not None,
-        "result": result,
-    }
+
+
+@router.get("/execute/mill/capacity")
+async def execute_mill_capacity() -> dict:
+    """Live mill sleeve occupancy — lets the mill skip pointless POSTs."""
+    import execute
+
+    return execute.mill_capacity()
 
 
 @router.get("/charts/cycle")

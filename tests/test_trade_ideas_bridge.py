@@ -142,6 +142,101 @@ class TradeIdeasBridgeTests(unittest.TestCase):
                 trade_ideas_bridge.record_decision(5, 42, "accept"), "unavailable"
             )
 
+    # -- operator Accept → live clip -----------------------------------------
+
+    def _operator(self) -> int:
+        import bot_config
+
+        return bot_config.LIVE_MILL_FILL_TELEGRAM_IDS[0]
+
+    def test_only_listed_operators_can_fill(self) -> None:
+        self.assertTrue(trade_ideas_bridge.is_fill_operator(self._operator()))
+        self.assertFalse(trade_ideas_bridge.is_fill_operator(42))
+        verdict = trade_ideas_bridge.request_manual_fill(5, 42)
+        self.assertEqual(verdict["skip_reason"], "not_authorized")
+
+    def test_manual_fill_passes_idea_levels_to_the_executor(self) -> None:
+        with mock.patch(
+            "execute.execute_mill_idea", return_value={"executed": True}
+        ) as mocked:
+            trade_ideas_bridge.request_manual_fill(5, self._operator())
+        kwargs = mocked.call_args.kwargs
+        self.assertEqual(kwargs["product_id"], "ETH-USD")
+        self.assertEqual(kwargs["entry"], 100.0)
+        self.assertEqual(kwargs["stop_loss"], 95.0)
+        self.assertEqual(kwargs["take_profits"], [110.0, 120.0])
+        self.assertEqual(kwargs["signal_key"], "news:1")
+        self.assertEqual(kwargs["fill_type"], "manual")
+        self.assertEqual(kwargs["accepted_by"], self._operator())
+
+    def test_filled_idea_is_tagged_manual_in_the_mill_db(self) -> None:
+        with mock.patch("execute.execute_mill_idea", return_value={"executed": True}):
+            trade_ideas_bridge.request_manual_fill(5, self._operator())
+        conn = sqlite3.connect(self.db_path)
+        conn.row_factory = sqlite3.Row
+        row = conn.execute("SELECT * FROM ideas WHERE id = 5").fetchone()
+        conn.close()
+        self.assertEqual(row["live_fill_type"], "manual")
+        self.assertEqual(row["live_filled_by"], self._operator())
+
+    def test_unfilled_idea_is_not_tagged(self) -> None:
+        with mock.patch(
+            "execute.execute_mill_idea",
+            return_value={"executed": False, "skip_reason": "sleeve_full"},
+        ):
+            verdict = trade_ideas_bridge.request_manual_fill(5, self._operator())
+        self.assertEqual(verdict["skip_reason"], "sleeve_full")
+        conn = sqlite3.connect(self.db_path)
+        cols = {str(r[1]) for r in conn.execute("PRAGMA table_info(ideas)")}
+        if "live_fill_type" in cols:
+            row = conn.execute(
+                "SELECT live_fill_type FROM ideas WHERE id = 5"
+            ).fetchone()
+            self.assertIsNone(row[0])
+        conn.close()
+
+    def test_manual_fill_needs_sized_levels(self) -> None:
+        conn = sqlite3.connect(self.db_path)
+        conn.execute(
+            """
+            INSERT INTO ideas
+                (id, source, product_id, direction, title, blurb, signal_key,
+                 created_at)
+            VALUES (77, 'spike', 'ETH-USD', 'long', 'No levels', 'x',
+                    'spike:unsized', '2026-08-27T12:00:00Z')
+            """
+        )
+        conn.commit()
+        conn.close()
+        verdict = trade_ideas_bridge.request_manual_fill(77, self._operator())
+        self.assertEqual(verdict["skip_reason"], "unsized")
+
+    def test_sleeve_full_reply_names_the_open_trades(self) -> None:
+        text = trade_ideas_bridge.format_manual_fill_reply(
+            {
+                "executed": False,
+                "skip_reason": "sleeve_full",
+                "capacity": {
+                    "open": 3,
+                    "max_open": 3,
+                    "open_trades": [
+                        {
+                            "id": 12,
+                            "product_id": "BTC-USD",
+                            "side": "short",
+                            "entry": 90000.0,
+                            "fill_type": "manual",
+                        }
+                    ],
+                },
+            },
+            9,
+        )
+        assert text is not None
+        self.assertIn("Too many trades open", text)
+        self.assertIn("#12 BTC-USD short", text)
+        self.assertIn("Close one to free a slot", text)
+
     def test_get_idea(self) -> None:
         idea = trade_ideas_bridge.get_idea(5)
         self.assertIsNotNone(idea)

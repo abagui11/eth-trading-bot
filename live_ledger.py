@@ -33,7 +33,9 @@ CREATE TABLE IF NOT EXISTS live_trades (
     close_reason TEXT,
     opened_at TEXT NOT NULL,
     closed_at TEXT,
-    notes TEXT
+    notes TEXT,
+    fill_type TEXT NOT NULL DEFAULT 'auto',       -- 'auto' | 'manual'
+    filled_by INTEGER                             -- Telegram id on manual fills
 );
 
 CREATE TABLE IF NOT EXISTS live_meta (
@@ -74,6 +76,16 @@ def init_db() -> None:
             conn.execute(
                 "ALTER TABLE yield_nav_snapshots ADD COLUMN eth_price_usd REAL"
             )
+        live_cols = {r[1] for r in conn.execute("PRAGMA table_info(live_trades)")}
+        # Pre-existing rows all predate manual fills, so 'auto' is the correct
+        # backfill for the NOT NULL default.
+        if "fill_type" not in live_cols:
+            conn.execute(
+                "ALTER TABLE live_trades ADD COLUMN fill_type TEXT "
+                "NOT NULL DEFAULT 'auto'"
+            )
+        if "filled_by" not in live_cols:
+            conn.execute("ALTER TABLE live_trades ADD COLUMN filled_by INTEGER")
 
 
 # ---------------------------------------------------------------------------
@@ -94,6 +106,8 @@ def record_open(
     order_id: str | None,
     stop_order_id: str | None,
     notes: str | None = None,
+    fill_type: str = "auto",
+    filled_by: int | None = None,
 ) -> int:
     with _connect() as conn:
         cur = conn.execute(
@@ -101,8 +115,8 @@ def record_open(
             INSERT INTO live_trades (
                 cycle_id, source, product_id, instrument, side, qty, entry,
                 stop_loss, take_profits_json, order_id, stop_order_id,
-                status, opened_at, notes
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'open', ?, ?)
+                status, opened_at, notes, fill_type, filled_by
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'open', ?, ?, ?, ?)
             """,
             (
                 cycle_id,
@@ -118,6 +132,8 @@ def record_open(
                 stop_order_id,
                 _now_iso(),
                 notes,
+                fill_type,
+                int(filled_by) if filled_by is not None else None,
             ),
         )
         return int(cur.lastrowid or 0)
@@ -182,6 +198,15 @@ def get_live_performance() -> dict[str, Any]:
         open_rows = conn.execute(
             "SELECT source, COUNT(*) AS n FROM live_trades WHERE status = 'open' GROUP BY source"
         ).fetchall()
+        fill_rows = conn.execute(
+            """
+            SELECT source, fill_type,
+                   SUM(CASE WHEN status = 'open' THEN 1 ELSE 0 END) AS open_n,
+                   SUM(CASE WHEN status = 'closed' THEN 1 ELSE 0 END) AS closed_n,
+                   COALESCE(SUM(CASE WHEN status = 'closed' THEN pnl_usd END), 0) AS pnl
+            FROM live_trades GROUP BY source, fill_type
+            """
+        ).fetchall()
     by_source: dict[str, dict[str, Any]] = {}
     for r in rows:
         closed_n = int(r["closed_n"])
@@ -196,8 +221,21 @@ def get_live_performance() -> dict[str, Any]:
             str(r["source"]),
             {"closed": 0, "pnl_usd": 0.0, "win_rate": None, "open": 0},
         )["open"] = int(r["n"])
+    # Auto (mill self-fill) vs manual (operator Accept) attribution, so the
+    # two entry paths can be judged separately.
+    by_fill_type: dict[str, dict[str, Any]] = {}
+    for r in fill_rows:
+        by_fill_type.setdefault(str(r["source"]), {})[str(r["fill_type"])] = {
+            "open": int(r["open_n"] or 0),
+            "closed": int(r["closed_n"] or 0),
+            "pnl_usd": round(float(r["pnl"] or 0.0), 2),
+        }
     total_pnl = round(sum(v["pnl_usd"] for v in by_source.values()), 2)
-    return {"by_source": by_source, "total_pnl_usd": total_pnl}
+    return {
+        "by_source": by_source,
+        "by_fill_type": by_fill_type,
+        "total_pnl_usd": total_pnl,
+    }
 
 
 # ---------------------------------------------------------------------------

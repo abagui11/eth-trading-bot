@@ -23,8 +23,10 @@ else
   systemctl daemon-reload
 fi
 
-# Must run from APP_DIR so `import audit` resolves.
-sudo -u "$APP_USER" bash -c "cd '$APP_DIR' && '$PY' -c \"import audit, ledger, paper; audit.init_db(); ledger.init_db(); paper.init_db()\""
+# Must run from APP_DIR so `import audit` resolves. live_ledger is included so
+# its column migrations land before eth-agent restarts — the operator Accept
+# path writes live_trades in-process, ahead of the dashboard's own init_db.
+sudo -u "$APP_USER" bash -c "cd '$APP_DIR' && '$PY' -c \"import audit, ledger, paper, live_ledger; audit.init_db(); ledger.init_db(); paper.init_db(); live_ledger.init_db()\""
 
 systemctl restart eth-agent
 systemctl restart eth-dashboard

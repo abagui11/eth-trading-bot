@@ -102,24 +102,26 @@ def _check_daily_loss(source: str) -> bool:
 # Sizing (live-only — paper caps untouched)
 # ---------------------------------------------------------------------------
 
-def _live_notional_usd(source: str) -> float:
-    if source == "mill":
-        return bot_config.LIVE_MILL_NOTIONAL_USD
-    return bot_config.LIVE_HQ_EQUITY_USD * bot_config.LIVE_TRADE_DEPLOY_PCT
+def _mill_clip(product_id: str, price: float) -> tuple[float, float] | None:
+    """Mill target notional → (qty, notional), rounded UP to one nano contract.
 
-
-def _live_qty(product_id: str, notional_usd: float, price: float) -> float | None:
-    """Notional → qty with live floors; None when below the tradable floor."""
+    CDE orders fill in whole contracts, so a target below one contract cannot
+    execute at all. Rounding up rather than skipping is what keeps a clip
+    fillable once price rises past target / contract_floor — at ETH $3,000 a
+    $260 target is 0.087 ETH, under the 0.1 floor, and used to abort the fill.
+    The caller still checks the resulting notional against the sleeve, so an
+    oversized contract (BTC at a high print) is rejected there rather than here.
+    """
     if price <= 0:
         return None
-    qty = notional_usd / price
+    qty = bot_config.LIVE_MILL_NOTIONAL_USD / price
     floor = bot_config.LIVE_PRODUCT_QTY_FLOORS.get(product_id)
     if floor is not None and qty < floor:
-        logger.warning(
-            "Live qty %.6f below floor %.6f for %s — skipping", qty, floor, product_id
-        )
+        qty = float(floor)
+    qty = round(qty, 6)
+    if qty <= 0:
         return None
-    return round(qty, 6)
+    return qty, qty * price
 
 
 # ---------------------------------------------------------------------------
@@ -132,11 +134,20 @@ def maybe_execute_live(
     *,
     cycle_id: str | None,
     source: str = "hq",
+    fill_type: str = "auto",
+    filled_by: int | None = None,
 ) -> dict[str, Any] | None:
     """Mirror a validated fill onto Coinbase perps. Never raises into the
     paper path — all failures log, halt if needed, and return None."""
     try:
-        return _execute(suggestion, spot_price, cycle_id=cycle_id, source=source)
+        return _execute(
+            suggestion,
+            spot_price,
+            cycle_id=cycle_id,
+            source=source,
+            fill_type=fill_type,
+            filled_by=filled_by,
+        )
     except Exception:
         logger.exception("Live execution error (%s %s)", source, cycle_id)
         return None
@@ -148,6 +159,8 @@ def _execute(
     *,
     cycle_id: str | None,
     source: str,
+    fill_type: str = "auto",
+    filled_by: int | None = None,
 ) -> dict[str, Any] | None:
     mode = config.EXECUTION_MODE
     if mode == "off":
@@ -225,7 +238,10 @@ def _execute(
                 logger.info("Live skip: mill daily fill cap reached")
                 return None
 
-        notional = _live_notional_usd(source)
+        clip = _mill_clip(product_id, entry)
+        if clip is None:
+            return None
+        qty, notional = clip
         sleeve = bot_config.LIVE_MILL_SLEEVE_USD
         open_notional = sum(
             float(t["qty"]) * float(t["entry"]) for t in open_trades
@@ -235,10 +251,6 @@ def _execute(
                 "Live skip: %s exposure %.0f + %.0f exceeds %.0f×%.1fx",
                 source, open_notional, notional, sleeve, bot_config.LIVE_MAX_LEVERAGE,
             )
-            return None
-
-        qty = _live_qty(product_id, notional, entry)
-        if qty is None:
             return None
 
     order_payload = {
@@ -251,6 +263,8 @@ def _execute(
         "notional_usd": notional,
         "source": source,
         "cycle_id": cycle_id,
+        "fill_type": fill_type,
+        "filled_by": filled_by,
     }
 
     if mode == "shadow":
@@ -311,6 +325,8 @@ def _execute(
         order_id=order_id or None,
         stop_order_id=stop_order_id or None,
         notes=f"ob:{ob_ref}" if ob_ref else None,
+        fill_type=fill_type,
+        filled_by=filled_by,
     )
 
     if source == "mill":
@@ -320,10 +336,147 @@ def _execute(
         live_ledger.set_meta(_MILL_FILLS_KEY, f"{_today()}:{count + 1}")
 
     logger.info(
-        "LIVE FILL #%d %s %s %s qty=%.6f @ %.2f stop=%.2f",
-        trade_id, source, instrument, side, qty, fill_price, suggestion.stop_loss,
+        "LIVE FILL #%d %s %s %s %s qty=%.6f @ %.2f stop=%.2f",
+        trade_id, source, fill_type, instrument, side, qty, fill_price,
+        suggestion.stop_loss,
     )
     return {"mode": "live", "trade_id": trade_id, **order_payload, "fill": fill_price}
+
+
+# ---------------------------------------------------------------------------
+# Mill sleeve — capacity and the two entry paths (auto FIFO, manual Accept)
+# ---------------------------------------------------------------------------
+
+def mill_capacity() -> dict[str, Any]:
+    """Live mill sleeve occupancy. Safe to call from the bot's Telegram path."""
+    try:
+        open_trades = live_ledger.get_open_trades(source="mill")
+    except Exception:
+        logger.exception("mill_capacity read failed")
+        open_trades = []
+    open_notional = sum(
+        float(t["qty"]) * float(t["entry"]) for t in open_trades
+    )
+    max_open = bot_config.LIVE_MILL_MAX_OPEN
+    sleeve = bot_config.LIVE_MILL_SLEEVE_USD
+    return {
+        "open": len(open_trades),
+        "max_open": max_open,
+        "slots_free": max(max_open - len(open_trades), 0),
+        "open_notional_usd": round(open_notional, 2),
+        "sleeve_usd": sleeve,
+        "sleeve_free_usd": round(
+            max(sleeve * bot_config.LIVE_MAX_LEVERAGE - open_notional, 0.0), 2
+        ),
+        "halted": is_halted(),
+        "open_trades": [
+            {
+                "id": t["id"],
+                "product_id": t["product_id"],
+                "side": t["side"],
+                "entry": t["entry"],
+                "fill_type": t.get("fill_type") or "auto",
+                "opened_at": t["opened_at"],
+            }
+            for t in open_trades
+        ],
+    }
+
+
+def execute_mill_idea(
+    *,
+    idea_id: int,
+    product_id: str,
+    direction: str,
+    entry: float,
+    stop_loss: float,
+    take_profits: list[float] | None = None,
+    signal_key: str | None = None,
+    confidence: float | None = None,
+    fill_type: str = "auto",
+    accepted_by: int | None = None,
+) -> dict[str, Any]:
+    """Single gate for both mill entry paths. Returns a structured verdict.
+
+    ``auto`` is the always-on FIFO path: it fills only while the sleeve is
+    EMPTY, and only above the conviction floor, so it can never consume the
+    slots reserved for operator Accepts. ``manual`` comes from an Accept by a
+    LIVE_MILL_FILL_TELEGRAM_IDS operator and skips the conviction gate, but
+    still respects the open-count, sleeve, and halt limits.
+
+    ``skip_reason`` is the contract the Telegram reply is built from — in
+    particular ``sleeve_full`` is what tells an operator there are too many
+    trades already open.
+    """
+    capacity = mill_capacity()
+    verdict: dict[str, Any] = {
+        "executed": False,
+        "skip_reason": None,
+        "fill_type": fill_type,
+        "capacity": capacity,
+        "execution_mode": config.EXECUTION_MODE,
+        "result": None,
+    }
+
+    def _skip(reason: str) -> dict[str, Any]:
+        verdict["skip_reason"] = reason
+        logger.info("Mill idea #%s not filled (%s): %s", idea_id, fill_type, reason)
+        return verdict
+
+    if direction not in ("long", "short"):
+        return _skip("bad_direction")
+
+    if fill_type == "manual":
+        if accepted_by is None or int(accepted_by) not in tuple(
+            bot_config.LIVE_MILL_FILL_TELEGRAM_IDS
+        ):
+            return _skip("not_authorized")
+    elif fill_type == "auto":
+        if not bot_config.LIVE_MILL_AUTO_FILL_ENABLED:
+            return _skip("auto_disabled")
+        if confidence is None or float(confidence) < (
+            bot_config.LIVE_MILL_AUTO_MIN_CONFIDENCE
+        ):
+            return _skip("low_conviction")
+        # FIFO: the auto path exists only to guarantee the book is never
+        # empty. Once anything is open, later slots belong to manual Accepts.
+        if capacity["open"] > 0:
+            return _skip("book_not_empty")
+    else:
+        return _skip("bad_fill_type")
+
+    if capacity["halted"]:
+        return _skip("halted")
+    if capacity["slots_free"] <= 0:
+        return _skip("sleeve_full")
+
+    suggestion = Suggestion(
+        action="deriv_buy" if direction == "long" else "deriv_sell",
+        size=0.0,  # live sizing comes from the mill clip, not paper size
+        entry=entry,
+        stop_loss=stop_loss,
+        take_profits=list(take_profits or []),
+        risk_reward=None,
+        rationale=f"mill idea #{idea_id}",
+        product_id=product_id,
+        # Dedupe key: one live clip per mill idea, mirroring the OB rule.
+        order_block_ref=signal_key or f"mill-idea-{idea_id}",
+    )
+    result = maybe_execute_live(
+        suggestion,
+        entry,
+        cycle_id=f"mill_{idea_id}",
+        source="mill",
+        fill_type=fill_type,
+        filled_by=accepted_by,
+    )
+    if result is None:
+        # execute.py logs the specific reason (exposure, floor, dedupe, mode).
+        return _skip("rejected")
+    verdict["executed"] = True
+    verdict["result"] = result
+    verdict["capacity"] = mill_capacity()
+    return verdict
 
 
 # ---------------------------------------------------------------------------

@@ -109,18 +109,29 @@ LIVE_PRODUCT_QTY_FLOORS: dict[str, float] = {
 WATCHDOG_LIVE_ENABLED = False
 WATCHDOG_LIVE_META_KEY = "watchdog_live_enabled"
 
-# Volume-mill tiny live sleeve (same Coinbase account, internal partition).
-# Notional must cover one CDE nano ETH contract (0.1 ETH ≈ $250-300) — smaller
-# clips physically cannot fill on US futures. BTC mill ideas still skip
-# (1 contract = 0.01 BTC ≈ $800 > sleeve appetite). With the $400 sleeve and
-# the 1x exposure cap, at most ONE mill position is open at a time.
-# When a clip closes, that capital is free for the next mint. Capital (sleeve
-# + open count + daily loss) is the limiter — not a daily fill count.
-LIVE_MILL_SLEEVE_USD = 400.0
-LIVE_MILL_NOTIONAL_USD = 260.0       # per idea (≈ 1 nano ETH contract)
-LIVE_MILL_MAX_OPEN = 2
+# Volume-mill live sleeve (same Coinbase account, internal partition).
+# Orders are whole CDE nano contracts, so a target clip below one contract is
+# rounded UP to the contract floor rather than skipped: at ETH $3,000 a $260
+# target is 0.087 ETH, under the 0.1 floor, and would otherwise abort the fill
+# entirely. BTC clips are therefore ~1 contract (0.01 BTC) and only fit while
+# the sleeve has room. Capital (sleeve + open count + daily loss) is the
+# limiter — not a daily fill count. A closed clip frees its capital.
+LIVE_MILL_SLEEVE_USD = 1400.0
+LIVE_MILL_NOTIONAL_USD = 260.0       # target per idea (≈ 1 nano ETH contract)
+LIVE_MILL_MAX_OPEN = 3
 LIVE_MILL_MAX_FILLS_PER_DAY = 0      # 0 = no daily fill cap
-LIVE_MILL_DAILY_LOSS_LIMIT_USD = 80.0
+LIVE_MILL_DAILY_LOSS_LIMIT_USD = 112.0  # 8% of sleeve, same ratio as HQ
+
+# Objective: keep a mill clip open at all times. When the sleeve is EMPTY the
+# next sized idea at or above this confidence self-fills (FIFO — the first
+# qualifying mint wins the slot). Once one clip is open the remaining slots
+# are reserved for manual Accepts, so the auto path can never crowd them out.
+LIVE_MILL_AUTO_FILL_ENABLED = True
+LIVE_MILL_AUTO_MIN_CONFIDENCE = 0.5
+
+# Telegram ids whose Accept fills a real clip, bypassing the conviction gate.
+# Everyone else's Accept stays paper-only (user_paper_trades).
+LIVE_MILL_FILL_TELEGRAM_IDS: tuple[int, ...] = (8282981740, 2037245798)
 
 # Macro headline context (RSS + webhook advisory layer).
 MACRO_CONTEXT_ENABLED = True

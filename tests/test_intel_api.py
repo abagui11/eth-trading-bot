@@ -207,26 +207,34 @@ class IntelApiTests(unittest.TestCase):
         )
         self.assertEqual(response.status_code, 401)
 
+    def _mill_body(self, **overrides) -> dict:
+        body = {
+            "idea_id": 7,
+            "product_id": "ETH-USD",
+            "direction": "short",
+            "entry": 2000.0,
+            "stop_loss": 2030.0,
+            "take_profits": [1950.0],
+            "signal_key": "zmove:ETH-USD:abc",
+            "confidence": 0.6,
+        }
+        body.update(overrides)
+        return body
+
     def test_execute_mill_forwards_to_executor(self) -> None:
         with mock.patch(
             "execute.maybe_execute_live", return_value={"mode": "shadow"}
-        ) as mocked:
+        ) as mocked, mock.patch(
+            "execute.mill_capacity",
+            return_value={"open": 0, "max_open": 3, "slots_free": 3, "halted": None},
+        ):
             response = self.client.post(
-                "/api/v1/execute/mill",
-                headers=self.auth,
-                json={
-                    "idea_id": 7,
-                    "product_id": "ETH-USD",
-                    "direction": "short",
-                    "entry": 2000.0,
-                    "stop_loss": 2030.0,
-                    "take_profits": [1950.0],
-                    "signal_key": "zmove:ETH-USD:abc",
-                },
+                "/api/v1/execute/mill", headers=self.auth, json=self._mill_body()
             )
         self.assertEqual(response.status_code, 200)
         payload = response.json()
         self.assertTrue(payload["executed"])
+        self.assertIsNone(payload["skip_reason"])
         suggestion = mocked.call_args.args[0]
         self.assertEqual(suggestion.action, "deriv_sell")
         self.assertEqual(suggestion.product_id, "ETH-USD")
@@ -234,6 +242,54 @@ class IntelApiTests(unittest.TestCase):
         self.assertEqual(suggestion.order_block_ref, "zmove:ETH-USD:abc")
         self.assertEqual(mocked.call_args.kwargs["source"], "mill")
         self.assertEqual(mocked.call_args.kwargs["cycle_id"], "mill_7")
+        self.assertEqual(mocked.call_args.kwargs["fill_type"], "auto")
+
+    def test_execute_mill_auto_needs_conviction(self) -> None:
+        """Below the floor the mill never reaches the executor."""
+        with mock.patch("execute.maybe_execute_live") as mocked, mock.patch(
+            "execute.mill_capacity",
+            return_value={"open": 0, "max_open": 3, "slots_free": 3, "halted": None},
+        ):
+            response = self.client.post(
+                "/api/v1/execute/mill",
+                headers=self.auth,
+                json=self._mill_body(confidence=0.4),
+            )
+        self.assertEqual(response.json()["skip_reason"], "low_conviction")
+        mocked.assert_not_called()
+
+    def test_execute_mill_auto_only_fills_an_empty_book(self) -> None:
+        """Slots 2 and 3 belong to manual Accepts, not the FIFO auto path."""
+        with mock.patch("execute.maybe_execute_live") as mocked, mock.patch(
+            "execute.mill_capacity",
+            return_value={"open": 1, "max_open": 3, "slots_free": 2, "halted": None},
+        ):
+            response = self.client.post(
+                "/api/v1/execute/mill", headers=self.auth, json=self._mill_body()
+            )
+        self.assertEqual(response.json()["skip_reason"], "book_not_empty")
+        mocked.assert_not_called()
+
+    def test_execute_mill_manual_requires_known_operator(self) -> None:
+        with mock.patch("execute.maybe_execute_live") as mocked, mock.patch(
+            "execute.mill_capacity",
+            return_value={"open": 0, "max_open": 3, "slots_free": 3, "halted": None},
+        ):
+            response = self.client.post(
+                "/api/v1/execute/mill",
+                headers=self.auth,
+                json=self._mill_body(fill_type="manual", accepted_by=999),
+            )
+        self.assertEqual(response.json()["skip_reason"], "not_authorized")
+        mocked.assert_not_called()
+
+    def test_execute_mill_rejects_bad_fill_type(self) -> None:
+        response = self.client.post(
+            "/api/v1/execute/mill",
+            headers=self.auth,
+            json=self._mill_body(fill_type="sideways"),
+        )
+        self.assertEqual(response.status_code, 422)
 
     def test_execute_mill_rejects_bad_direction(self) -> None:
         response = self.client.post(

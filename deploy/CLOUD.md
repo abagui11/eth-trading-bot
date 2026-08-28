@@ -415,6 +415,8 @@ unaffected.
 | `/api/v1/subscribers` | broadcast recipients (mill fan-out; paywall logic stays here) |
 | `/api/v1/ideas/hq` | gated HQ ICT ideas |
 | `/api/v1/charts/cycle` | BTC 4-year-cycle PNG |
+| `POST /api/v1/execute/mill` | offer a sized mill idea to the live sleeve (auto or manual) |
+| `/api/v1/execute/mill/capacity` | mill sleeve occupancy — open count, free slots, halt reason |
 
 ```bash
 curl -H "Authorization: Bearer $SERVICE_TOKEN" \
@@ -444,6 +446,35 @@ journalctl -u trade-ideas -f
 
 Leave `TELEGRAM_CHAT_IDS` empty in production so recipients resolve from
 `/api/v1/subscribers`; set it to your own ID for a private dry run.
+
+#### Mill live sleeve — keeping a clip open
+
+The sleeve is `$1,400` with up to **3** open clips. Two paths fill it, both
+gated in `execute.execute_mill_idea` (hub-side — the mill never decides):
+
+- **auto (FIFO):** fires only while the sleeve is *empty*, and only for ideas
+  at or above `LIVE_MILL_AUTO_MIN_CONFIDENCE`. This is what stops the book
+  going idle; it deliberately never takes the 2nd or 3rd slot.
+- **manual:** an Accept from `LIVE_MILL_FILL_TELEGRAM_IDS`. Skips the
+  conviction floor, still obeys open-count, sleeve, and halt. At max the
+  operator gets a "Too many trades open" reply listing the open book instead
+  of a fill.
+
+Clip size rounds **up** to one whole CDE nano contract, so ETH clips are
+~$260–300 and BTC clips are ~0.01 × spot. A contract that no longer fits the
+sleeve is rejected by the exposure check — expect BTC to fill only when the
+book is otherwise near-empty.
+
+Requires `EXECUTION_MODE=shadow|live` here **and** `MILL_LIVE_ENABLED=true` in
+the mill's `.env`. Check occupancy and auto/manual attribution with:
+
+```bash
+curl -H "Authorization: Bearer $SERVICE_TOKEN" \
+  http://127.0.0.1:8080/api/v1/execute/mill/capacity
+sqlite3 /opt/eth-trading-agent/ledger.db \
+  "SELECT id, product_id, side, fill_type, filled_by, status FROM live_trades
+   WHERE source='mill' ORDER BY id DESC LIMIT 10;"
+```
 
 ### Deploy dashboard updates
 

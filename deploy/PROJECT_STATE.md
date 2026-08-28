@@ -349,17 +349,22 @@ Defaults from `bot_config.py` (non-secret tunables). Secrets and portfolio size 
 | `LIVE_TRADE_DEPLOY_PCT` | `0.50` | 50% of HQ sleeve per idea ($1,000) |
 | `LIVE_MAX_OPEN_HQ` | `2` | skip new HQ live ideas when full |
 | `LIVE_DAILY_LOSS_LIMIT_USD` | `160.0` | HQ live halt until next UTC day |
-| `LIVE_MILL_SLEEVE_USD` | `400.0` | mill live clip sleeve (same Coinbase account, partitioned) |
-| `LIVE_MILL_NOTIONAL_USD` | `260.0` | mill live notional per idea (≈ 1 nano ETH) |
-| `LIVE_MILL_MAX_OPEN` | `2` | mill live open-position cap |
+| `LIVE_MILL_SLEEVE_USD` | `1400.0` | mill live clip sleeve (same Coinbase account, partitioned); funded +$1,000 on 2026-08-28 |
+| `LIVE_MILL_NOTIONAL_USD` | `260.0` | **target** notional per clip. Orders are whole CDE nano contracts, so a target below one contract is rounded **up** to the contract floor rather than skipped — ETH ≈ $260–300, BTC ≈ 0.01 × spot. The sleeve check rejects a contract too big to fit |
+| `LIVE_MILL_MAX_OPEN` | `3` | mill live open-position cap |
 | `LIVE_MILL_MAX_FILLS_PER_DAY` | `0` | mill live daily fill cap; `0` = none (sleeve / open / daily loss still bind). Closed clips free the slot for the next mint |
-| `LIVE_MILL_DAILY_LOSS_LIMIT_USD` | `80.0` | mill live halt until next UTC day |
+| `LIVE_MILL_DAILY_LOSS_LIMIT_USD` | `112.0` | mill live halt until next UTC day (8% of sleeve, same ratio as HQ) |
+| `LIVE_MILL_AUTO_FILL_ENABLED` | `True` | FIFO self-fill so the book is never empty; set `False` to make every clip operator-driven |
+| `LIVE_MILL_AUTO_MIN_CONFIDENCE` | `0.5` | conviction floor for a self-fill. Admits news (0.6), funding (0.6), spike (0.625+), zmove (0.5+), cascade (0.5); excludes session-open cards (0.4). Manual Accepts bypass it |
+| `LIVE_MILL_FILL_TELEGRAM_IDS` | 2 ids | Telegram ids whose **Accept** takes a real clip. Everyone else's Accept stays paper-only |
 
 ---
 
 ## 10. Known issues / open questions
 
-- [ ] Live execution path (`execute.py`, `EXECUTION_MODE=shadow|live`) not implemented — paper only
+- [x] Live execution path (`execute.py`) implemented and **armed** — `EXECUTION_MODE=live` as of 2026-08-28
+- [ ] **`EXECUTION_MODE` is global, not per-lane.** `live` arms the HQ hourly sleeve ($1,000/idea, 2 open) *and* the mill sleeve together; only the watchdog has its own gate (`WATCHDOG_LIVE_ENABLED`). Adding a `LIVE_HQ_ENABLED` gate would let the two lanes be armed independently
+- [ ] **`halt_live()` writes one global `live_halt` key.** An HQ daily-loss halt ($160) also pauses mill fills, and vice versa ($112). Per-sleeve halts would need separate keys
 - [ ] HTF zone / M5 OB resolver edge cases under active tuning
 - [ ] Ops: flatten oversized open watchdog BTC shorts if still live after deploy (audit risk control)
 
@@ -369,6 +374,8 @@ Defaults from `bot_config.py` (non-secret tunables). Secrets and portfolio size 
 
 | Date | Change |
 |---|---|
+| 2026-08-28 | **Live execution armed** (`EXECUTION_MODE=live`) after the mill sleeve was funded to $1,400. Note this is a *global* switch: it arms the HQ hourly sleeve ($1,000/idea, max 2 open, $160 daily loss halt) alongside the mill sleeve ($260–$800 clips, max 3 open, $112 halt). The watchdog stays gated behind `WATCHDOG_LIVE_ENABLED=False`. `deploy/update.sh` now runs `live_ledger.init_db()` so `live_trades` column migrations land before `eth-agent` restarts — the operator Accept path writes that table in-process, ahead of the dashboard's own init. |
+| 2026-08-28 | **Mill sleeve redesign — keep a clip open at all times.** Sleeve funded to `$1,400` (+$1,000), `LIVE_MILL_MAX_OPEN=3`, daily loss halt to `$112` (8% of sleeve). Two entry paths now share one gate, `execute.execute_mill_idea`: **auto** (FIFO) fills only while the sleeve is *empty* and only at/above `LIVE_MILL_AUTO_MIN_CONFIDENCE=0.5`, so it can never crowd out the remaining slots; **manual** is an Accept from `LIVE_MILL_FILL_TELEGRAM_IDS`, which skips the conviction floor but still respects open-count, sleeve, and halt. A manual Accept at max replies "Too many trades open" with the open book instead of filling. Mill clips now round **up** to one nano contract instead of skipping — this fixes a live bug where ETH clips silently stopped filling above ~$2,600 spot (a $260 target is 0.087 ETH, under the 0.1 floor) and makes BTC ideas fillable for the first time. New `live_trades.fill_type` / `filled_by` and mill-side `ideas.live_fill_type` / `live_filled_by` distinguish auto from manual; `get_live_performance` reports `by_fill_type`. New `GET /api/v1/execute/mill/capacity`; `POST /api/v1/execute/mill` takes `confidence` / `fill_type` / `accepted_by` and returns `skip_reason` + `capacity`. |
 | 2026-08-27 | Eva paper v2: metrics + journal share one card (same layout as v1). July 2026 v2 fills trimmed so the live book / topline start 2026-08-01 (`deploy/trim_paper_july.py`). |
 | 2026-08-27 | HQ and mill X posts attach the Telegram decision-chart image (chunked `/2/media/upload`, v1.1 fallback). Text still ships if the upload fails. |
 | 2026-08-27 | Eva Trades paper journal: v2 (live) vs v1 (archived) labeled; archived list collapsed like the paper journal; both books show win rate, realized P&amp;L, avg/trade, profit factor. |
