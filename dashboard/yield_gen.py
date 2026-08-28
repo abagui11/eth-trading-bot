@@ -83,9 +83,10 @@ def derive_yield_metrics(
     go_live_date: str | None,
     nav_start_usd: float | None,
     eth_price_start: float | None,
+    net_eth_exposure: float | None = None,
     today: date | None = None,
 ) -> dict[str, Any]:
-    """Carry run-rate + ETH-NAV earnings from a go-live baseline."""
+    """Carry run-rate + ETH-NAV earnings + USD P&L split vs ETH price."""
     today = today or datetime.now(timezone.utc).date()
     earned_usd = None
     days = None
@@ -111,24 +112,52 @@ def derive_yield_metrics(
         if nav_eth_now is not None:
             pnl_eth = round(nav_eth_now - nav_eth_start, 6)
 
+    eth_move_pct = None
+    pnl_usd = None
+    pnl_ex_eth_usd = None
+    pnl_eth_price_usd = None
+    realized_beta = None
+    if (
+        nav_start_usd is not None
+        and eth_price_start is not None
+        and eth_price_start > 0
+        and eth_price_now is not None
+        and eth_price_now > 0
+        and net_eth_exposure is not None
+    ):
+        eth_move_pct = eth_price_now / eth_price_start - 1.0
+        pnl_usd = nav_usd - nav_start_usd
+        pnl_eth_price_usd = net_eth_exposure * (eth_price_now - eth_price_start)
+        pnl_ex_eth_usd = pnl_usd - pnl_eth_price_usd
+        denom = nav_start_usd * eth_move_pct
+        if abs(denom) > 1e-8:
+            realized_beta = pnl_eth_price_usd / denom
+
+    net_beta = None
+    if net_eth_exposure is not None and nav_eth_now and nav_eth_now > 0:
+        net_beta = net_eth_exposure / nav_eth_now
+
+    def _r(v: float | None, n: int = 2) -> float | None:
+        return None if v is None else round(v, n)
+
     return {
-        "yield_projected_usd": (
-            round(projected_usd, 2) if projected_usd is not None else None
-        ),
+        "yield_projected_usd": _r(projected_usd),
         "yield_projected_apy": projected_apy,
         "yield_earned_usd": earned_usd,
         "days_since_golive": days,
-        "nav_eth": round(nav_eth_now, 6) if nav_eth_now is not None else None,
-        "nav_eth_start": (
-            round(nav_eth_start, 6) if nav_eth_start is not None else None
-        ),
+        "nav_eth": _r(nav_eth_now, 6),
+        "nav_eth_start": _r(nav_eth_start, 6),
         "pnl_eth": pnl_eth,
         "go_live_date": go_live_date,
-        "nav_start_usd": (
-            round(nav_start_usd, 2) if nav_start_usd is not None else None
-        ),
+        "nav_start_usd": _r(nav_start_usd),
         "eth_price_start_usd": eth_price_start,
         "eth_price_usd": eth_price_now,
+        "net_eth_exposure": _r(net_eth_exposure, 6),
+        "net_beta": _r(net_beta, 4),
+        "eth_move_pct": _r(eth_move_pct, 6),
+        "pnl_ex_eth_usd": _r(pnl_ex_eth_usd),
+        "pnl_eth_price_usd": _r(pnl_eth_price_usd),
+        "realized_beta": _r(realized_beta, 4),
     }
 
 
@@ -196,6 +225,7 @@ def get_yield_payload() -> dict[str, Any]:
     projected_usd = _f((topline or {}).get("projectedUsd"))
     projected_apy = _f((topline or {}).get("projectedApy"))
     nav_eth_now = _f((topline or {}).get("navEthNow"))
+    net_eth_exposure = _f((topline or {}).get("netEthExposure"))
 
     # ---- Daily NAV snapshot + P&L since go-live ----
     nav_series: list[dict[str, Any]] = []
@@ -247,6 +277,7 @@ def get_yield_payload() -> dict[str, Any]:
         go_live_date=go_live_date,
         nav_start_usd=nav_start_usd,
         eth_price_start=eth_price_start,
+        net_eth_exposure=net_eth_exposure,
     )
 
     # ---- Plan summary ----

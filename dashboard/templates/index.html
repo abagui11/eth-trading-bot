@@ -925,6 +925,24 @@
         </div>
         <div class="metrics" style="margin-top:8px">
           <div class="metric">
+            <div class="label">P&amp;L vs ETH</div>
+            <div class="value" id="yield-pnl-ex-eth">…</div>
+          </div>
+          <div class="metric">
+            <div class="label">ETH since go-live</div>
+            <div class="value" id="yield-eth-move">…</div>
+          </div>
+          <div class="metric">
+            <div class="label">ETH price P&amp;L</div>
+            <div class="value" id="yield-pnl-eth-px">…</div>
+          </div>
+          <div class="metric">
+            <div class="label">ETH β realized</div>
+            <div class="value" id="yield-beta-realized">…</div>
+          </div>
+        </div>
+        <div class="metrics" style="margin-top:8px">
+          <div class="metric">
             <div class="label">P&amp;L since go-live</div>
             <div class="value" id="yield-pnl">…</div>
           </div>
@@ -935,6 +953,10 @@
           <div class="metric">
             <div class="label">Health factor</div>
             <div class="value" id="yield-hf">…</div>
+          </div>
+          <div class="metric">
+            <div class="label">Net β</div>
+            <div class="value" id="yield-net-beta">…</div>
           </div>
         </div>
         <div class="metrics" style="margin-top:8px">
@@ -1175,6 +1197,14 @@
       if (v == null) return '';
       return (Number(v) * 100).toFixed(2) + '%';
     }
+    function fmtSignedPct(v) {
+      if (v == null) return '—';
+      var n = Number(v) * 100;
+      var abs = Math.abs(n).toFixed(1) + '%';
+      if (n > 0) return '+' + abs;
+      if (n < 0) return '-' + abs;
+      return abs;
+    }
     function fmtEthSigned(v) {
       if (v == null) return '—';
       var n = Number(v);
@@ -1215,6 +1245,13 @@
           : fmtMoney(y.yield_projected_usd) + '/yr' + (y.yield_projected_apy != null ? ' · ' + fmtApy(y.yield_projected_apy) : ''));
         setText('yield-earned', fmtMoney(y.yield_earned_usd));
         setText('yield-pnl-eth', fmtEthSigned(y.pnl_eth));
+        setText('yield-pnl-ex-eth', y.pnl_ex_eth_usd == null ? '—' : fmtMoney(y.pnl_ex_eth_usd) + ' ex-ETH');
+        setText('yield-eth-move', fmtSignedPct(y.eth_move_pct));
+        setText('yield-pnl-eth-px', fmtMoney(y.pnl_eth_price_usd));
+        setText('yield-beta-realized', y.realized_beta != null
+          ? Number(y.realized_beta).toFixed(2)
+          : '—');
+        setText('yield-net-beta', y.net_beta != null ? Number(y.net_beta).toFixed(2) : '—');
         setText('yield-hf', y.health_factor != null ? Number(y.health_factor).toFixed(3) : 'no debt');
         setText('yield-pnl', fmtSigned(y.pnl_since_golive_usd));
         setText('yield-pnl-1d', fmtSigned(y.pnl_1d_usd));
@@ -1223,6 +1260,9 @@
         setText('yield-pt', fmtMoney(y.pt_usd));
         tone('yield-earned', y.yield_earned_usd);
         tone('yield-pnl-eth', y.pnl_eth);
+        tone('yield-pnl-ex-eth', y.pnl_ex_eth_usd);
+        tone('yield-eth-move', y.eth_move_pct);
+        tone('yield-pnl-eth-px', y.pnl_eth_price_usd);
         tone('yield-pnl', y.pnl_since_golive_usd);
         tone('yield-pnl-1d', y.pnl_1d_usd);
         if (strip) strip.textContent = fmtMoney(y.nav_usd);

@@ -20,11 +20,16 @@ class DeriveYieldMetricsTests(unittest.TestCase):
             go_live_date="2026-05-29",
             nav_start_usd=2000,
             eth_price_start=2000,
+            net_eth_exposure=1.0,
             today=date(2026, 8, 27),
         )
         self.assertEqual(m["days_since_golive"], 90)
         self.assertEqual(m["yield_earned_usd"], 73.97)  # 300 * 90 / 365
         self.assertEqual(m["pnl_eth"], 0.0)
+        self.assertEqual(m["pnl_ex_eth_usd"], 0.0)
+        self.assertEqual(m["pnl_eth_price_usd"], 2000.0)
+        self.assertEqual(m["realized_beta"], 1.0)
+        self.assertEqual(m["eth_move_pct"], 1.0)
 
     def test_keeps_carry_when_eth_unchanged(self) -> None:
         m = derive_yield_metrics(
@@ -36,10 +41,31 @@ class DeriveYieldMetricsTests(unittest.TestCase):
             go_live_date="2026-05-29",
             nav_start_usd=2000,
             eth_price_start=2000,
+            net_eth_exposure=1.0,
             today=date(2026, 8, 27),
         )
         self.assertEqual(m["yield_earned_usd"], 90.0)
         self.assertAlmostEqual(m["pnl_eth"], 0.05, places=6)
+        self.assertEqual(m["pnl_ex_eth_usd"], 100.0)
+        self.assertEqual(m["pnl_eth_price_usd"], 0.0)
+        self.assertIsNone(m["realized_beta"])
+
+    def test_stable_book_eth_double_is_all_ex_eth_zero(self) -> None:
+        m = derive_yield_metrics(
+            nav_usd=2000,
+            projected_usd=80,
+            projected_apy=0.04,
+            nav_eth_now=0.5,
+            eth_price_now=4000,
+            go_live_date="2026-05-29",
+            nav_start_usd=2000,
+            eth_price_start=2000,
+            net_eth_exposure=0.0,
+            today=date(2026, 8, 27),
+        )
+        self.assertEqual(m["pnl_ex_eth_usd"], 0.0)
+        self.assertEqual(m["pnl_eth_price_usd"], 0.0)
+        self.assertEqual(m["realized_beta"], 0.0)
 
     def test_eth_pnl_null_without_start_price(self) -> None:
         m = derive_yield_metrics(
@@ -81,6 +107,8 @@ class YieldPayloadTests(unittest.TestCase):
                     "navUsd": "3640",
                     "navEthNow": "1.82",
                     "ethPriceUsd": "2000",
+                    "netEthExposure": "1.62",
+                    "netBeta": "0.89",
                 },
             },
             {"plan": {"status": "blocked", "blockedReason": "credit", "actions": [], "warnings": []}},
