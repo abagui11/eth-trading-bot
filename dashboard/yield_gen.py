@@ -46,31 +46,44 @@ def _f(value: Any) -> float | None:
     return n if n == n else None  # NaN check
 
 
-def _eth_usd_on_date(iso_date: str) -> float | None:
-    """CoinGecko daily ETH/USD. Fail-soft — used only to backfill go-live price."""
-    try:
-        d = datetime.strptime(iso_date[:10], "%Y-%m-%d")
-    except ValueError:
+# CoinGecko daily closes sit ~1–3% off Aave's collateral oracle. Mixing them
+# made ETH look flat while wstETH USD dropped. Repair anything that far off.
+_ETH_TAPE_MISMATCH = 0.012
+
+
+def implied_eth_usd(
+    collateral_usd: float | None, collateral_eth: float | None
+) -> float | None:
+    """ETH/USD implied by Aave collateral USD ÷ ETH-equivalent units."""
+    if (
+        collateral_usd is None
+        or collateral_eth is None
+        or collateral_usd <= 0
+        or collateral_eth <= 0
+    ):
         return None
-    stamped = d.strftime("%d-%m-%Y")
-    try:
-        res = requests.get(
-            "https://api.coingecko.com/api/v3/coins/ethereum/history",
-            params={"date": stamped, "localization": "false"},
-            timeout=10,
-        )
-        res.raise_for_status()
-        px = (
-            res.json()
-            .get("market_data", {})
-            .get("current_price", {})
-            .get("usd")
-        )
-        n = float(px)
-        return n if n > 0 else None
-    except Exception as exc:  # noqa: BLE001
-        logger.warning("ETH history fetch failed for %s: %s", iso_date, exc)
-        return None
+    return collateral_usd / collateral_eth
+
+
+def align_eth_start(
+    stored: float | None,
+    *,
+    start_collateral_usd: float | None,
+    collateral_eth: float | None,
+) -> tuple[float | None, bool]:
+    """Prefer the Aave-implied go-live print over a third-party daily close.
+
+    Uses current collateral ETH units with the go-live collateral USD mark.
+    Safe while the wstETH sleeve hasn't been resized since go-live.
+    """
+    implied = implied_eth_usd(start_collateral_usd, collateral_eth)
+    if implied is None:
+        return stored, False
+    if stored is None:
+        return implied, True
+    if abs(stored - implied) / implied > _ETH_TAPE_MISMATCH:
+        return implied, True
+    return stored, False
 
 
 def derive_yield_metrics(
@@ -226,6 +239,7 @@ def get_yield_payload() -> dict[str, Any]:
     projected_apy = _f((topline or {}).get("projectedApy"))
     nav_eth_now = _f((topline or {}).get("navEthNow"))
     net_eth_exposure = _f((topline or {}).get("netEthExposure"))
+    collateral_eth = _f((topline or {}).get("collateralEth"))
 
     # ---- Daily NAV snapshot + P&L since go-live ----
     nav_series: list[dict[str, Any]] = []
@@ -259,12 +273,18 @@ def get_yield_payload() -> dict[str, Any]:
                     pnl_since_golive = round(nav - nav_start_usd, 2)
                 if len(nav_series) >= 2:
                     pnl_1d = round(nav - float(nav_series[-2]["nav_usd"]), 2)
-                if eth_price_start is None and go_live_date:
-                    eth_price_start = _eth_usd_on_date(go_live_date)
-                    if eth_price_start:
-                        live_ledger.backfill_yield_eth_price(
-                            go_live_date, eth_price_start
-                        )
+                eth_price_start, repaired = align_eth_start(
+                    eth_price_start,
+                    start_collateral_usd=_f(first.get("collateral_usd")),
+                    collateral_eth=collateral_eth,
+                )
+                if repaired and go_live_date and eth_price_start:
+                    live_ledger.set_yield_eth_price(go_live_date, eth_price_start)
+                    first["eth_price_usd"] = eth_price_start
+                    logger.info(
+                        "repaired go-live ETH/USD to Aave-implied %.4f",
+                        eth_price_start,
+                    )
         except Exception as exc:  # noqa: BLE001
             logger.warning("yield NAV snapshot failed: %s", exc)
 

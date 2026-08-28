@@ -270,6 +270,19 @@ def record_yield_nav(
         return cur.rowcount > 0
 
 
+def set_yield_eth_price(snapshot_date: str, eth_price_usd: float) -> None:
+    """Overwrite ETH/USD on a historical NAV row (Aave-tape repair)."""
+    with _connect() as conn:
+        conn.execute(
+            """
+            UPDATE yield_nav_snapshots
+               SET eth_price_usd = ?
+             WHERE snapshot_date = ?
+            """,
+            (float(eth_price_usd), snapshot_date),
+        )
+
+
 def backfill_yield_eth_price(snapshot_date: str, eth_price_usd: float) -> None:
     """Fill ETH/USD on a historical NAV row when it was recorded without a price."""
     with _connect() as conn:
