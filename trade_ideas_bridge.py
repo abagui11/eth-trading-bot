@@ -364,6 +364,33 @@ def expire_stale_ideas(minutes: int | None = None) -> int:
     return n
 
 
+_SWEEP_FLOOR_KEY = "mill_reoffer_floor"
+
+
+def _sweep_floor() -> str:
+    """Earliest mint the sweep may ever consider.
+
+    Set the first time the sweep runs and never moved after. Arming the sweep —
+    or restarting after downtime — would otherwise find a whole backlog of
+    ideas at once and fill the oldest thing that still happened to validate,
+    which is not the same as keeping the sleeve fed going forward.
+    """
+    try:
+        import live_ledger
+
+        floor = live_ledger.get_meta(_SWEEP_FLOOR_KEY)
+        if floor:
+            return floor
+        now = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+        live_ledger.set_meta(_SWEEP_FLOOR_KEY, now)
+        logger.info("Re-offer sweep armed; ignoring ideas minted before %s", now)
+        return now
+    except Exception:
+        logger.exception("Could not read the re-offer sweep floor")
+        # No floor means no idea of what is backlog: offer nothing.
+        return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
 def reoffer_candidates(limit: int = 5) -> list[dict[str, Any]]:
     """Recent cards that could still fill an empty sleeve, freshest first.
 
@@ -381,10 +408,13 @@ def reoffer_candidates(limit: int = 5) -> list[dict[str, Any]]:
     if conn is None:
         return []
     statuses = (*_LIVE_STATUSES, "expired")
-    cutoff = (
-        datetime.now(timezone.utc)
-        - timedelta(minutes=int(bot_config.LIVE_MILL_REOFFER_MAX_AGE_MIN))
-    ).strftime("%Y-%m-%dT%H:%M:%SZ")
+    cutoff = max(
+        (
+            datetime.now(timezone.utc)
+            - timedelta(minutes=int(bot_config.LIVE_MILL_REOFFER_MAX_AGE_MIN))
+        ).strftime("%Y-%m-%dT%H:%M:%SZ"),
+        _sweep_floor(),
+    )
     try:
         rows = conn.execute(
             f"""

@@ -61,8 +61,18 @@ class IdeasDbTestCase(unittest.TestCase):
         self._env = patch.dict(os.environ, {"IDEAS_DB": str(self.db)})
         self._env.start()
         self.now = datetime.now(timezone.utc)
+        # Pre-armed floor: these cases are about the filters, not the one-time
+        # guard against replaying an inherited backlog (see SweepFloorTests).
+        self._meta: dict[str, str] = {bridge._SWEEP_FLOOR_KEY: "1970-01-01T00:00:00Z"}
+        self._ledger = patch.multiple(
+            "live_ledger",
+            get_meta=lambda k: self._meta.get(k),
+            set_meta=lambda k, v: self._meta.__setitem__(k, v),
+        )
+        self._ledger.start()
 
     def tearDown(self) -> None:
+        self._ledger.stop()
         self._env.stop()
         self._tmp.cleanup()
 
@@ -202,6 +212,29 @@ class ExpiryTests(IdeasDbTestCase):
         )
         self.assertIn("expired", reply)
         self.assertIn("NOT filled", reply)
+
+
+class SweepFloorTests(IdeasDbTestCase):
+    """Arming the sweep must not fill out of the backlog it inherited."""
+
+    def setUp(self) -> None:
+        super().setUp()
+        self._meta.clear()  # never armed: this is the sweep's first ever run
+
+    def test_ideas_predating_the_first_run_are_never_offered(self) -> None:
+        self._idea(key="backlog", minutes_ago=30)
+        self.assertEqual(bridge.reoffer_candidates(), [])
+
+    def test_the_floor_is_recorded_once_and_not_moved(self) -> None:
+        bridge.reoffer_candidates()
+        first = self._meta[bridge._SWEEP_FLOOR_KEY]
+        bridge.reoffer_candidates()
+        self.assertEqual(self._meta[bridge._SWEEP_FLOOR_KEY], first)
+
+    def test_ideas_minted_after_arming_are_offered(self) -> None:
+        bridge.reoffer_candidates()  # arms the floor at "now"
+        fresh = self._idea(key="fresh", minutes_ago=-1)
+        self.assertEqual([c["id"] for c in bridge.reoffer_candidates()], [fresh])
 
 
 class ReofferCandidateTests(IdeasDbTestCase):

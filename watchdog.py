@@ -779,6 +779,18 @@ def run_watchdog() -> list[Suggestion] | None:
         live_exec.sync_live_positions()
     except Exception:
         logger.exception("Live position sync failed")
+
+    # Keeping a clip open is the mill's whole objective, and closing one is not
+    # the only way the sleeve empties (a flatten, or a close while the service
+    # was down). Cheap when occupied: the sweep is skipped without a DB read.
+    try:
+        import execute as live_exec
+        import trade_ideas_bridge
+
+        if live_exec.mill_capacity()["open"] == 0:
+            trade_ideas_bridge.sweep_reoffer()
+    except Exception:
+        logger.exception("Mill sleeve refill check failed")
     rs_bias = "neutral"
     if bot_config.RELATIVE_STRENGTH_ENABLED:
         try:
