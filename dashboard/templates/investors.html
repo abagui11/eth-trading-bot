@@ -11,7 +11,6 @@
 {% from "_macros.html" import trade_card, tip_badge %}
 {% set p = inv.portfolio %}
 {% set h = inv.health %}
-{% set acct = inv.account %}
 {% set ex = inv.exposure %}
 {% set d = inv.daily %}
 
@@ -107,14 +106,6 @@
           {% if h.leverage_x %}{{ "%.2f"|format(h.leverage_x) }}x{% else %}—{% endif %}
         </div>
       </div>
-      <div class="metric">
-        <div class="label">Liquidation buffer</div>
-        <div class="value">
-          {% if h.liquidation_buffer_pct is not none %}
-          {{ h.liquidation_buffer_pct|pct(decimals=1, sign=False) }}
-          {% else %}—{% endif %}
-        </div>
-      </div>
     </div>
     <p class="sub inv-footnote">
       Health factor is Eva equity divided by Eva's open position size:
@@ -122,74 +113,18 @@
       {{ h.gross_notional_usd|usd(decimals=0) }} of exposure reads
       {% if h.health_pct is not none %}{{ h.health_pct|pct(decimals=0, sign=False) }}{% else %}—{% endif %}.
       Higher is safer; 100% is unlevered. Above 40% is green, 20–40% amber,
-      below 20% red. Liquidation buffer is Coinbase's figure for the whole
-      futures account Eva shares, and is what actually governs a forced close.
+      below 20% red.
     </p>
-  </section>
-
-  <!-- ==== Exchange account ==== -->
-  <section class="card">
-    <h2>Exchange account</h2>
-    {% if acct.available %}
-    <div class="metrics">
-      <div class="metric">
-        <div class="label">Account equity</div>
-        <div class="value">{{ acct.equity_usd|usd }}</div>
-      </div>
-      <div class="metric">
-        <div class="label">Buying power</div>
-        <div class="value">{{ acct.available_funds_usd|usd }}</div>
-      </div>
-      <div class="metric">
-        <div class="label">Futures balance</div>
-        <div class="value">{{ acct.margin_balance_usd|usd }}</div>
-      </div>
-      <div class="metric">
-        <div class="label">Initial margin</div>
-        <div class="value">{{ acct.initial_margin_usd|usd }}</div>
-      </div>
-      <div class="metric">
-        <div class="label">Exchange unrealized</div>
-        <div class="value {{ 'pos' if (acct.exchange_unrealized_pnl_usd or 0) >= 0 else 'neg' }}">
-          {{ acct.exchange_unrealized_pnl_usd|usd(sign=True) }}
-        </div>
-      </div>
-      <div class="metric">
-        <div class="label">Exchange realized today</div>
-        <div class="value {{ 'pos' if (acct.daily_realized_pnl_usd or 0) >= 0 else 'neg' }}">
-          {{ acct.daily_realized_pnl_usd|usd(sign=True) }}
-        </div>
-      </div>
-      <div class="metric">
-        <div class="label">Liquidation threshold</div>
-        <div class="value">{{ acct.liquidation_threshold_usd|usd }}</div>
-      </div>
-      <div class="metric">
-        <div class="label">Liquidation buffer</div>
-        <div class="value">{{ acct.liquidation_buffer_usd|usd }}</div>
-      </div>
-    </div>
-    <p class="sub inv-footnote">
-      Whole Coinbase futures account, including activity outside Eva, read at
-      {{ acct.fetched_at }}. The exchange's unrealized figure can differ from
-      ours above: it marks against the futures contract, ours against index spot.
-    </p>
-    {% else %}
-    <p class="sub">
-      Live balance unavailable — showing configured sleeve capital of
-      {{ p.capital_base_usd|usd(decimals=0) }} instead. Trading credentials are
-      not loaded in this environment.
-    </p>
-    {% endif %}
   </section>
 
   <!-- ==== Open positions ==== -->
   <section class="card journal-card" id="inv-open-card">
     <h2>Open positions ({{ inv.open_trades|length }})</h2>
     <p class="sub journal-intro">
-      Every position with money in the market right now. Open a row for entry,
-      current mark, unrealized P&amp;L, the take-profit ladder with the targets
-      already banked, and where the stop currently sits.
+      Every position with money in the market right now. Size is what is still
+      open after any take-profits. Liquidation price is Coinbase's estimate for
+      that contract; n/a means they are not quoting one (typical when the
+      account is far from a forced close).
     </p>
     {% if inv.open_trades %}
     <div class="trade-list">

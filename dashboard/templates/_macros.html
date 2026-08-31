@@ -52,6 +52,15 @@
         {% if mode == 'open' %}
         ${{ "%.2f"|format(t.entry or t.avg_entry) }}
         {% if t.spot %} · mark ${{ "%.2f"|format(t.spot) }}{% endif %}
+        {% set q = t.get('qty_open') %}
+        {% if q is none %}{% set q = t.get('qty') %}{% endif %}
+        {% if q is none %}{% set q = t.get('eth_qty') %}{% endif %}
+        {% if q is not none %}
+        · {{ "%.2f"|format(q) }} {{ t.product_label or 'ETH' }}
+        {% endif %}
+        {% if t.liquidation_price is defined %}
+        · liq {% if t.liquidation_price %}${{ "%.2f"|format(t.liquidation_price) }}{% else %}n/a{% endif %}
+        {% endif %}
         {% else %}
         ${{ "%.2f"|format(t.entry) }} → ${{ "%.2f"|format(t.exit) }}
         {% endif %}

@@ -355,7 +355,7 @@ The dashboard is the intelligence hub. Four tabs: **Brain** (vision / tape / new
 
 ### Private investor link (`/investors`)
 
-A read-only page for investors, not linked from the hub and marked `noindex,nofollow`. It shows portfolio value, realized gain for the day and year to date, unrealized, the **health factor** (equity ÷ total open position size), every open position with its take-profit ladder and current stop, per-day realized P&L, and the paper track record.
+A read-only page for investors, not linked from the hub and marked `noindex,nofollow`. It shows Eva's portfolio value, realized gain for the day and year to date, unrealized, the **health factor** (Eva equity ÷ Eva open position size), every open Eva position with size, liquidation price (or n/a), take-profit ladder and current stop, per-day realized P&L, and the paper track record. Mill clips and the raw Coinbase account are not on this page.
 
 Gate it before sharing the URL:
 
@@ -371,7 +371,7 @@ Then share `https://dashboard.yourdomain.com/investors?k=<token>`. The first vis
 
 Leaving `INVESTOR_ACCESS_TOKEN` unset keeps the page reachable to anyone who knows the path — the same unlisted-only posture as `/volume`. Set it before sending the link to anyone outside the team.
 
-The health factor and the exchange-account panel read `cfm/balance_summary` live, so they need the CDP key in `.env`. Without it the page still renders and falls back to the configured sleeve capital (`LIVE_HQ_EQUITY_USD + LIVE_MILL_SLEEVE_USD`), labelled as an estimate.
+The page sizes Eva off `LIVE_HQ_EQUITY_USD`. It does not read Coinbase balances; `deploy/diagnose_live.py` is the operator tool for the real futures wallet.
 
 ### Macro headline webhook (optional push ingest)
 

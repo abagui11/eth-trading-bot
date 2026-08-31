@@ -11,24 +11,6 @@ from unittest.mock import patch
 import config
 
 
-def _account(equity: float = 1400.0, available: bool = True) -> dict:
-    return {
-        "available": available,
-        "source": "exchange" if available else "config",
-        "equity_usd": equity,
-        "available_funds_usd": 900.0,
-        "margin_balance_usd": 1400.0,
-        "exchange_unrealized_pnl_usd": 12.0,
-        "initial_margin_usd": 420.0,
-        "liquidation_threshold_usd": 210.0,
-        "liquidation_buffer_usd": 1190.0,
-        "liquidation_buffer_pct": 85.0,
-        "daily_realized_pnl_usd": 0.0,
-        "fetched_at": "2026-08-31T12:00:00Z",
-        "error": None,
-    }
-
-
 class InvestorPageTests(unittest.TestCase):
     """Renders against a real ledger so the payload path is exercised end to end."""
 
@@ -49,7 +31,6 @@ class InvestorPageTests(unittest.TestCase):
                 "dashboard.data.research.get_spot_prices",
                 return_value={"ETH-USD": 2000.0, "BTC-USD": 60000.0},
             ),
-            patch("dashboard.investor.get_account_snapshot", return_value=_account()),
         ]
         for p in self._patches:
             p.start()
@@ -123,6 +104,14 @@ class InvestorPageTests(unittest.TestCase):
         self.assertNotIn("Mill realized", html)
         self.assertNotIn("Trade mill", html)
 
+    def test_zero_coinbase_liq_price_renders_as_na(self) -> None:
+        from dashboard.investor import _parse_liq_price
+
+        self.assertIsNone(_parse_liq_price({"raw": {"liquidation_price": "0"}}))
+        self.assertEqual(
+            _parse_liq_price({"raw": {"liquidation_price": "1800.5"}}), 1800.5
+        )
+
     def test_flat_book_reports_no_exposure_rather_than_dividing_by_zero(self) -> None:
         self.live_ledger.record_close(
             self.trade_id, exit_price=2100.0, pnl_usd=210.0, close_reason="take_profit"
@@ -144,17 +133,21 @@ class InvestorPageTests(unittest.TestCase):
         self.assertIn("Unrealized (open)", html)
         self.assertIn("Health factor", html)
         self.assertIn("Open positions (1)", html)
+        self.assertNotIn("Exchange account", html)
+        self.assertNotIn("Account equity", html)
 
     def test_page_is_not_indexable(self) -> None:
         """A forwarded private link must never end up in a search result."""
         html = self.client.get("/investors").text
         self.assertIn('content="noindex,nofollow"', html)
 
-    def test_open_position_shows_entry_mark_and_unrealized(self) -> None:
+    def test_open_position_shows_entry_mark_size_and_liq(self) -> None:
         html = self.client.get("/investors").text
 
         self.assertIn("$2000.00", html)  # entry
         self.assertIn("mark $2000.00", html)
+        self.assertIn("2.10 ETH", html)
+        self.assertIn("liq n/a", html)
         self.assertIn("Unrealized", html)
 
     def test_untouched_ladder_renders_every_target_unhit(self) -> None:
@@ -255,10 +248,6 @@ class InvestorAccessTests(unittest.TestCase):
             patch(
                 "dashboard.data.research.get_spot_prices",
                 return_value={"ETH-USD": 2000.0, "BTC-USD": 60000.0},
-            ),
-            patch(
-                "dashboard.investor.get_account_snapshot",
-                return_value=_account(available=False),
             ),
         ]
         for p in self._patches:

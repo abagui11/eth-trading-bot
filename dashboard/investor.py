@@ -17,11 +17,7 @@ import live_ledger
 import paper
 
 from dashboard import data
-from dashboard.account import (
-    CONFIGURED_CAPITAL_USD,
-    build_health,
-    get_account_snapshot,
-)
+from dashboard.account import CONFIGURED_CAPITAL_USD, build_health
 
 _SOURCE = "hq"
 SLEEVE_LABELS = {"hq": "Eva"}
@@ -116,6 +112,46 @@ def _pct(numerator: float, denominator: float) -> float | None:
     return round(numerator / denominator * 100.0, 2)
 
 
+def _parse_liq_price(pos: dict[str, Any]) -> float | None:
+    """Coinbase quotes $0 when they are not estimating a liquidation price."""
+    raw = pos.get("raw") or pos
+    for key in ("liquidation_price", "estimated_liquidation_price"):
+        node = raw.get(key)
+        if isinstance(node, dict):
+            node = node.get("value")
+        if node in (None, ""):
+            continue
+        try:
+            px = float(node)
+        except (TypeError, ValueError):
+            continue
+        if px > 0:
+            return px
+    return None
+
+
+def _attach_liquidation(trades: list[dict[str, Any]]) -> None:
+    """Best-effort per-instrument liq price. Always sets the key (None → n/a)."""
+    instruments = {str(t.get("instrument") or "") for t in trades}
+    instruments.discard("")
+    found: dict[str, float | None] = {}
+    if instruments:
+        try:
+            from coinbase_deriv import get_gateway
+
+            gw = get_gateway()
+            for inst in instruments:
+                try:
+                    found[inst] = _parse_liq_price(gw.get_position(inst))
+                except Exception:
+                    found[inst] = None
+        except Exception:
+            pass
+    for trade in trades:
+        inst = str(trade.get("instrument") or "")
+        trade["liquidation_price"] = found.get(inst)
+
+
 def build_investor_payload(
     *,
     closed_limit: int = 40,
@@ -128,11 +164,10 @@ def build_investor_payload(
     the ledger and audit tables per trade, and none of it changes between
     refreshes.
     """
-    account = get_account_snapshot()
-
     # HQ only — mill clips share the Coinbase account but are a different
     # product, and mixing them here made Eva's book unreadable.
     open_trades = data.enrich_live_trades(live_ledger.get_open_trades(source=_SOURCE))
+    _attach_liquidation(open_trades)
     closed_trades = data.enrich_live_trades(
         live_ledger.get_closed_trades(limit=closed_limit, source=_SOURCE),
         closed=True,
@@ -153,13 +188,12 @@ def build_investor_payload(
     exposure = _exposure(open_trades)
     base = _capital_base()
     base_usd = float(base["usd"])
-    # Eva NAV, not Coinbase account equity — the latter includes the mill.
+    # Eva NAV from the allocated sleeve, not Coinbase account equity.
     portfolio_value = round(base_usd + realized_total + unrealized, 2)
 
     health = build_health(
         equity_usd=portfolio_value,
         gross_notional_usd=exposure["gross_notional_usd"],
-        account=account,
     )
 
     paper_books: dict[str, Any] = {"available": False}
@@ -178,7 +212,6 @@ def build_investor_payload(
     return {
         "generated_at": _now_iso(),
         "year": year,
-        "account": account,
         "health": health,
         "exposure": exposure,
         "portfolio": {
