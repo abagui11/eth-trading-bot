@@ -500,24 +500,19 @@ def _check_daily_loss(source: str) -> bool:
 # ---------------------------------------------------------------------------
 
 def _mill_clip(product_id: str, price: float) -> tuple[float, float] | None:
-    """Mill target notional → (qty, notional), rounded UP to one nano contract.
+    """Always size mill clips to exactly one CDE nano contract.
 
-    CDE orders fill in whole contracts, so a target below one contract cannot
-    execute at all. Rounding up rather than skipping is what keeps a clip
-    fillable once price rises past target / contract_floor — at ETH $3,000 a
-    $260 target is 0.087 ETH, under the 0.1 floor, and used to abort the fill.
-    The caller still checks the resulting notional against the sleeve, so an
-    oversized contract (BTC at a high print) is rejected there rather than here.
+    Dollar targeting used to request a fractional ETH size that the gateway
+    then floored, so Telegram showed 0.104565 while the fill was 0.1000.
+    One contract is the unit the venue actually fills. Sleeve capacity still
+    rejects a contract whose notional no longer fits (BTC at a high print).
     """
     if price <= 0:
         return None
-    qty = bot_config.LIVE_MILL_NOTIONAL_USD / price
     floor = bot_config.LIVE_PRODUCT_QTY_FLOORS.get(product_id)
-    if floor is not None and qty < floor:
-        qty = float(floor)
-    qty = round(qty, 6)
-    if qty <= 0:
+    if floor is None or floor <= 0:
         return None
+    qty = round(float(floor), 6)
     return qty, qty * price
 
 
@@ -651,6 +646,7 @@ def _execute(
             return None
 
     order_payload = {
+        "product_id": product_id,
         "instrument": instrument,
         "side": "buy" if side == "long" else "sell",
         "qty": qty,

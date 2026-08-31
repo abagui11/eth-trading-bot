@@ -480,10 +480,9 @@ gated in `execute.execute_mill_idea` (hub-side — the mill never decides):
   operator gets a "Too many trades open" reply listing the open book instead
   of a fill.
 
-Clip size rounds **up** to one whole CDE nano contract, so ETH clips are
-~$260–300 and BTC clips are ~0.01 × spot. A contract that no longer fits the
-sleeve is rejected by the exposure check — expect BTC to fill only when the
-book is otherwise near-empty.
+Clip size is **always one CDE nano contract** (0.1 ETH or 0.01 BTC). Notional
+is qty × mark; a contract that no longer fits the sleeve is rejected by the
+exposure check — expect BTC to fill only when the book is otherwise near-empty.
 
 Requires `EXECUTION_MODE=shadow|live` here **and** `MILL_LIVE_ENABLED=true` in
 the mill's `.env`. Check occupancy and auto/manual attribution with:

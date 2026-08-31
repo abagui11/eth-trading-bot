@@ -504,10 +504,22 @@ def format_manual_fill_reply(verdict: dict[str, Any], idea_id: int) -> str | Non
         mode = str(result.get("mode") or "")
         qty = result.get("qty")
         notional = result.get("notional_usd")
+        product_id = str(result.get("product_id") or "")
         head = "Live clip placed" if mode == "live" else f"Live clip ({mode})"
         bits = [f"{head} for idea #{idea_id}"]
-        if qty is not None and notional is not None:
-            bits.append(f"{float(qty):g} @ ~${float(notional):,.0f}")
+        if qty is not None:
+            floor = bot_config.LIVE_PRODUCT_QTY_FLOORS.get(product_id)
+            n_contracts = (
+                int(round(float(qty) / floor)) if floor and floor > 0 else 0
+            )
+            size = f"{float(qty):g}"
+            if n_contracts:
+                noun = "contract" if n_contracts == 1 else "contracts"
+                size = f"{n_contracts} {noun} ({float(qty):g})"
+            if notional is not None:
+                bits.append(f"{size} @ ~${float(notional):,.0f}")
+            else:
+                bits.append(size)
         if open_n is not None and max_open is not None:
             bits.append(f"sleeve {open_n}/{max_open}")
         return " · ".join(bits)

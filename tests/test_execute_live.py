@@ -92,10 +92,9 @@ class ExecuteLiveTests(unittest.TestCase):
         self.assertAlmostEqual(result["qty"], 0.5)
         self.assertEqual(result["instrument"], "ETP-20DEC30-CDE")
 
-    def test_mill_clip_rounds_up_to_one_contract(self) -> None:
-        # A $260 target on BTC at $90k is 0.0029 BTC, under the 0.01 contract
-        # floor. Rounding up to one contract ($900) is what makes BTC ideas
-        # fillable at all; the sleeve check below is the real guard.
+    def test_mill_clip_is_always_one_contract(self) -> None:
+        # BTC mill clips are 0.01 regardless of spot; the sleeve check is
+        # what rejects a contract whose notional no longer fits.
         result = execute.maybe_execute_live(
             _hq_suggestion(product_id="BTC-USD", entry=90000.0, stop_loss=88000.0),
             90000.0,
@@ -117,8 +116,6 @@ class ExecuteLiveTests(unittest.TestCase):
         self.assertIsNone(result)
 
     def test_mill_eth_clip_survives_a_high_eth_price(self) -> None:
-        # The regression this rounding fixes: at ETH $3,000 a flat $260 clip is
-        # 0.087 ETH, under the 0.1 floor, and used to abort the fill entirely.
         result = execute.maybe_execute_live(
             _hq_suggestion(entry=3000.0, stop_loss=2940.0),
             3000.0,
@@ -279,13 +276,12 @@ class ExecuteLiveTests(unittest.TestCase):
         self.assertIsNone(result)
 
     def test_mill_shadow_sizing(self) -> None:
-        # Mill $260 clip → 0.13 ETH at $2,000, above the 0.1 contract floor.
         result = execute.maybe_execute_live(
             _hq_suggestion(entry=2000.0), 2000.0, cycle_id="c1", source="mill"
         )
         self.assertIsNotNone(result)
-        self.assertAlmostEqual(result["notional_usd"], 260.0)
-        self.assertAlmostEqual(result["qty"], 0.13)
+        self.assertAlmostEqual(result["qty"], 0.1)
+        self.assertAlmostEqual(result["notional_usd"], 200.0)
 
     def test_halt_blocks_and_daily_halt_expires(self) -> None:
         execute.halt_live("daily_loss:hq:-200.00")

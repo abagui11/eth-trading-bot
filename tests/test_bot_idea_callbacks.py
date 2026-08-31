@@ -122,12 +122,14 @@ class IdeaCallbackTests(unittest.TestCase):
             {
                 "executed": True,
                 "capacity": {"open": 1, "max_open": 3},
-                "result": {"mode": "live", "qty": 0.1, "notional_usd": 300.0},
+                "result": {"mode": "live", "qty": 0.1, "notional_usd": 300.0,
+                           "product_id": "ETH-USD"},
             }
         )
         fill.assert_called_once_with(7, operator)
         self.assertIn("Accepted idea #7", texts[0])
         self.assertIn("Live clip placed", texts[1])
+        self.assertIn("1 contract (0.1)", texts[1])
         self.assertIn("sleeve 1/3", texts[1])
 
     def test_operator_accept_at_max_reports_too_many(self) -> None:

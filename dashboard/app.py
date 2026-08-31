@@ -184,7 +184,7 @@ def create_app() -> FastAPI:
                 "live_performance": live_ledger.get_live_performance(),
                 "mill_policy": {
                     "sleeve_usd": bot_config.LIVE_MILL_SLEEVE_USD,
-                    "notional_usd": bot_config.LIVE_MILL_NOTIONAL_USD,
+                    "clip_qty": dict(bot_config.LIVE_PRODUCT_QTY_FLOORS),
                     "max_open": bot_config.LIVE_MILL_MAX_OPEN,
                     "max_fills_per_day": bot_config.LIVE_MILL_MAX_FILLS_PER_DAY,
                     "daily_loss_limit_usd": bot_config.LIVE_MILL_DAILY_LOSS_LIMIT_USD,

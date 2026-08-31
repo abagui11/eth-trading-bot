@@ -810,7 +810,7 @@
         <p class="sub" style="margin-bottom:10px">
           Consumer ideas also go to Telegram (rate-capped) and <a href="/feed">/feed</a>.
           A tiny Coinbase sleeve tests whether those ideas are any good — independent of Accept.
-          ${{ "%.0f"|format(mill_policy.notional_usd) }} per ETH clip · ${{ "%.0f"|format(mill_policy.sleeve_usd) }} sleeve ·
+          1 nano per clip ({{ mill_policy.clip_qty.get('ETH-USD', 0.1) }} ETH / {{ mill_policy.clip_qty.get('BTC-USD', 0.01) }} BTC) · ${{ "%.0f"|format(mill_policy.sleeve_usd) }} sleeve ·
           {% if mill_policy.max_fills_per_day %}{{ mill_policy.max_fills_per_day }} fills/day · {% endif %}max {{ mill_policy.max_open }} open (one at a time at 1x) ·
           next mint after a close · −${{ "%.0f"|format(mill_policy.daily_loss_limit_usd) }} day halt.
         </p>

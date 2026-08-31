@@ -110,14 +110,12 @@ WATCHDOG_LIVE_ENABLED = False
 WATCHDOG_LIVE_META_KEY = "watchdog_live_enabled"
 
 # Volume-mill live sleeve (same Coinbase account, internal partition).
-# Orders are whole CDE nano contracts, so a target clip below one contract is
-# rounded UP to the contract floor rather than skipped: at ETH $3,000 a $260
-# target is 0.087 ETH, under the 0.1 floor, and would otherwise abort the fill
-# entirely. BTC clips are therefore ~1 contract (0.01 BTC) and only fit while
-# the sleeve has room. Capital (sleeve + open count + daily loss) is the
-# limiter — not a daily fill count. A closed clip frees its capital.
+# Every mill clip is exactly one CDE nano contract (LIVE_PRODUCT_QTY_FLOORS):
+# 0.1 ETH or 0.01 BTC. Notional is then qty × mark; a contract that no longer
+# fits the sleeve is rejected by the exposure check. Capital (sleeve + open
+# count + daily loss) is the limiter — not a daily fill count. A closed clip
+# frees its capital.
 LIVE_MILL_SLEEVE_USD = 1400.0
-LIVE_MILL_NOTIONAL_USD = 260.0       # target per idea (≈ 1 nano ETH contract)
 LIVE_MILL_MAX_OPEN = 3
 LIVE_MILL_MAX_FILLS_PER_DAY = 0      # 0 = no daily fill cap
 LIVE_MILL_DAILY_LOSS_LIMIT_USD = 112.0  # 8% of sleeve, same ratio as HQ
