@@ -133,6 +133,12 @@ LIVE_MILL_AUTO_MIN_CONFIDENCE = 0.5
 # Everyone else's Accept stays paper-only (user_paper_trades).
 LIVE_MILL_FILL_TELEGRAM_IDS: tuple[int, ...] = (8282981740, 2037245798)
 
+# Every live open/close/halt is pushed to these chats on top of
+# TELEGRAM_ADMIN_CHAT_ID. Both sleeves now fill without a human in the loop, so
+# a real fill must never be discoverable only by reading the journal.
+LIVE_ALERT_TELEGRAM_IDS: tuple[int, ...] = LIVE_MILL_FILL_TELEGRAM_IDS
+LIVE_FILL_ALERTS_ENABLED = True
+
 # Macro headline context (RSS + webhook advisory layer).
 MACRO_CONTEXT_ENABLED = True
 MACRO_POLL_INTERVAL_SEC = 300  # 5 minutes

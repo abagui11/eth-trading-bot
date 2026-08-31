@@ -476,6 +476,48 @@ def _trade_story_from_cycle(cycle_id: str | None) -> dict[str, Any]:
     }
 
 
+def _live_chart_links(cycle_id: str, story: dict[str, Any]) -> list[dict[str, str]]:
+    """Chart URLs for a live row, driven by what the snapshot actually holds.
+
+    Keyed off ``marked_chart_paths`` rather than guessing timeframes, so a row
+    never renders a link that 404s.
+    """
+    if not cycle_id:
+        return []
+    marked = story.get("marked_chart_paths") or {}
+    links = [
+        {"label": f"{tf} marked", "url": f"/api/chart/{cycle_id}?kind=marked&tf={tf}"}
+        for tf in ("H4", "H1", "M5")
+        if marked.get(tf)
+    ]
+    if not links and h4_marked_path(marked):
+        links.append({"label": "H4 marked", "url": f"/api/chart/{cycle_id}"})
+    return links
+
+
+def enrich_live_trades(trades: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Attach the originating cycle's reasoning and charts to live ledger rows.
+
+    The live book was the only book rendered without its reasoning: HQ fills
+    carry the hourly ``cycle_id``, so the journal's story is reusable verbatim.
+    Mill clips are minted by the volume lane and have no cycle, so they keep
+    their ledger notes instead of an empty story.
+    """
+    enriched: list[dict[str, Any]] = []
+    for trade in trades:
+        row = dict(trade)
+        cycle_id = str(row.get("cycle_id") or "")
+        try:
+            story = _trade_story_from_cycle(cycle_id) if cycle_id else {}
+        except Exception:
+            story = {}
+        row["story"] = story
+        row["charts"] = _live_chart_links(cycle_id, story)
+        row["has_story"] = bool(story.get("rationale") or row["charts"])
+        enriched.append(row)
+    return enriched
+
+
 def _open_counts_by_product(positions: list[dict[str, Any]]) -> dict[str, int]:
     counts: dict[str, int] = {}
     for pos in positions:

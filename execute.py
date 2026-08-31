@@ -340,6 +340,18 @@ def _execute(
         trade_id, source, fill_type, instrument, side, qty, fill_price,
         suggestion.stop_loss,
     )
+    if bot_config.LIVE_FILL_ALERTS_ENABLED:
+        lines = [
+            f"LIVE FILL #{trade_id} — {source} ({fill_type})",
+            f"{product_id} {side} {qty:.4f} @ {fill_price:,.2f}",
+            f"stop {float(suggestion.stop_loss):,.2f}",
+        ]
+        if filled_by:
+            lines.append(f"accepted by {filled_by}")
+        status = _sleeve_status(source)
+        if status:
+            lines.append(status)
+        _notify_ops("\n".join(lines))
     return {"mode": "live", "trade_id": trade_id, **order_payload, "fill": fill_price}
 
 
@@ -516,10 +528,47 @@ def sync_live_positions() -> None:
                     "Live trade #%s closed on exchange (%.2f, pnl %.2f)",
                     t["id"], exit_price, pnl,
                 )
+                if bot_config.LIVE_FILL_ALERTS_ENABLED:
+                    _notify_ops(
+                        f"LIVE CLOSE #{t['id']} — {t['source']}\n"
+                        f"{t['product_id']} {t['side']} {qty:.4f}\n"
+                        f"entry {float(t['entry']):,.2f} -> exit {exit_price:,.2f}\n"
+                        f"P&L {pnl:+,.2f} (exchange close / stop)"
+                    )
             _check_daily_loss("hq")
             _check_daily_loss("mill")
     except Exception:
         logger.exception("sync_live_positions failed")
+
+
+def _sleeve_status(source: str) -> str:
+    """Capacity line for fill alerts. Cosmetic — swallow any read failure."""
+    try:
+        if source == "mill":
+            cap = mill_capacity()
+            return (
+                f"sleeve {cap['open']}/{cap['max_open']} open · "
+                f"${cap['open_notional_usd']:,.0f} of ${cap['sleeve_usd']:,.0f}"
+            )
+        open_n = len(live_ledger.get_open_trades(source=source))
+        return f"sleeve {open_n}/{bot_config.LIVE_MAX_OPEN_HQ} open"
+    except Exception:
+        logger.exception("Sleeve status for alert failed (%s)", source)
+        return ""
+
+
+def _alert_chat_ids() -> list[str]:
+    """Admin chat plus the named operators, de-duped, order preserved."""
+    ids = [config.TELEGRAM_ADMIN_CHAT_ID or config.TELEGRAM_CHAT_ID]
+    ids += [str(i) for i in bot_config.LIVE_ALERT_TELEGRAM_IDS]
+    seen: set[str] = set()
+    out: list[str] = []
+    for raw in ids:
+        chat = str(raw or "").strip()
+        if chat and chat not in seen:
+            seen.add(chat)
+            out.append(chat)
+    return out
 
 
 def _notify_ops(message: str) -> None:
@@ -527,13 +576,16 @@ def _notify_ops(message: str) -> None:
     try:
         import requests as _rq
 
-        chat = config.TELEGRAM_ADMIN_CHAT_ID or config.TELEGRAM_CHAT_ID
-        if chat:
-            _rq.post(
-                f"https://api.telegram.org/bot{config.TELEGRAM_BOT_TOKEN}/sendMessage",
-                json={"chat_id": chat, "text": message},
-                timeout=10,
-            )
+        for chat in _alert_chat_ids():
+            try:
+                _rq.post(
+                    f"https://api.telegram.org/bot{config.TELEGRAM_BOT_TOKEN}/sendMessage",
+                    json={"chat_id": chat, "text": message},
+                    timeout=10,
+                )
+            except Exception:
+                # One unreachable operator must not silence the others.
+                logger.exception("Ops Telegram notify failed for chat %s", chat)
     except Exception:
         logger.exception("Ops Telegram notify failed")
     try:

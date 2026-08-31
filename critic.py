@@ -120,6 +120,10 @@ class RefineResult:
     downgraded: bool = False
     passes_used: int = 0
     final_findings: list[AuditFinding] = field(default_factory=list)
+    # Codes that forced the sanitize. The audit re-verifies the *replacement*
+    # prose, which is clean by construction, so without carrying these forward
+    # the reason a cycle was sanitized is lost for good.
+    sanitize_reasons: list[str] = field(default_factory=list)
 
 
 @dataclass
@@ -135,6 +139,7 @@ class AuditVerdict:
     sanitized: bool = False
     downgraded: bool = False
     passes_used: int = 0
+    sanitize_reasons: list[str] = field(default_factory=list)
     _score: int | None = field(default=None, repr=False)
     _score_breakdown: dict[str, Any] | None = field(default=None, repr=False)
 
@@ -163,8 +168,13 @@ def compute_chart_read_score(verdict: AuditVerdict) -> tuple[int, dict[str, Any]
     warning = sum(1 for f in verdict.deterministic if f.severity == "warning")
     llm_hall = len(verdict.llm_hallucinations)
     score = 100 - critical * 15 - warning * 5 - llm_hall * 20
-    if verdict.sanitized:
+    # A downgrade killed a real trade; a bare sanitize only rewrote the prose of
+    # a decision that was already no_trade. Scoring them alike buried genuine
+    # downgrades among routine abstentions and made the metric unreadable.
+    if verdict.downgraded:
         score -= 30
+    elif verdict.sanitized:
+        score -= 10
     score = max(0, score)
     breakdown = {
         "critical": critical,
@@ -172,6 +182,7 @@ def compute_chart_read_score(verdict: AuditVerdict) -> tuple[int, dict[str, Any]
         "llm_hallucinations": llm_hall,
         "sanitized": verdict.sanitized,
         "downgraded": verdict.downgraded,
+        "sanitize_reasons": list(verdict.sanitize_reasons),
         "verified_claims": len(verdict.llm_verified),
     }
     return score, breakdown
@@ -481,6 +492,8 @@ def refine_suggestion(
         [f for f in final_findings if f.code == "LLM_HALLUCINATION"],
     )})
 
+    sanitize_reasons: list[str] = []
+
     if suggestion.action in _TRADE_ACTIONS:
         llm_body = sanitize_rationale(
             market_context, downgrade_reason=reason_codes or None
@@ -491,6 +504,7 @@ def refine_suggestion(
         suggestion.decision_charts = ["H4"]
         downgraded = True
         sanitized = True
+        sanitize_reasons = list(reason_codes)
     elif findings_require_refine(
         [f for f in final_findings if f.code != "LLM_HALLUCINATION"],
         [f for f in final_findings if f.code == "LLM_HALLUCINATION"],
@@ -501,6 +515,15 @@ def refine_suggestion(
         )
         suggestion.decision_charts = ["H4"]
         sanitized = True
+        sanitize_reasons = list(reason_codes)
+
+    if sanitized:
+        logger.info(
+            "Rationale sanitized (%s) for %s: %s",
+            "downgraded trade" if downgraded else "abstention prose",
+            suggestion.product_id,
+            ", ".join(sanitize_reasons) or "no codes collected",
+        )
 
     return RefineResult(
         suggestion=suggestion,
@@ -509,6 +532,7 @@ def refine_suggestion(
         downgraded=downgraded,
         passes_used=passes_used,
         final_findings=final_findings,
+        sanitize_reasons=sanitize_reasons,
     )
 
 
@@ -1031,6 +1055,7 @@ def audit_text(
     sanitized: bool = False,
     downgraded: bool = False,
     passes_used: int = 0,
+    sanitize_reasons: list[str] | None = None,
 ) -> AuditVerdict:
     """Run deterministic checks and optional LLM critic; persist verdict."""
     deterministic = verify_deterministic(text, ctx, suggestion=suggestion)
@@ -1052,6 +1077,7 @@ def audit_text(
         sanitized=sanitized,
         downgraded=downgraded,
         passes_used=passes_used,
+        sanitize_reasons=list(sanitize_reasons or []),
     )
     chart_score, breakdown = compute_chart_read_score(verdict)
     verdict._score = chart_score
@@ -1082,6 +1108,7 @@ def audit_hourly_cycle(
     sanitized: bool = False,
     downgraded: bool = False,
     passes_used: int = 0,
+    sanitize_reasons: list[str] | None = None,
 ) -> AuditVerdict:
     """Audit hourly suggestion rationale after snapshot is saved."""
     text = llm_rationale if llm_rationale is not None else split_rationale(suggestion.rationale)[0]
@@ -1096,6 +1123,7 @@ def audit_hourly_cycle(
         sanitized=sanitized,
         downgraded=downgraded,
         passes_used=passes_used,
+        sanitize_reasons=sanitize_reasons,
     )
 
 

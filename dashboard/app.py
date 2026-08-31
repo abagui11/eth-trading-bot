@@ -138,8 +138,12 @@ def create_app() -> FastAPI:
                 "archived_performance": data.get_archived_performance_payload(),
                 "macro": data.get_macro_payload(),
                 "brain": get_brain_payload(),
-                "live_open": live_ledger.get_open_trades(source="hq"),
-                "live_closed": live_ledger.get_closed_trades(limit=15, source="hq"),
+                "live_open": data.enrich_live_trades(
+                    live_ledger.get_open_trades(source="hq")
+                ),
+                "live_closed": data.enrich_live_trades(
+                    live_ledger.get_closed_trades(limit=15, source="hq")
+                ),
                 "mill_open": live_ledger.get_open_trades(source="mill"),
                 "mill_closed": live_ledger.get_closed_trades(limit=20, source="mill"),
                 "live_performance": live_ledger.get_live_performance(),

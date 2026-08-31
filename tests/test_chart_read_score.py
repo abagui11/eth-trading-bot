@@ -25,7 +25,7 @@ class ChartReadScoreTests(unittest.TestCase):
         score, _ = compute_chart_read_score(verdict)
         self.assertEqual(score, 65)  # 100 - 15 - 20
 
-    def test_sanitized_penalty_floors_at_zero(self) -> None:
+    def test_downgrade_penalty_floors_at_zero(self) -> None:
         verdict = AuditVerdict(
             source="hourly",
             deterministic=[
@@ -36,9 +36,30 @@ class ChartReadScoreTests(unittest.TestCase):
                 AuditFinding(code="E", message="e", severity="critical"),
             ],
             sanitized=True,
+            downgraded=True,
         )
         score, _ = compute_chart_read_score(verdict)
-        self.assertEqual(score, 0)
+        self.assertEqual(score, 0)  # 100 - 75 - 30, clamped
+
+    def test_downgrade_penalised_harder_than_prose_sanitize(self) -> None:
+        """A killed trade and a rewritten abstention are not the same event."""
+        prose_only = AuditVerdict(source="hourly", sanitized=True)
+        killed_trade = AuditVerdict(source="hourly", sanitized=True, downgraded=True)
+        self.assertEqual(compute_chart_read_score(prose_only)[0], 90)
+        self.assertEqual(compute_chart_read_score(killed_trade)[0], 70)
+
+    def test_sanitize_reasons_survive_into_breakdown(self) -> None:
+        """The audit re-verifies the replacement prose, so without this the
+        reason a cycle was sanitized is unrecoverable."""
+        verdict = AuditVerdict(
+            source="hourly",
+            sanitized=True,
+            sanitize_reasons=["CONTEXT_CONFLICT_UNACKNOWLEDGED"],
+        )
+        _, breakdown = compute_chart_read_score(verdict)
+        self.assertEqual(
+            breakdown["sanitize_reasons"], ["CONTEXT_CONFLICT_UNACKNOWLEDGED"]
+        )
 
 
 if __name__ == "__main__":

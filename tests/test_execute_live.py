@@ -8,7 +8,7 @@ from __future__ import annotations
 import tempfile
 import unittest
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 import bot_config
 import config
@@ -456,6 +456,48 @@ class MillSleeveTests(unittest.TestCase):
         perf = live_ledger.get_live_performance()
         self.assertEqual(perf["by_fill_type"]["mill"]["manual"]["open"], 1)
         self.assertEqual(perf["by_fill_type"]["mill"]["auto"]["open"], 1)
+
+
+class LiveAlertRoutingTests(unittest.TestCase):
+    """Both sleeves fill without a human in the loop, so an alert that reaches
+    only one chat is a silent fill for everyone else."""
+
+    def test_alerts_reach_admin_and_every_operator(self) -> None:
+        with patch.object(config, "TELEGRAM_ADMIN_CHAT_ID", "999"), patch.object(
+            bot_config, "LIVE_ALERT_TELEGRAM_IDS", (111, 222)
+        ):
+            self.assertEqual(execute._alert_chat_ids(), ["999", "111", "222"])
+
+    def test_operator_doubling_as_admin_is_not_messaged_twice(self) -> None:
+        with patch.object(config, "TELEGRAM_ADMIN_CHAT_ID", "111"), patch.object(
+            bot_config, "LIVE_ALERT_TELEGRAM_IDS", (111, 222)
+        ):
+            self.assertEqual(execute._alert_chat_ids(), ["111", "222"])
+
+    def test_missing_admin_chat_still_reaches_operators(self) -> None:
+        with patch.object(config, "TELEGRAM_ADMIN_CHAT_ID", None), patch.object(
+            config, "TELEGRAM_CHAT_ID", ""
+        ), patch.object(bot_config, "LIVE_ALERT_TELEGRAM_IDS", (111,)):
+            self.assertEqual(execute._alert_chat_ids(), ["111"])
+
+    def test_one_unreachable_chat_does_not_silence_the_rest(self) -> None:
+        sent: list[str] = []
+
+        def _post(url, **kwargs):
+            chat = kwargs.get("json", {}).get("chat_id")
+            if chat == "111":
+                raise RuntimeError("telegram down for this chat")
+            sent.append(chat)
+
+        mock_requests = MagicMock()
+        mock_requests.post.side_effect = _post
+        with patch.object(config, "TELEGRAM_ADMIN_CHAT_ID", "999"), patch.object(
+            bot_config, "LIVE_ALERT_TELEGRAM_IDS", (111, 222)
+        ), patch.object(config, "RESEND_API_KEY", ""), patch.dict(
+            "sys.modules", {"requests": mock_requests}
+        ):
+            execute._notify_ops("fill")
+        self.assertEqual(sent, ["999", "222"])
 
 
 if __name__ == "__main__":

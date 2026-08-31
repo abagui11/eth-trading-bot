@@ -260,6 +260,7 @@ def run_cycle() -> list[tuple[Suggestion, list[str]]] | None:
                     sanitized=refine.sanitized,
                     downgraded=refine.downgraded,
                     passes_used=refine.passes_used,
+                    sanitize_reasons=refine.sanitize_reasons,
                 )
                 notify.send_hourly_monitor_report(
                     verdict, broadcast_sent=broadcast_sent

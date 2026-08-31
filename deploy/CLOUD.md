@@ -476,6 +476,54 @@ sqlite3 /opt/eth-trading-agent/ledger.db \
    WHERE source='mill' ORDER BY id DESC LIMIT 10;"
 ```
 
+#### Live fill / close alerts
+
+Both sleeves fill unattended, so every live open and close pushes a Telegram
+card to `TELEGRAM_ADMIN_CHAT_ID` **and** every id in `LIVE_ALERT_TELEGRAM_IDS`
+(defaults to the two mill fill operators). Halts already used this path. The
+list is de-duped, and one unreachable chat no longer stops the others being
+notified. Set `LIVE_FILL_ALERTS_ENABLED=False` in `bot_config.py` to silence
+fills while keeping halt alerts.
+
+If alerts stop arriving, check the bot token can reach each chat — each
+operator must have started a conversation with the bot at least once:
+
+```bash
+journalctl -u eth-agent -n 200 | grep 'Ops Telegram notify failed'
+```
+
+#### Nothing is filling — run the diagnostic first
+
+`deploy/diagnose_live.py` walks every live gate in the same order
+`execute._execute` applies them and names the first one that blocks, for both
+the HQ/Eva and mill sleeves. It is read-only: it resolves instruments and reads
+balances but never places, cancels, or closes an order.
+
+```bash
+cd /opt/eth-trading-agent
+sudo -u ethagent .venv/bin/python deploy/diagnose_live.py
+```
+
+It must be run **on the server** — run from a laptop it reports that machine's
+`.env` and dev ledger, not production. Exit code is `1` when a blocker is found.
+
+The gate worth knowing by heart: `EXECUTION_MODE=off` returns *before* any
+logging, so a disabled sleeve produces **no** "Live skip" line at all. Silence
+in the log is the signature of the master switch being off, not of a quiet
+market. Every other refusal names itself:
+
+```bash
+journalctl -u eth-agent -n 500     | grep -E 'Live skip|Vault skip|LIVE FILL'
+journalctl -u eth-dashboard -n 500 | grep 'Mill idea'
+journalctl -u trade-ideas -n 500   | grep 'Mill live bridge'
+```
+
+Sizing is also worth a sanity check: `LIVE_MILL_SLEEVE_USD` and
+`LIVE_HQ_EQUITY_USD` are hardcoded constants that are never reconciled against
+the real balance. A deposit sitting in the spot/USDC wallet does **not** fund
+the sleeve — it has to be moved into the CFM futures wallet. The diagnostic
+prints the actual futures cash so you can compare.
+
 ### Deploy dashboard updates
 
 Same as the bot — push to GitHub, then on the server:
