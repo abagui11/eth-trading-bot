@@ -159,6 +159,13 @@ IDEA_EXPIRY_MINUTES: int = 15
 # Auto-fill otherwise only ever fires at the moment an idea is minted, so a
 # closed clip left the sleeve idle until the next mint happened to land.
 LIVE_MILL_REOFFER_ENABLED: bool = True
+# How far back the sweep looks. Deliberately longer than IDEA_EXPIRY_MINUTES:
+# expiry governs what a person may still tap Accept on, where a stale card is
+# judged by eye, whereas the sweep re-prices every candidate against the live
+# mark first — revalidation, not the clock, is what keeps it honest. At the
+# mill's bursty ~20-30 fillable ideas a day, a 15-minute lookback would leave
+# the sweep with nothing to replay in most windows.
+LIVE_MILL_REOFFER_MAX_AGE_MIN: int = 120
 
 # Every live open/close/halt is pushed to these chats on top of
 # TELEGRAM_ADMIN_CHAT_ID. Both sleeves now fill without a human in the loop, so

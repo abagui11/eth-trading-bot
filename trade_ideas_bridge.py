@@ -368,29 +368,42 @@ def reoffer_candidates(limit: int = 5) -> list[dict[str, Any]]:
     """Recent cards that could still fill an empty sleeve, freshest first.
 
     Freshest rather than oldest: the sweep runs when a clip closes, which can
-    be hours after minting, and a newer read of the market is likelier to
+    be a while after minting, and a newer read of the market is likelier to
     survive revalidation than the stalest one in the queue.
+
+    Expired cards are still eligible here, within the sweep's own lookback.
+    Expiry exists so a *person* cannot tap Accept on a card whose levels they
+    would be judging by eye; the sweep re-prices against the live mark before
+    it commits, so the clock is not the thing protecting it. The mill's own
+    ``retired`` rows are never eligible — those were undeliverable.
     """
     conn = _connect()
     if conn is None:
         return []
+    statuses = (*_LIVE_STATUSES, "expired")
+    cutoff = (
+        datetime.now(timezone.utc)
+        - timedelta(minutes=int(bot_config.LIVE_MILL_REOFFER_MAX_AGE_MIN))
+    ).strftime("%Y-%m-%dT%H:%M:%SZ")
     try:
         rows = conn.execute(
             f"""
             SELECT id, product_id, direction, entry, stop_loss,
                    take_profits_json, signal_key, confidence
             FROM ideas
-            WHERE status IN ({", ".join("?" * len(_LIVE_STATUSES))})
+            WHERE status IN ({", ".join("?" * len(statuses))})
               AND live_fill_type IS NULL
               AND entry IS NOT NULL AND stop_loss IS NOT NULL
               AND direction IN ('long', 'short')
               AND confidence >= ?
+              AND COALESCE(sent_at, created_at) >= ?
             ORDER BY COALESCE(sent_at, created_at) DESC
             LIMIT ?
             """,
             (
-                *_LIVE_STATUSES,
+                *statuses,
                 float(bot_config.LIVE_MILL_AUTO_MIN_CONFIDENCE),
+                cutoff,
                 int(limit),
             ),
         ).fetchall()

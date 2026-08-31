@@ -205,12 +205,21 @@ class ExpiryTests(IdeasDbTestCase):
 
 
 class ReofferCandidateTests(IdeasDbTestCase):
-    def test_expired_retired_and_filled_cards_are_not_candidates(self) -> None:
-        self._idea(key="a", minutes_ago=5, status="expired")
+    def test_filled_and_retired_cards_are_not_candidates(self) -> None:
         self._idea(key="b", minutes_ago=6, live_fill_type="manual")
         self._idea(key="d", minutes_ago=4, status="retired")
         good = self._idea(key="c", minutes_ago=7)
         self.assertEqual([c["id"] for c in bridge.reoffer_candidates()], [good])
+
+    def test_an_expired_card_can_still_be_swept(self) -> None:
+        """Expiry stops a person tapping Accept; the sweep re-prices instead."""
+        expired = self._idea(key="e", minutes_ago=30, status="expired")
+        self.assertEqual([c["id"] for c in bridge.reoffer_candidates()], [expired])
+
+    def test_cards_beyond_the_sweep_lookback_are_not_candidates(self) -> None:
+        self._idea(key="ancient", minutes_ago=60 * 24)
+        with patch.object(bot_config, "LIVE_MILL_REOFFER_MAX_AGE_MIN", 120):
+            self.assertEqual(bridge.reoffer_candidates(), [])
 
     def test_low_conviction_cards_are_not_candidates(self) -> None:
         self._idea(key="weak", minutes_ago=5, confidence=0.2)

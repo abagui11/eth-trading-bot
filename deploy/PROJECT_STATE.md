@@ -365,6 +365,7 @@ Defaults from `bot_config.py` (non-secret tunables). Secrets and portfolio size 
 | `LIVE_TP_MIN_EDGE_PCT` | `0.1` | a target nearer the mark than this is dropped rather than rested |
 | `IDEA_EXPIRY_MINUTES` | `15` | how long a posted card stays acceptable; past it the idea is marked `expired` and a late Accept is refused. `0` disables |
 | `LIVE_MILL_REOFFER_ENABLED` | `True` | when a mill clip closes, replay the recent backlog to refill the sleeve instead of waiting for the next mint |
+| `LIVE_MILL_REOFFER_MAX_AGE_MIN` | `120` | sweep lookback. Deliberately longer than `IDEA_EXPIRY_MINUTES`, and **expired cards are still swept**: expiry governs what a person may tap Accept on, while the sweep re-prices against the live mark first. At ~20-30 fillable mints/day a 15-minute lookback would find nothing in most windows |
 
 ---
 
