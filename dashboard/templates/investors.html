@@ -1,0 +1,601 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="robots" content="noindex,nofollow">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <title>Eva — Investor View</title>
+  <link rel="stylesheet" href="/static/style.css?v=inv1">
+</head>
+<body>
+{% from "_macros.html" import trade_card, tip_badge %}
+{% set p = inv.portfolio %}
+{% set h = inv.health %}
+{% set acct = inv.account %}
+{% set ex = inv.exposure %}
+{% set d = inv.daily %}
+
+<div class="wrap">
+  <header class="inv-header">
+    <p class="inv-kicker"><span class="feed-live"></span> Private link · not indexed · please do not redistribute</p>
+    <h1>Eva — live trading performance</h1>
+    <p class="sub">
+      Real capital traded on Coinbase US futures by the Eva agent.
+      Marks refresh automatically · snapshot <span id="inv-updated">{{ inv.generated_at }}</span>
+    </p>
+  </header>
+
+  <!-- ==== The four numbers, above the fold ==== -->
+  <section class="card inv-hero">
+    <h2>Portfolio at a glance</h2>
+    <div class="inv-hero-grid">
+      <div class="inv-hero-cell">
+        <div class="label">Portfolio value</div>
+        <div class="value" id="inv-value">{{ p.value_usd|usd }}</div>
+        <div class="inv-note">
+          {% if p.value_source == 'exchange' %}
+          Live account equity from Coinbase
+          {% else %}
+          Estimated — exchange balance unavailable
+          {% endif %}
+        </div>
+      </div>
+      <div class="inv-hero-cell">
+        <div class="label">Realized {{ inv.year }} (YTD)</div>
+        <div class="value {{ 'pos' if p.realized_ytd_usd >= 0 else 'neg' }}" id="inv-ytd">
+          {{ p.realized_ytd_usd|usd(sign=True) }}
+        </div>
+        <div class="inv-note {{ 'pos' if p.realized_ytd_usd >= 0 else 'neg' }}" id="inv-ytd-pct">
+          {{ p.realized_ytd_pct|pct }} on {{ p.capital_base_usd|usd(decimals=0) }} base
+        </div>
+      </div>
+      <div class="inv-hero-cell">
+        <div class="label">Realized today</div>
+        <div class="value {{ 'pos' if p.realized_today_usd >= 0 else 'neg' }}" id="inv-today">
+          {{ p.realized_today_usd|usd(sign=True) }}
+        </div>
+        <div class="inv-note" id="inv-today-pct">
+          {{ p.realized_today_pct|pct }} · {{ d.today_exits }} exit{{ '' if d.today_exits == 1 else 's' }} booked today
+        </div>
+      </div>
+      <div class="inv-hero-cell">
+        <div class="label">Unrealized (open)</div>
+        <div class="value {{ 'pos' if p.unrealized_usd >= 0 else 'neg' }}" id="inv-unrealized">
+          {{ p.unrealized_usd|usd(sign=True) }}
+        </div>
+        <div class="inv-note" id="inv-unrealized-pct">
+          {{ p.unrealized_pct|pct }} · {{ ex.open_count }} open position{{ '' if ex.open_count == 1 else 's' }}
+        </div>
+      </div>
+    </div>
+    <p class="sub inv-footnote">
+      Realized is banked cash — closed trades plus partial take-profits already
+      taken out of open trades. Unrealized is the mark-to-market on what is
+      still riding. Percentages are measured against
+      {% if p.capital_base_basis == 'derived' %}
+      an estimated starting equity of {{ p.capital_base_usd|usd(decimals=0) }},
+      worked back from today's balance (deposits and withdrawals are not tracked).
+      {% else %}
+      the configured sleeve capital of {{ p.capital_base_usd|usd(decimals=0) }}.
+      {% endif %}
+    </p>
+  </section>
+
+  <!-- ==== Collateral health ==== -->
+  <section class="card" id="inv-health-card">
+    <h2>Health factor</h2>
+    <div class="inv-health-top">
+      <div class="inv-health-figure">
+        <span class="inv-health-value badge-{{ h.band }}" id="inv-health-pct">
+          {% if h.health_pct is not none %}{{ h.health_pct|pct(decimals=0, sign=False) }}{% else %}—{% endif %}
+        </span>
+        <span class="inv-health-caption">
+          collateral vs. exposure
+          {% if h.leverage_x %} · {{ "%.2f"|format(h.leverage_x) }}x geared{% endif %}
+        </span>
+      </div>
+      <div class="inv-health-bar" role="img"
+           aria-label="Health factor {% if h.health_pct is not none %}{{ h.health_pct }} percent{% else %}unavailable{% endif %}">
+        <span class="inv-health-fill band-{{ h.band }}"
+              style="width: {{ [h.health_pct or 0, 100]|min }}%"></span>
+      </div>
+    </div>
+    <div class="metrics" style="margin-top:12px">
+      <div class="metric">
+        <div class="label">Equity (collateral)</div>
+        <div class="value" id="inv-health-equity">{{ h.equity_usd|usd }}</div>
+      </div>
+      <div class="metric">
+        <div class="label">Total position size</div>
+        <div class="value" id="inv-health-notional">{{ h.gross_notional_usd|usd }}</div>
+      </div>
+      <div class="metric">
+        <div class="label">Leverage</div>
+        <div class="value">
+          {% if h.leverage_x %}{{ "%.2f"|format(h.leverage_x) }}x{% else %}—{% endif %}
+        </div>
+      </div>
+      <div class="metric">
+        <div class="label">Liquidation buffer</div>
+        <div class="value">
+          {% if h.liquidation_buffer_pct is not none %}
+          {{ h.liquidation_buffer_pct|pct(decimals=1, sign=False) }}
+          {% else %}—{% endif %}
+        </div>
+      </div>
+    </div>
+    <p class="sub inv-footnote">
+      Health factor is equity divided by the total size of every open position:
+      {{ h.equity_usd|usd(decimals=0) }} of collateral behind
+      {{ h.gross_notional_usd|usd(decimals=0) }} of exposure reads
+      {% if h.health_pct is not none %}{{ h.health_pct|pct(decimals=0, sign=False) }}{% else %}—{% endif %}.
+      Higher is safer; 100% is unlevered. Above 40% is green, 20–40% amber,
+      below 20% red. Liquidation buffer is Coinbase's own distance-to-liquidation
+      on the account and is the figure that actually governs a forced close.
+    </p>
+    {% if ex.by_sleeve %}
+    <div class="table-scroll">
+      <table>
+        <thead>
+          <tr><th>Sleeve</th><th>Open</th><th>Position size</th><th>Unrealized</th><th>Allocated capital</th></tr>
+        </thead>
+        <tbody>
+          {% for s in ex.by_sleeve %}
+          <tr>
+            <td>{{ s.label }}</td>
+            <td>{{ s.open }}</td>
+            <td>{{ s.notional_usd|usd }}</td>
+            <td class="{{ 'pos-row' if s.unrealized_usd >= 0 else 'neg-row' }}">{{ s.unrealized_usd|usd(sign=True) }}</td>
+            <td>{{ s.capital_usd|usd(decimals=0) }}</td>
+          </tr>
+          {% endfor %}
+        </tbody>
+      </table>
+    </div>
+    {% endif %}
+  </section>
+
+  <!-- ==== Exchange account ==== -->
+  <section class="card">
+    <h2>Exchange account</h2>
+    {% if acct.available %}
+    <div class="metrics">
+      <div class="metric">
+        <div class="label">Account equity</div>
+        <div class="value">{{ acct.equity_usd|usd }}</div>
+      </div>
+      <div class="metric">
+        <div class="label">Buying power</div>
+        <div class="value">{{ acct.available_funds_usd|usd }}</div>
+      </div>
+      <div class="metric">
+        <div class="label">Futures balance</div>
+        <div class="value">{{ acct.margin_balance_usd|usd }}</div>
+      </div>
+      <div class="metric">
+        <div class="label">Initial margin</div>
+        <div class="value">{{ acct.initial_margin_usd|usd }}</div>
+      </div>
+      <div class="metric">
+        <div class="label">Exchange unrealized</div>
+        <div class="value {{ 'pos' if (acct.exchange_unrealized_pnl_usd or 0) >= 0 else 'neg' }}">
+          {{ acct.exchange_unrealized_pnl_usd|usd(sign=True) }}
+        </div>
+      </div>
+      <div class="metric">
+        <div class="label">Exchange realized today</div>
+        <div class="value {{ 'pos' if (acct.daily_realized_pnl_usd or 0) >= 0 else 'neg' }}">
+          {{ acct.daily_realized_pnl_usd|usd(sign=True) }}
+        </div>
+      </div>
+      <div class="metric">
+        <div class="label">Liquidation threshold</div>
+        <div class="value">{{ acct.liquidation_threshold_usd|usd }}</div>
+      </div>
+      <div class="metric">
+        <div class="label">Liquidation buffer</div>
+        <div class="value">{{ acct.liquidation_buffer_usd|usd }}</div>
+      </div>
+    </div>
+    <p class="sub inv-footnote">
+      Read live from Coinbase at {{ acct.fetched_at }}. The exchange's own
+      unrealized figure can differ slightly from ours above: it marks against
+      the futures contract, ours marks against index spot.
+    </p>
+    {% else %}
+    <p class="sub">
+      Live balance unavailable — showing configured sleeve capital of
+      {{ p.capital_base_usd|usd(decimals=0) }} instead. Trading credentials are
+      not loaded in this environment.
+    </p>
+    {% endif %}
+  </section>
+
+  <!-- ==== Open positions ==== -->
+  <section class="card journal-card" id="inv-open-card">
+    <h2>Open positions ({{ inv.open_trades|length }})</h2>
+    <p class="sub journal-intro">
+      Every position with money in the market right now. Open a row for entry,
+      current mark, unrealized P&amp;L, the take-profit ladder with the targets
+      already banked, and where the stop currently sits.
+    </p>
+    {% if inv.open_trades %}
+    <div class="trade-list">
+      {% for t in inv.open_trades %}
+      {{ trade_card(t, 'open') }}
+      {% endfor %}
+    </div>
+    {% else %}
+    <p class="sub">No open positions — the book is flat and fully in cash.</p>
+    {% endif %}
+  </section>
+
+  <!-- ==== Realized by day ==== -->
+  <section class="card">
+    <h2>Realized P&amp;L by day · {{ inv.year }}</h2>
+    <div class="metrics" style="margin-bottom:10px">
+      <div class="metric">
+        <div class="label">Trading days</div>
+        <div class="value">{{ d.trading_days }}</div>
+      </div>
+      <div class="metric">
+        <div class="label">Green / red</div>
+        <div class="value">{{ d.green_days }} / {{ d.red_days }}</div>
+      </div>
+      <div class="metric">
+        <div class="label">Best day</div>
+        <div class="value pos">
+          {% if d.best_day %}{{ d.best_day.realized_pnl_usd|usd(sign=True) }}{% else %}—{% endif %}
+        </div>
+      </div>
+      <div class="metric">
+        <div class="label">Worst day</div>
+        <div class="value neg">
+          {% if d.worst_day %}{{ d.worst_day.realized_pnl_usd|usd(sign=True) }}{% else %}—{% endif %}
+        </div>
+      </div>
+    </div>
+    {% if d.days %}
+    <div class="table-scroll inv-day-scroll">
+      <table>
+        <thead>
+          <tr><th>Date</th><th>Realized</th><th>% of base</th><th>Exits</th><th>Closed</th><th>Wins</th></tr>
+        </thead>
+        <tbody>
+          {% for day in d.days %}
+          <tr>
+            <td>{{ day.date }}</td>
+            <td class="{{ 'pos-row' if day.realized_pnl_usd >= 0 else 'neg-row' }}">
+              {{ day.realized_pnl_usd|usd(sign=True) }}
+            </td>
+            <td class="{{ 'pos-row' if day.realized_pnl_usd >= 0 else 'neg-row' }}">
+              {% if p.capital_base_usd %}
+              {{ (day.realized_pnl_usd / p.capital_base_usd * 100)|pct }}
+              {% else %}—{% endif %}
+            </td>
+            <td>{{ day.exits_n }}</td>
+            <td>{{ day.closed_n }}</td>
+            <td>{{ day.wins }}</td>
+          </tr>
+          {% endfor %}
+        </tbody>
+        <tfoot>
+          <tr>
+            <th>Year to date</th>
+            <th class="{{ 'pos-row' if p.realized_ytd_usd >= 0 else 'neg-row' }}">
+              {{ p.realized_ytd_usd|usd(sign=True) }}
+            </th>
+            <th class="{{ 'pos-row' if p.realized_ytd_usd >= 0 else 'neg-row' }}">
+              {{ p.realized_ytd_pct|pct }}
+            </th>
+            <th colspan="3"></th>
+          </tr>
+        </tfoot>
+      </table>
+    </div>
+    {% else %}
+    <p class="sub">No realized P&amp;L booked yet this year.</p>
+    {% endif %}
+  </section>
+
+  <!-- ==== Closed live trades ==== -->
+  <section class="card journal-card">
+    <h2>Closed trades ({{ inv.closed_trades|length }})</h2>
+    {% set hq = inv.performance.by_source.get('hq') %}
+    {% set mill = inv.performance.by_source.get('mill') %}
+    <div class="metrics" style="margin-bottom:10px">
+      <div class="metric">
+        <div class="label">Eva realized</div>
+        <div class="value {{ 'pos' if hq and hq.pnl_usd >= 0 else ('neg' if hq else '') }}">
+          {% if hq %}{{ hq.pnl_usd|usd(sign=True) }}{% else %}no fills{% endif %}
+        </div>
+      </div>
+      <div class="metric">
+        <div class="label">Eva win rate</div>
+        <div class="value">
+          {% if hq and hq.win_rate is not none %}{{ (hq.win_rate * 100)|pct(decimals=0, sign=False) }}{% else %}—{% endif %}
+        </div>
+      </div>
+      <div class="metric">
+        <div class="label">Mill realized</div>
+        <div class="value {{ 'pos' if mill and mill.pnl_usd >= 0 else ('neg' if mill else '') }}">
+          {% if mill %}{{ mill.pnl_usd|usd(sign=True) }}{% else %}no fills{% endif %}
+        </div>
+      </div>
+      <div class="metric">
+        <div class="label">All-time realized</div>
+        <div class="value {{ 'pos' if p.realized_all_time_usd >= 0 else 'neg' }}">
+          {{ p.realized_all_time_usd|usd(sign=True) }}
+        </div>
+      </div>
+    </div>
+    {% if inv.closed_trades %}
+    <div class="trade-list">
+      {% for t in inv.closed_trades %}
+      {{ trade_card(t, 'closed') }}
+      {% endfor %}
+    </div>
+    {% else %}
+    <p class="sub">No closed live trades yet.</p>
+    {% endif %}
+  </section>
+
+  <!-- ==== Paper history ==== -->
+  {% if inv.paper.available %}
+  {% set pp = inv.paper.current %}
+  <section class="card journal-card" id="inv-paper-card">
+    <h2>Paper book v2 · simulated</h2>
+    <p class="sub journal-intro">
+      Track record from the paper book the live agent was validated against. No
+      real money — kept here so the live results above can be read against a
+      longer history.
+    </p>
+    <div class="metrics" style="margin-bottom:10px">
+      <div class="metric">
+        <div class="label">Equity</div>
+        <div class="value">{{ pp.equity_usd|usd }}</div>
+      </div>
+      <div class="metric">
+        <div class="label">Total P&amp;L</div>
+        <div class="value {{ 'pos' if pp.total_pnl_usd >= 0 else 'neg' }}">
+          {{ pp.total_pnl_usd|usd(sign=True) }} ({{ pp.total_pnl_pct|pct(decimals=1) }})
+        </div>
+      </div>
+      <div class="metric">
+        <div class="label">Win rate</div>
+        <div class="value">{{ pp.win_rate_pct }}%</div>
+      </div>
+      <div class="metric">
+        <div class="label">Profit factor</div>
+        <div class="value">
+          {% if pp.profit_factor is not none %}{{ "%.2f"|format(pp.profit_factor) }}{% else %}—{% endif %}
+        </div>
+      </div>
+    </div>
+    <p class="sub" style="margin-bottom:10px">
+      {{ pp.starting_usd|usd(decimals=0) }} start ({{ inv.paper.current_label }})
+      · {{ pp.closed_trade_count }} closed · {{ pp.open_count }} open
+    </p>
+    {% if inv.paper.current_trades or inv.paper.current_open %}
+    <button type="button" class="load-more" id="inv-paper-toggle" aria-expanded="false">Show v2 journal</button>
+    <div id="inv-paper-body" hidden>
+      {% if inv.paper.current_open %}
+      <h3 class="journal-subhead">Open</h3>
+      <div class="trade-list">
+        {% for t in inv.paper.current_open %}
+        {{ trade_card(t, 'open') }}
+        {% endfor %}
+      </div>
+      {% endif %}
+      {% if inv.paper.current_trades %}
+      <h3 class="journal-subhead">Closed</h3>
+      <div class="trade-list">
+        {% for t in inv.paper.current_trades %}
+        {{ trade_card(t, 'closed') }}
+        {% endfor %}
+      </div>
+      {% endif %}
+    </div>
+    {% else %}
+    <p class="sub">No v2 paper trades to list.</p>
+    {% endif %}
+  </section>
+
+  {% set ap = inv.paper.archived %}
+  {% if ap.available or inv.paper.archived_trades %}
+  <section class="card journal-card journal-archived">
+    <h2>Archived paper book v1 · simulated</h2>
+    <p class="sub journal-intro">
+      The first paper epoch, archived when the book reset. Not included in any
+      figure above.
+    </p>
+    <div class="metrics" style="margin-bottom:10px">
+      <div class="metric">
+        <div class="label">Start</div>
+        <div class="value">{{ ap.starting_usd|usd(decimals=0) }}</div>
+      </div>
+      <div class="metric">
+        <div class="label">Realized P&amp;L</div>
+        <div class="value {{ 'pos' if ap.realized_pnl_usd >= 0 else 'neg' }}">
+          {{ ap.realized_pnl_usd|usd(sign=True) }}
+          {% if ap.starting_usd %}({{ ap.realized_pnl_pct|pct(decimals=1) }}){% endif %}
+        </div>
+      </div>
+      <div class="metric">
+        <div class="label">Win rate</div>
+        <div class="value">{{ ap.win_rate_pct }}%</div>
+      </div>
+      <div class="metric">
+        <div class="label">Closed</div>
+        <div class="value">{{ ap.closed_trade_count }}</div>
+      </div>
+    </div>
+    {% if inv.paper.archived_trades %}
+    <button type="button" class="load-more" id="inv-archived-toggle" aria-expanded="false">Show v1 journal</button>
+    <div id="inv-archived-body" hidden>
+      <div class="trade-list">
+        {% for t in inv.paper.archived_trades %}
+        {{ trade_card(t, 'archived') }}
+        {% endfor %}
+      </div>
+    </div>
+    {% else %}
+    <p class="sub">No closed v1 trades to list.</p>
+    {% endif %}
+  </section>
+  {% endif %}
+  {% endif %}
+
+  <footer>
+    Republic Technologies · Eva investor view · private link.
+    Figures are informational, not an offer or a performance guarantee.
+  </footer>
+</div>
+
+<div class="chart-lightbox" id="chart-lightbox" hidden>
+  <button type="button" class="chart-lightbox-close" aria-label="Close">×</button>
+  <img class="chart-lightbox-img" alt="Enlarged chart">
+</div>
+
+<script>
+  function initTradeCards(root) {
+    (root || document).querySelectorAll('.trade-card > .trade-summary').forEach(function (btn) {
+      if (btn.dataset.bound) return;
+      btn.dataset.bound = '1';
+      btn.addEventListener('click', function (ev) {
+        if (ev.target.closest('.zoomable')) return;
+        var card = btn.closest('.trade-card');
+        var body = card.querySelector('.trade-body');
+        var open = !card.classList.contains('is-open');
+        card.classList.toggle('is-open', open);
+        btn.setAttribute('aria-expanded', open ? 'true' : 'false');
+        if (body) body.hidden = !open;
+      });
+    });
+  }
+  initTradeCards();
+
+  function initChartLightbox() {
+    var box = document.getElementById('chart-lightbox');
+    if (!box) return;
+    var big = box.querySelector('.chart-lightbox-img');
+    var closeBtn = box.querySelector('.chart-lightbox-close');
+
+    function openLightbox(src, alt) {
+      big.src = src;
+      big.alt = alt || 'Enlarged chart';
+      box.hidden = false;
+      document.body.classList.add('lightbox-open');
+    }
+    function closeLightbox() {
+      box.hidden = true;
+      big.removeAttribute('src');
+      document.body.classList.remove('lightbox-open');
+    }
+    document.querySelectorAll('img.zoomable').forEach(function (img) {
+      if (img.dataset.bound) return;
+      img.dataset.bound = '1';
+      img.setAttribute('role', 'button');
+      img.setAttribute('tabindex', '0');
+      img.setAttribute('title', 'Click to enlarge');
+      img.addEventListener('click', function (ev) {
+        ev.preventDefault();
+        ev.stopPropagation();
+        openLightbox(img.currentSrc || img.src, img.alt);
+      });
+      img.addEventListener('keydown', function (ev) {
+        if (ev.key === 'Enter' || ev.key === ' ') {
+          ev.preventDefault();
+          ev.stopPropagation();
+          openLightbox(img.currentSrc || img.src, img.alt);
+        }
+      });
+    });
+    closeBtn.addEventListener('click', function (ev) {
+      ev.stopPropagation();
+      closeLightbox();
+    });
+    box.addEventListener('click', function (ev) {
+      if (ev.target === box) closeLightbox();
+    });
+    document.addEventListener('keydown', function (ev) {
+      if (ev.key === 'Escape' && !box.hidden) closeLightbox();
+    });
+  }
+  initChartLightbox();
+
+  function bindToggle(btnId, bodyId, showLabel, hideLabel) {
+    var btn = document.getElementById(btnId);
+    var body = document.getElementById(bodyId);
+    if (!btn || !body) return;
+    btn.addEventListener('click', function () {
+      var open = body.hidden;
+      body.hidden = !open;
+      btn.setAttribute('aria-expanded', open ? 'true' : 'false');
+      btn.textContent = open ? hideLabel : showLabel;
+    });
+  }
+  bindToggle('inv-paper-toggle', 'inv-paper-body', 'Show v2 journal', 'Hide v2 journal');
+  bindToggle('inv-archived-toggle', 'inv-archived-body', 'Show v1 journal', 'Hide v1 journal');
+
+  function usd(n, sign) {
+    if (n === null || n === undefined) return '—';
+    var abs = Math.abs(Number(n)).toLocaleString(undefined, {
+      minimumFractionDigits: 2, maximumFractionDigits: 2
+    });
+    if (Number(n) < 0) return '-$' + abs;
+    return (sign ? '+$' : '$') + abs;
+  }
+  function pct(n, digits) {
+    if (n === null || n === undefined) return '—';
+    return (Number(n) >= 0 ? '+' : '') + Number(n).toFixed(digits === undefined ? 2 : digits) + '%';
+  }
+  function tone(el, value) {
+    if (!el) return;
+    el.classList.toggle('pos', Number(value) >= 0);
+    el.classList.toggle('neg', Number(value) < 0);
+  }
+  function setText(id, text) {
+    var el = document.getElementById(id);
+    if (el) el.textContent = text;
+    return el;
+  }
+
+  // The access token rides in the query string, so the poll has to carry the
+  // same search params or it 404s on a token-gated deployment.
+  async function refreshInvestor() {
+    try {
+      var res = await fetch('/api/investors/snapshot' + location.search);
+      if (!res.ok) return;
+      var snap = await res.json();
+      var p = snap.portfolio, h = snap.health, ex = snap.exposure;
+
+      setText('inv-updated', snap.generated_at);
+      setText('inv-value', usd(p.value_usd));
+      tone(setText('inv-ytd', usd(p.realized_ytd_usd, true)), p.realized_ytd_usd);
+      setText('inv-ytd-pct', pct(p.realized_ytd_pct) + ' on ' + usd(p.capital_base_usd) + ' base');
+      tone(setText('inv-today', usd(p.realized_today_usd, true)), p.realized_today_usd);
+      setText('inv-today-pct', pct(p.realized_today_pct) + ' · ' + snap.daily.today_exits
+        + ' exit' + (snap.daily.today_exits === 1 ? '' : 's') + ' booked today');
+      tone(setText('inv-unrealized', usd(p.unrealized_usd, true)), p.unrealized_usd);
+      setText('inv-unrealized-pct',
+        pct(p.unrealized_pct) + ' · ' + ex.open_count + ' open position' + (ex.open_count === 1 ? '' : 's'));
+
+      setText('inv-health-equity', usd(h.equity_usd));
+      setText('inv-health-notional', usd(h.gross_notional_usd));
+      var hv = document.getElementById('inv-health-pct');
+      if (hv) {
+        hv.textContent = h.health_pct === null ? '—' : Math.round(h.health_pct) + '%';
+        hv.className = 'inv-health-value badge-' + h.band;
+      }
+      var fill = document.querySelector('.inv-health-fill');
+      if (fill) {
+        fill.style.width = Math.min(h.health_pct || 0, 100) + '%';
+        fill.className = 'inv-health-fill band-' + h.band;
+      }
+    } catch (e) {}
+  }
+  setInterval(refreshInvestor, 60000);
+</script>
+</body>
+</html>

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import secrets
 from pathlib import Path
 
 from fastapi import FastAPI, HTTPException, Request, Header, Response
@@ -34,19 +35,23 @@ from dashboard.formatting import (
     format_news_age,
     format_news_iso,
     format_news_when,
+    format_pct,
     format_trade_date,
     format_trade_time,
+    format_usd,
     news_source_label,
     tag_tooltip,
     trade_title,
 )
 from dashboard.intel_api import router as intel_router
+from dashboard.investor import build_investor_payload
 from intelligence import store as intel_store
 from macro import store as macro_store
 from macro.ingest import ingest_headline
 
 _PKG_DIR = Path(__file__).resolve().parent
 _ME_COOKIE = "me_session"
+_INVESTOR_COOKIE = "investor_access"
 
 
 class MacroIngestBody(BaseModel):
@@ -76,6 +81,33 @@ def _resolve_telegram_id(request: Request) -> int | None:
     if cookie:
         return user_books.verify_me_token(cookie)
     return None
+
+
+def _investor_authorized(request: Request) -> bool:
+    """Gate for the shareable investor link.
+
+    The link is meant to be forwarded around, so the token travels in the URL
+    once and then lives in a cookie. With no token configured the page stays
+    reachable but unlisted, matching /volume, so a fresh deploy is not broken
+    by a missing env var.
+    """
+    expected = config.INVESTOR_ACCESS_TOKEN
+    if not expected:
+        return True
+    presented = request.query_params.get("k") or request.cookies.get(_INVESTOR_COOKIE)
+    return bool(presented) and secrets.compare_digest(str(presented), expected)
+
+
+def _set_investor_cookie(response: Response, request: Request) -> None:
+    if not config.INVESTOR_ACCESS_TOKEN or not request.query_params.get("k"):
+        return
+    response.set_cookie(
+        key=_INVESTOR_COOKIE,
+        value=config.INVESTOR_ACCESS_TOKEN,
+        httponly=True,
+        max_age=config.INVESTOR_SESSION_TTL_SEC,
+        samesite="lax",
+    )
 
 
 def _set_session_cookie(response: Response, request: Request, telegram_id: int) -> None:
@@ -115,6 +147,8 @@ def create_app() -> FastAPI:
     templates.env.filters["news_iso"] = format_news_iso
     templates.env.filters["news_age"] = format_news_age
     templates.env.filters["news_source"] = news_source_label
+    templates.env.filters["usd"] = format_usd
+    templates.env.filters["pct"] = format_pct
     templates.env.globals["trade_title"] = trade_title
     static_dir = _PKG_DIR / "static"
     if static_dir.is_dir():
@@ -227,6 +261,28 @@ def create_app() -> FastAPI:
             "volume.html",
             {"book": book or {"available": False}},
         )
+
+    # The two investor handlers are sync on purpose: the payload makes a
+    # blocking Coinbase call plus a pile of sqlite reads, so FastAPI runs them
+    # in a threadpool rather than stalling the event loop for everyone else.
+    @app.get("/investors", response_class=HTMLResponse)
+    def investors(request: Request) -> Response:
+        """Private investor view — unlisted, and token-gated when configured."""
+        if not _investor_authorized(request):
+            raise HTTPException(status_code=404, detail="Not Found")
+        response = templates.TemplateResponse(
+            request,
+            "investors.html",
+            {"inv": build_investor_payload()},
+        )
+        _set_investor_cookie(response, request)
+        return response
+
+    @app.get("/api/investors/snapshot")
+    def api_investor_snapshot(request: Request) -> dict:
+        if not _investor_authorized(request):
+            raise HTTPException(status_code=404, detail="Not Found")
+        return build_investor_payload(include_paper=False)
 
     @app.get("/feed", response_class=HTMLResponse)
     async def idea_feed(request: Request) -> HTMLResponse:

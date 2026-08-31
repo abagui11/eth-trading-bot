@@ -175,6 +175,15 @@ RESEND_API_KEY: str | None = _optional("RESEND_API_KEY")
 ALERT_EMAIL_TO: str | None = _optional("ALERT_EMAIL_TO")
 ALERT_EMAIL_FROM: str = _optional("ALERT_EMAIL_FROM") or "alerts@resend.dev"
 
+# Private investor view (/investors). When set, the page and its API require
+# ?k=<token> and then ride a cookie; anything else 404s so the URL gives away
+# nothing about what is behind it. Unset leaves the page unlisted-only, the
+# same posture as /volume.
+INVESTOR_ACCESS_TOKEN: str | None = _optional("INVESTOR_ACCESS_TOKEN")
+INVESTOR_SESSION_TTL_SEC: int = int(
+    os.getenv("INVESTOR_SESSION_TTL_SEC", "2592000") or "2592000"
+)
+
 # HMAC secret for /me magic links (falls back to bot token if unset).
 ME_TOKEN_SECRET: str = _optional("ME_TOKEN_SECRET") or TELEGRAM_BOT_TOKEN
 ME_TOKEN_TTL_SEC: int = int(os.getenv("ME_TOKEN_TTL_SEC", "3600") or "3600")

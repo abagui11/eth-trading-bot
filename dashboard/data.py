@@ -342,6 +342,15 @@ def enrich_open_position(pos: dict[str, Any]) -> dict[str, Any]:
     pnl_pct = (pnl_usd / notional * 100) if notional else 0.0
     label = bot_config.product_label(product_id)
 
+    effective_stop = stop if stop is not None else story.get("stop_loss")
+    effective_tps = tps or story.get("take_profits") or []
+    tps_progress = build_tp_progress(
+        side, entry, effective_tps, tps_hit=int(pos.get("tps_hit") or 0)
+    )
+    stop_state = build_stop_state(
+        side, entry, effective_stop, story.get("stop_loss"), qty_open=qty
+    )
+
     return {
         **pos,
         "status": "open",
@@ -355,14 +364,20 @@ def enrich_open_position(pos: dict[str, Any]) -> dict[str, Any]:
         "entry": entry,
         "exit": None,
         "action": pos.get("action") or story.get("action"),
-        "stop_loss": stop if stop is not None else story.get("stop_loss"),
-        "take_profits": tps or story.get("take_profits") or [],
+        "stop_loss": effective_stop,
+        "initial_stop_loss": story.get("stop_loss"),
+        "stop_state": stop_state,
+        "take_profits": effective_tps,
+        "tp_progress": tps_progress,
+        "tps_hit": int(pos.get("tps_hit") or 0),
+        "tp_count": len(tps_progress),
         "risk_reward": pos.get("risk_reward") if pos.get("risk_reward") is not None else story.get("risk_reward"),
         "rationale": story.get("rationale") or "",
         "setup_tags": story.get("setup_tags") or [],
         "order_block": story.get("order_block"),
         "pnl_usd": pnl_usd,
         "pnl_pct": pnl_pct,
+        "unrealized_pnl_pct": pnl_pct,
         "is_winner": pnl_usd >= 0,
         "close_reason": None,
         "dist_to_sl_pct": _distance_pct(side, spot, stop) if stop else None,
@@ -515,9 +530,18 @@ def enrich_live_trades(
         notional = entry * qty
         stop = row.get("stop_loss")
         stop = float(stop) if stop is not None else story.get("stop_loss")
+        # The executor overwrites stop_loss on every trail. Rows opened since
+        # the column was added carry the level actually armed; older ones fall
+        # back to the originating suggestion, which is only the *planned* stop
+        # (revalidation can re-anchor it at fill time) but is better than none.
+        raw_initial = row.get("initial_stop_loss")
+        initial_stop = (
+            float(raw_initial) if raw_initial is not None else story.get("stop_loss")
+        )
         tps = _as_float_list(row.get("take_profits_json")) or _as_float_list(
             story.get("take_profits")
         )
+        legs = exit_legs(row.get("exit_fills_json"))
 
         if closed:
             exit_price = float(row.get("exit_price") or 0) or None
@@ -538,6 +562,12 @@ def enrich_live_trades(
         tags = [str(row.get("fill_type") or "auto")]
         tags += [t for t in (story.get("setup_tags") or []) if t not in tags]
 
+        tps_progress = build_tp_progress(side, entry, tps, legs=legs)
+        stop_state = build_stop_state(
+            side, entry, stop, initial_stop, qty_open=qty_open
+        )
+        open_notional = entry * qty_open
+
         enriched.append(
             {
                 **row,
@@ -557,13 +587,23 @@ def enrich_live_trades(
                 "size_usd": notional,
                 "action": story.get("action"),
                 "stop_loss": stop,
+                "initial_stop_loss": initial_stop,
+                "stop_state": stop_state,
                 "take_profits": tps,
+                "tp_progress": tps_progress,
+                "tps_hit": sum(1 for r in tps_progress if r["hit"]),
+                "tp_count": len(tps_progress),
+                "exit_legs": legs,
                 "risk_reward": story.get("risk_reward"),
                 "rationale": story.get("rationale") or "",
                 "setup_tags": tags,
                 "order_block": story.get("order_block"),
                 "pnl_usd": pnl_usd,
                 "pnl_pct": (pnl_usd / notional * 100) if notional else 0.0,
+                "unrealized_pnl_pct": (
+                    (unrealized / open_notional * 100) if open_notional else 0.0
+                ),
+                "realized_pnl_pct": (banked / notional * 100) if notional else 0.0,
                 "is_winner": pnl_usd >= 0,
                 "dist_to_sl_pct": (
                     _distance_pct(side, mark or 0, stop) if stop and not closed else None
@@ -639,6 +679,154 @@ def _distance_to_tp_pct(side: str, spot: float, take_profits: list[float]) -> fl
     else:
         target = max(take_profits)
     return abs(float(target) - spot) / spot * 100.0
+
+
+def ordered_take_profits(
+    side: str, take_profits: list[float], entry: float
+) -> list[float]:
+    """Targets in the order price would reach them (TP1 nearest).
+
+    Mirrors ``execute._ordered_tps`` so the numbering a reader sees on the
+    dashboard is the same numbering the executor banked against. Levels on the
+    wrong side of entry are dropped; if that leaves nothing the raw list is
+    sorted anyway rather than showing a trade with no targets.
+    """
+    levels = [float(tp) for tp in (take_profits or []) if tp]
+    if not levels:
+        return []
+    if side == "long":
+        ahead = sorted(tp for tp in levels if tp > entry)
+        return ahead or sorted(levels)
+    ahead = sorted((tp for tp in levels if tp < entry), reverse=True)
+    return ahead or sorted(levels, reverse=True)
+
+
+def exit_legs(raw: Any) -> list[dict[str, Any]]:
+    """Booked exit fills oldest-first, from ``live_trades.exit_fills_json``."""
+    if isinstance(raw, dict):
+        booked = raw
+    elif isinstance(raw, str) and raw.strip():
+        try:
+            booked = json.loads(raw)
+        except json.JSONDecodeError:
+            return []
+    else:
+        return []
+    if not isinstance(booked, dict):
+        return []
+    legs = [
+        {
+            "order_id": key,
+            "qty": float(leg.get("qty") or 0),
+            "price": float(leg.get("price") or 0),
+            "pnl_usd": float(leg.get("pnl_usd") or 0),
+            "reason": str(leg.get("reason") or ""),
+            "at": str(leg.get("at") or ""),
+        }
+        for key, leg in booked.items()
+        if isinstance(leg, dict)
+    ]
+    legs.sort(key=lambda leg: leg["at"])
+    return legs
+
+
+def build_tp_progress(
+    side: str,
+    entry: float,
+    take_profits: list[float],
+    *,
+    legs: list[dict[str, Any]] | None = None,
+    tps_hit: int | None = None,
+) -> list[dict[str, Any]]:
+    """Per-target ladder state: which rungs paid out, and for how much.
+
+    The live book has no tp1/tp2/tp3 columns — a target hit is a booked exit
+    leg — so the count comes from the legs and the money comes with it. Paper
+    positions carry a plain ``tps_hit`` counter instead and have no per-leg
+    P&L, so those rungs show as hit with no amount.
+    """
+    ladder = ordered_take_profits(side, take_profits, entry)
+    if not ladder:
+        return []
+    tp_legs = [leg for leg in (legs or []) if leg.get("reason") == "take_profit"]
+    hit_count = len(tp_legs) if legs is not None else int(tps_hit or 0)
+    direction = 1.0 if side == "long" else -1.0
+
+    rungs: list[dict[str, Any]] = []
+    for idx, price in enumerate(ladder):
+        leg = tp_legs[idx] if idx < len(tp_legs) else None
+        rungs.append(
+            {
+                "label": f"TP{idx + 1}",
+                "price": round(float(price), 2),
+                "hit": idx < hit_count,
+                "pnl_usd": round(leg["pnl_usd"], 2) if leg else None,
+                "qty": leg["qty"] if leg else None,
+                "at": leg["at"] if leg else None,
+                "pct_from_entry": (
+                    round((float(price) - entry) / entry * 100.0 * direction, 2)
+                    if entry
+                    else None
+                ),
+            }
+        )
+    return rungs
+
+
+def build_stop_state(
+    side: str,
+    entry: float,
+    current_stop: float | None,
+    initial_stop: float | None,
+    *,
+    qty_open: float = 0.0,
+) -> dict[str, Any]:
+    """Where the stop sits now versus where the thesis first put it.
+
+    ``live_trades.stop_loss`` is overwritten in place every time the executor
+    trails, so the original level only survives on the ledger suggestion the
+    trade was opened from. Without that comparison a trailed stop is
+    indistinguishable from the trade's opening risk.
+    """
+    if current_stop is None:
+        return {
+            "current": None,
+            "initial": None,
+            "trailed": False,
+            "at_breakeven": False,
+            "locked_pnl_usd": None,
+            "label": None,
+        }
+    current = float(current_stop)
+    initial = float(initial_stop) if initial_stop is not None else None
+    direction = 1.0 if side == "long" else -1.0
+    trailed = initial is not None and abs(current - initial) > 0.005
+    # "Beyond entry in the favourable direction" — for a short that means the
+    # stop moved *down*, so the raw comparison has to be sign-corrected.
+    beyond_entry = (current - entry) * direction
+    at_breakeven = beyond_entry >= -0.005
+
+    if not trailed:
+        label = "initial"
+    elif abs(beyond_entry) <= 0.005:
+        label = "breakeven"
+    elif at_breakeven:
+        label = "profit locked"
+    else:
+        label = "trailed"
+
+    return {
+        "current": round(current, 2),
+        "initial": round(initial, 2) if initial is not None else None,
+        "trailed": trailed,
+        "at_breakeven": at_breakeven,
+        "locked_pnl_usd": (
+            round(beyond_entry * float(qty_open or 0), 2)
+            if at_breakeven and qty_open
+            else None
+        ),
+        "label": label,
+    }
 
 
 def _excerpt(text: str, limit: int) -> str:

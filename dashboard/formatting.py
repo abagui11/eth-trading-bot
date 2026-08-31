@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from datetime import datetime, timezone
 from email.utils import parsedate_to_datetime
+from typing import Any
 from urllib.parse import urlparse
 
 # Hard-coded glossary for setup tags / badges shown in the journal.
@@ -103,6 +104,34 @@ TAG_GLOSSARY: dict[str, str] = {
     "htf_mixed": "Coarse HTF regime label: mixed / conflicted H4 structure.",
     "relative_strength_gate": "ETH/BTC relative-strength soft-gate blocked this entry.",
 }
+
+
+def format_usd(value: Any, decimals: int = 2, sign: bool = False) -> str:
+    """Money with thousands separators, or an em dash when there is no value.
+
+    Investor-facing figures run to five digits, where ``4231.07`` is genuinely
+    harder to read at a glance than ``$4,231.07``.
+    """
+    if value is None:
+        return "—"
+    try:
+        amount = float(value)
+    except (TypeError, ValueError):
+        return "—"
+    body = f"{abs(amount):,.{decimals}f}"
+    if amount < 0:
+        return f"-${body}"
+    return f"+${body}" if sign else f"${body}"
+
+
+def format_pct(value: Any, decimals: int = 2, sign: bool = True) -> str:
+    if value is None:
+        return "—"
+    try:
+        amount = float(value)
+    except (TypeError, ValueError):
+        return "—"
+    return f"{amount:+.{decimals}f}%" if sign else f"{amount:.{decimals}f}%"
 
 
 def parse_ts(value: str | None) -> datetime | None:

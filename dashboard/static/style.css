@@ -939,5 +939,212 @@ a.news-title:hover {
   .feed-metrics { grid-template-columns: 1fr 1fr; }
 }
 
+/* —— Trade ladder state (shared journal cards) —— */
+.tp-pips {
+  display: block;
+  margin: 2px 0 6px;
+}
+
+.tp-pip {
+  display: inline-block;
+  margin: 0 6px 4px 0;
+  padding: 2px 8px;
+  border-radius: 999px;
+  border: 1px solid rgba(139, 148, 158, 0.35);
+  color: var(--muted);
+  font-size: 0.7rem;
+  font-weight: 600;
+  letter-spacing: 0.03em;
+  cursor: help;
+}
+
+.tp-pip.is-hit {
+  border-color: rgba(63, 185, 80, 0.5);
+  background: rgba(63, 185, 80, 0.16);
+  color: var(--good);
+}
+
+/* A trailed stop is risk that has already been taken off the table, so it
+   reads as information rather than a warning. */
+.tp-pip.pip-stop {
+  border-color: rgba(88, 166, 255, 0.5);
+  background: rgba(88, 166, 255, 0.14);
+  color: var(--accent);
+  text-transform: none;
+}
+
+.levels-strip .level-note {
+  display: block;
+  margin-top: 2px;
+  font-size: 0.68rem;
+  color: var(--muted);
+}
+
+.levels-strip .level-note.pos { color: var(--good); }
+.levels-strip .level-note.neg { color: var(--bad); }
+.levels-strip .value.pos { color: var(--good); }
+.levels-strip .value.neg { color: var(--bad); }
+
+.levels-strip .level-tp-hit {
+  border-color: rgba(63, 185, 80, 0.45);
+  background: rgba(63, 185, 80, 0.08);
+}
+
+.levels-strip .level-trailed {
+  border-color: rgba(88, 166, 255, 0.45);
+  background: rgba(88, 166, 255, 0.08);
+}
+
+.exit-legs {
+  margin: 0 0 12px;
+}
+
+.exit-legs h3 {
+  font-size: 0.7rem;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  color: var(--muted);
+  margin: 0 0 6px;
+  font-weight: 600;
+}
+
+.exit-legs li {
+  font-size: 0.82rem;
+}
+
+/* —— Investor view (/investors) —— */
+.inv-header { margin-bottom: 18px; }
+
+.inv-kicker {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin: 0 0 6px;
+  font-size: 0.7rem;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--muted);
+}
+
+.inv-hero-grid {
+  display: grid;
+  grid-template-columns: 1fr;
+  gap: 10px;
+}
+
+.inv-hero-cell {
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  padding: 14px 16px;
+}
+
+.inv-hero-cell .label {
+  font-size: 0.7rem;
+  color: var(--muted);
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  margin-bottom: 4px;
+}
+
+/* Deliberately oversized: the brief was that a reader answers "how is it
+   doing" in about two seconds, without reading a table. */
+.inv-hero-cell .value {
+  font-size: 1.75rem;
+  font-weight: 700;
+  line-height: 1.15;
+  font-variant-numeric: tabular-nums;
+}
+
+.inv-hero-cell .value.pos { color: var(--good); }
+.inv-hero-cell .value.neg { color: var(--bad); }
+
+.inv-note {
+  margin-top: 4px;
+  font-size: 0.78rem;
+  color: var(--muted);
+}
+
+.inv-note.pos { color: var(--good); }
+.inv-note.neg { color: var(--bad); }
+
+.inv-footnote {
+  margin: 12px 0 0;
+  font-size: 0.8rem;
+  line-height: 1.5;
+}
+
+.inv-health-top {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.inv-health-figure {
+  display: flex;
+  align-items: baseline;
+  flex-wrap: wrap;
+  gap: 10px;
+}
+
+.inv-health-value {
+  font-size: 2.25rem;
+  font-weight: 700;
+  line-height: 1;
+  padding: 4px 12px;
+  border-radius: 10px;
+  font-variant-numeric: tabular-nums;
+}
+
+.inv-health-caption {
+  font-size: 0.82rem;
+  color: var(--muted);
+}
+
+.inv-health-bar {
+  position: relative;
+  height: 10px;
+  border-radius: 999px;
+  background: rgba(139, 148, 158, 0.18);
+  overflow: hidden;
+}
+
+.inv-health-fill {
+  display: block;
+  height: 100%;
+  border-radius: 999px;
+  transition: width 0.4s ease;
+}
+
+.inv-health-fill.band-good { background: var(--good); }
+.inv-health-fill.band-warn { background: var(--warn); }
+.inv-health-fill.band-bad { background: var(--bad); }
+.inv-health-fill.band-none { background: rgba(139, 148, 158, 0.4); }
+
+.inv-day-scroll {
+  max-height: 420px;
+  overflow-y: auto;
+}
+
+.inv-day-scroll thead th {
+  position: sticky;
+  top: 0;
+  background: var(--card);
+  z-index: 1;
+}
+
+.inv-day-scroll tfoot th {
+  border-top: 1px solid var(--border);
+  font-size: 0.78rem;
+  text-transform: none;
+  color: var(--text);
+}
+
+@media (min-width: 700px) {
+  .inv-hero-grid { grid-template-columns: repeat(4, 1fr); }
+  .inv-health-top { flex-direction: row; align-items: center; gap: 20px; }
+  .inv-health-bar { flex: 1 1 auto; }
+}
+
 
 

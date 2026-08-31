@@ -353,6 +353,26 @@ The first hourly cycle may also send the one-time launch notice to subscribers.
 
 The dashboard is the intelligence hub. Four tabs: **Brain** (vision / tape / news), **Eva Trades** (HQ ICT live + house paper — Eva is the ICT product), **Yield Generation** (stable book mirror), **Trade mill** (consumer idea stream plus the internal nano-ETH live clip that tests those ideas). Telegram **Idea feed** still opens `/feed` for Accept/Reject. Dual ETH/BTC spots, chart-read score tooltips, and a **Macro news monitor** sit on Brain / Eva Trades as before.
 
+### Private investor link (`/investors`)
+
+A read-only page for investors, not linked from the hub and marked `noindex,nofollow`. It shows portfolio value, realized gain for the day and year to date, unrealized, the **health factor** (equity ÷ total open position size), every open position with its take-profit ladder and current stop, per-day realized P&L, and the paper track record.
+
+Gate it before sharing the URL:
+
+```bash
+# on the server
+cd /opt/eth-trading-agent
+openssl rand -hex 16          # use the output as the token
+nano .env                     # INVESTOR_ACCESS_TOKEN=<paste>
+sudo systemctl restart eth-dashboard
+```
+
+Then share `https://dashboard.yourdomain.com/investors?k=<token>`. The first visit sets an httponly cookie (30 days, `INVESTOR_SESSION_TTL_SEC`), so reloads and in-app navigation work without the query string. Any request without a valid token gets a **404**, not a 401, so a guessed URL never confirms the page exists. To revoke access, change the token and restart the dashboard.
+
+Leaving `INVESTOR_ACCESS_TOKEN` unset keeps the page reachable to anyone who knows the path — the same unlisted-only posture as `/volume`. Set it before sending the link to anyone outside the team.
+
+The health factor and the exchange-account panel read `cfm/balance_summary` live, so they need the CDP key in `.env`. Without it the page still renders and falls back to the configured sleeve capital (`LIVE_HQ_EQUITY_USD + LIVE_MILL_SLEEVE_USD`), labelled as an estimate.
+
 ### Macro headline webhook (optional push ingest)
 
 Push headlines into the same pipeline as RSS (keyword score → Haiku classify → pulse if severity ≥ 4).

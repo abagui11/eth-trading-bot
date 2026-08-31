@@ -40,7 +40,8 @@ CREATE TABLE IF NOT EXISTS live_trades (
     exit_order_ids_json TEXT,                     -- resting bracket/stop order ids
     qty_open REAL,                                -- underlying still on the exchange
     realized_pnl_usd REAL NOT NULL DEFAULT 0,     -- banked from partial exits
-    exit_fills_json TEXT                          -- booked exit legs, keyed by order id
+    exit_fills_json TEXT,                         -- booked exit legs, keyed by order id
+    initial_stop_loss REAL                        -- stop armed at open; stop_loss trails
 );
 
 CREATE TABLE IF NOT EXISTS live_meta (
@@ -102,6 +103,18 @@ def init_db() -> None:
             )
         if "exit_fills_json" not in live_cols:
             conn.execute("ALTER TABLE live_trades ADD COLUMN exit_fills_json TEXT")
+        # stop_loss is overwritten in place by every trail, so without this the
+        # opening risk is unrecoverable. The originating suggestion is not a
+        # substitute: revalidation re-anchors the stop at fill time, so the
+        # planned level and the armed level often differ. Backfilling from the
+        # current stop understates a trail that already happened, which reads
+        # as "not trailed" rather than as a wrong number.
+        if "initial_stop_loss" not in live_cols:
+            conn.execute("ALTER TABLE live_trades ADD COLUMN initial_stop_loss REAL")
+            conn.execute(
+                "UPDATE live_trades SET initial_stop_loss = stop_loss "
+                "WHERE initial_stop_loss IS NULL"
+            )
         if "qty_open" not in live_cols:
             conn.execute("ALTER TABLE live_trades ADD COLUMN qty_open REAL")
             # Rows written before partial exits existed were all-or-nothing, so
@@ -139,10 +152,10 @@ def record_open(
             """
             INSERT INTO live_trades (
                 cycle_id, source, product_id, instrument, side, qty, entry,
-                stop_loss, take_profits_json, order_id, stop_order_id,
-                status, opened_at, notes, fill_type, filled_by,
+                stop_loss, initial_stop_loss, take_profits_json, order_id,
+                stop_order_id, status, opened_at, notes, fill_type, filled_by,
                 exit_order_ids_json, qty_open, realized_pnl_usd
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'open', ?, ?, ?, ?, ?, ?, 0)
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'open', ?, ?, ?, ?, ?, ?, 0)
             """,
             (
                 cycle_id,
@@ -152,6 +165,7 @@ def record_open(
                 side,
                 float(qty),
                 float(entry),
+                stop_loss,
                 stop_loss,
                 take_profits_json,
                 order_id,
@@ -366,6 +380,83 @@ def get_live_performance() -> dict[str, Any]:
         "by_fill_type": by_fill_type,
         "total_pnl_usd": total_pnl,
     }
+
+
+def get_realized_by_day(
+    *,
+    source: str | None = None,
+    year: int | None = None,
+) -> list[dict[str, Any]]:
+    """Realized P&L per UTC day, newest first.
+
+    A closed trade books its whole result on its close date. Scale-outs on a
+    still-open trade are realized cash as well, so each banked leg books on the
+    day it actually filled — otherwise a runner that took TP1 weeks ago would
+    show nothing until it finally closed. Summed, these days reconcile with
+    ``get_live_performance``: ``record_close`` folds banked partials into
+    ``pnl_usd``, so a closed row's legs are never counted twice.
+    """
+    q = "SELECT * FROM live_trades WHERE status IN ('open', 'closed')"
+    args: list[Any] = []
+    if source:
+        q += " AND source = ?"
+        args.append(source)
+    with _connect() as conn:
+        rows = [dict(r) for r in conn.execute(q, tuple(args)).fetchall()]
+
+    days: dict[str, dict[str, Any]] = {}
+
+    def _bucket(day: str) -> dict[str, Any]:
+        return days.setdefault(
+            day,
+            {
+                "date": day,
+                "realized_pnl_usd": 0.0,
+                "closed_n": 0,
+                "wins": 0,
+                # Booking events, not trades: a scale-out banks cash on a day
+                # when nothing closed, and "0 closed" next to a positive number
+                # reads like a bug.
+                "exits_n": 0,
+            },
+        )
+
+    for row in rows:
+        if str(row.get("status")) == "closed":
+            day = str(row.get("closed_at") or "")[:10]
+            if not day:
+                continue
+            pnl = float(row.get("pnl_usd") or 0.0)
+            bucket = _bucket(day)
+            bucket["realized_pnl_usd"] += pnl
+            bucket["closed_n"] += 1
+            bucket["exits_n"] += 1
+            if pnl > 0:
+                bucket["wins"] += 1
+            continue
+        if not float(row.get("realized_pnl_usd") or 0.0):
+            continue
+        try:
+            booked = json.loads(row.get("exit_fills_json") or "{}")
+        except json.JSONDecodeError:
+            booked = {}
+        for leg in booked.values():
+            if not isinstance(leg, dict):
+                continue
+            day = str(leg.get("at") or "")[:10]
+            if not day:
+                continue
+            bucket = _bucket(day)
+            bucket["realized_pnl_usd"] += float(leg.get("pnl_usd") or 0.0)
+            bucket["exits_n"] += 1
+
+    out = [
+        {**d, "realized_pnl_usd": round(d["realized_pnl_usd"], 2)}
+        for d in days.values()
+        if year is None or d["date"][:4] == str(year)
+    ]
+    out.sort(key=lambda d: d["date"], reverse=True)
+    return out
 
 
 # ---------------------------------------------------------------------------
