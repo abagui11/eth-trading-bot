@@ -365,6 +365,41 @@ class PartialExitLedgerTests(LedgerDbTestCase):
         )
 
 
+class RealizedPerformanceTests(LedgerDbTestCase):
+    """Banked scale-outs are realized cash even while the trade runs."""
+
+    def test_banked_partial_on_an_open_trade_counts_as_realized(self) -> None:
+        tid = self._open_trade()
+        live_ledger.record_partial_exit(
+            tid, exit_qty=0.1, exit_price=2468.5, pnl_usd=5.70,
+            order_id="mkt-1", reason="take_profit",
+        )
+        hq = live_ledger.get_live_performance()["by_source"]["hq"]
+        self.assertAlmostEqual(hq["pnl_usd"], 5.70)
+        self.assertAlmostEqual(hq["banked_open_usd"], 5.70)
+        self.assertEqual(hq["open"], 1)
+        self.assertEqual(hq["closed"], 0)
+
+    def test_closing_the_trade_does_not_double_count_the_partial(self) -> None:
+        tid = self._open_trade()
+        live_ledger.record_partial_exit(
+            tid, exit_qty=0.1, exit_price=2468.5, pnl_usd=5.70,
+            order_id="mkt-1", reason="take_profit",
+        )
+        live_ledger.record_close(
+            tid, exit_price=2477.0, pnl_usd=19.65, close_reason="take_profit"
+        )
+        hq = live_ledger.get_live_performance()["by_source"]["hq"]
+        self.assertAlmostEqual(hq["pnl_usd"], 25.35)
+        self.assertAlmostEqual(hq["banked_open_usd"], 0.0)
+
+    def test_untouched_open_trade_reports_no_realized(self) -> None:
+        self._open_trade()
+        hq = live_ledger.get_live_performance()["by_source"]["hq"]
+        self.assertEqual(hq["pnl_usd"], 0.0)
+        self.assertEqual(hq["banked_open_usd"], 0.0)
+
+
 class ReconcileTests(LedgerDbTestCase):
     """The netting bug: two sleeves share one contract, so a size check lies."""
 

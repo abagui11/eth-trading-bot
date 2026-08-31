@@ -496,6 +496,9 @@
           <div class="value {{ 'pos' if hq_live and hq_live.pnl_usd >= 0 else ('neg' if hq_live else '') }}">
             {% if hq_live %}{{ "%+.2f"|format(hq_live.pnl_usd) }}{% else %}no fills{% endif %}
           </div>
+          {% if hq_live and hq_live.banked_open_usd %}
+          <div class="sub">incl. {{ "%+.2f"|format(hq_live.banked_open_usd) }} scaled out of open trades</div>
+          {% endif %}
         </div>
         <div class="metric">
           <div class="label">Unrealized</div>

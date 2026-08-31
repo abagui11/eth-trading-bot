@@ -299,7 +299,11 @@ def get_live_performance() -> dict[str, Any]:
             """
         ).fetchall()
         open_rows = conn.execute(
-            "SELECT source, COUNT(*) AS n FROM live_trades WHERE status = 'open' GROUP BY source"
+            """
+            SELECT source, COUNT(*) AS n,
+                   COALESCE(SUM(realized_pnl_usd), 0) AS banked
+            FROM live_trades WHERE status = 'open' GROUP BY source
+            """
         ).fetchall()
         fill_rows = conn.execute(
             """
@@ -318,12 +322,26 @@ def get_live_performance() -> dict[str, Any]:
             "pnl_usd": round(float(r["pnl"]), 2),
             "win_rate": (int(r["wins"]) / closed_n) if closed_n else None,
             "open": 0,
+            "banked_open_usd": 0.0,
         }
+    # A scale-out on a still-open trade is realized cash. Counting only closed
+    # rows hid it entirely: the profit left the position but showed up nowhere.
+    # No double count — record_close folds banked partials into pnl_usd.
     for r in open_rows:
-        by_source.setdefault(
+        entry = by_source.setdefault(
             str(r["source"]),
-            {"closed": 0, "pnl_usd": 0.0, "win_rate": None, "open": 0},
-        )["open"] = int(r["n"])
+            {
+                "closed": 0,
+                "pnl_usd": 0.0,
+                "win_rate": None,
+                "open": 0,
+                "banked_open_usd": 0.0,
+            },
+        )
+        entry["open"] = int(r["n"])
+        banked = round(float(r["banked"] or 0.0), 2)
+        entry["banked_open_usd"] = banked
+        entry["pnl_usd"] = round(entry["pnl_usd"] + banked, 2)
     # Auto (mill self-fill) vs manual (operator Accept) attribution, so the
     # two entry paths can be judged separately.
     by_fill_type: dict[str, dict[str, Any]] = {}
