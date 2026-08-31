@@ -476,46 +476,97 @@ def _trade_story_from_cycle(cycle_id: str | None) -> dict[str, Any]:
     }
 
 
-def _live_chart_links(cycle_id: str, story: dict[str, Any]) -> list[dict[str, str]]:
-    """Chart URLs for a live row, driven by what the snapshot actually holds.
+def enrich_live_trades(
+    trades: list[dict[str, Any]], *, closed: bool = False
+) -> list[dict[str, Any]]:
+    """Shape live ledger rows for the shared ``trade_card`` macro.
 
-    Keyed off ``marked_chart_paths`` rather than guessing timeframes, so a row
-    never renders a link that 404s.
+    The live book was the only book rendered as a bare table: no thesis, no
+    charts, and no mark — so an open position never showed whether it was up.
+    Paper positions arrive with ``spot`` and unrealized pnl already attached by
+    the paper engine; live rows carry neither, so both are derived here.
     """
-    if not cycle_id:
-        return []
-    marked = story.get("marked_chart_paths") or {}
-    links = [
-        {"label": f"{tf} marked", "url": f"/api/chart/{cycle_id}?kind=marked&tf={tf}"}
-        for tf in ("H4", "H1", "M5")
-        if marked.get(tf)
-    ]
-    if not links and h4_marked_path(marked):
-        links.append({"label": "H4 marked", "url": f"/api/chart/{cycle_id}"})
-    return links
-
-
-def enrich_live_trades(trades: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    """Attach the originating cycle's reasoning and charts to live ledger rows.
-
-    The live book was the only book rendered without its reasoning: HQ fills
-    carry the hourly ``cycle_id``, so the journal's story is reusable verbatim.
-    Mill clips are minted by the volume lane and have no cycle, so they keep
-    their ledger notes instead of an empty story.
-    """
+    spots = get_live_spots().get("spots") or {}
     enriched: list[dict[str, Any]] = []
     for trade in trades:
         row = dict(trade)
-        cycle_id = str(row.get("cycle_id") or "")
+        cycle_id = str(row.get("cycle_id") or "") or None
         try:
             story = _trade_story_from_cycle(cycle_id) if cycle_id else {}
         except Exception:
             story = {}
-        row["story"] = story
-        row["charts"] = _live_chart_links(cycle_id, story)
-        row["has_story"] = bool(story.get("rationale") or row["charts"])
-        enriched.append(row)
+        charts = trade_chart_urls(
+            cycle_id,
+            closed=closed,
+            ledger_chart_path=story.get("chart_path"),
+            marked_chart_paths=story.get("marked_chart_paths"),
+        )
+
+        product_id = str(row.get("product_id") or story.get("product_id") or "ETH-USD")
+        side = str(row.get("side") or "")
+        qty = float(row.get("qty") or 0)
+        entry = float(row.get("entry") or 0)
+        notional = entry * qty
+        stop = row.get("stop_loss")
+        stop = float(stop) if stop is not None else story.get("stop_loss")
+        tps = _as_float_list(row.get("take_profits_json")) or _as_float_list(
+            story.get("take_profits")
+        )
+
+        if closed:
+            exit_price = float(row.get("exit_price") or 0) or None
+            pnl_usd = float(row.get("pnl_usd") or 0)
+            mark = exit_price
+        else:
+            exit_price = None
+            mark = float(spots.get(product_id) or 0) or None
+            direction = 1.0 if side == "long" else -1.0
+            pnl_usd = (mark - entry) * qty * direction if mark else 0.0
+
+        # Auto vs manual is the thing an operator most wants at a glance, so it
+        # leads the badges ahead of the cycle's own setup tags.
+        tags = [str(row.get("fill_type") or "auto")]
+        tags += [t for t in (story.get("setup_tags") or []) if t not in tags]
+
+        enriched.append(
+            {
+                **row,
+                "status": "closed" if closed else "open",
+                "product_id": product_id,
+                "product_label": bot_config.product_label(product_id),
+                "open_cycle_id": cycle_id,
+                "qty": qty,
+                "entry": entry,
+                "exit": exit_price,
+                "spot": mark,
+                "notional_usd": notional,
+                "size_usd": notional,
+                "action": story.get("action"),
+                "stop_loss": stop,
+                "take_profits": tps,
+                "risk_reward": story.get("risk_reward"),
+                "rationale": story.get("rationale") or "",
+                "setup_tags": tags,
+                "order_block": story.get("order_block"),
+                "pnl_usd": pnl_usd,
+                "pnl_pct": (pnl_usd / notional * 100) if notional else 0.0,
+                "is_winner": pnl_usd >= 0,
+                "dist_to_sl_pct": (
+                    _distance_pct(side, mark or 0, stop) if stop and not closed else None
+                ),
+                "dist_to_tp_pct": (
+                    _distance_to_tp_pct(side, mark or 0, tps) if not closed else None
+                ),
+                "participation": _participation(cycle_id),
+                **charts,
+            }
+        )
     return enriched
+
+
+def live_unrealized_usd(open_rows: list[dict[str, Any]]) -> float:
+    """Mark-to-market total for the open live book (already enriched)."""
+    return sum(float(r.get("pnl_usd") or 0.0) for r in open_rows)
 
 
 def _open_counts_by_product(positions: list[dict[str, Any]]) -> dict[str, int]:

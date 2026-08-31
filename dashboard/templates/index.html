@@ -38,42 +38,6 @@
   {% else %}—{% endif %}
   {%- endmacro %}
 
-  {#- Expandable reasoning for a live ledger row. The live book is real capital,
-      so it gets the same rationale + charts the paper journal always had. -#}
-  {% macro live_logic_row(t, span) -%}
-  {% if t.has_story %}
-  <tr class="live-logic-row">
-    <td colspan="{{ span }}" style="padding-top:0">
-      <details class="cycle-static">
-        <summary>Trade logic{% if t.cycle_id %} — {{ t.cycle_id }}{% endif %}</summary>
-        {% set story = t.story %}
-        <div style="padding:10px 0 4px">
-          {% if story.setup_tags %}
-          <p style="margin:0 0 8px">
-            {% for tag in story.setup_tags %}<span class="badge badge-none">{{ tag }}</span> {% endfor %}
-          </p>
-          {% endif %}
-          <p class="sub" style="margin:0 0 8px">
-            Planned stop {% if story.stop_loss %}${{ "%.2f"|format(story.stop_loss) }}{% else %}—{% endif %}
-            · targets {% if story.take_profits %}{% for tp in story.take_profits %}${{ "%.2f"|format(tp) }}{% if not loop.last %}, {% endif %}{% endfor %}{% else %}—{% endif %}
-            · R:R {% if story.risk_reward %}{{ "%.2f"|format(story.risk_reward) }}{% else %}—{% endif %}
-          </p>
-          {% if story.rationale %}
-          <p style="white-space:pre-wrap;margin:0 0 10px">{{ story.rationale }}</p>
-          {% endif %}
-          {% for chart in t.charts %}
-          <figure class="trade-chart" style="margin:0 0 12px">
-            <figcaption>{{ chart.label }}</figcaption>
-            <img class="chart-img zoomable" src="{{ chart.url }}" alt="{{ chart.label }} chart for {{ t.cycle_id }}" loading="lazy">
-          </figure>
-          {% endfor %}
-        </div>
-      </details>
-    </td>
-  </tr>
-  {% endif %}
-  {%- endmacro %}
-
   {% macro trade_card(t, mode) %}
   {#- Button accordion (not <details>) — native disclosure markers can't be reliably hidden. -#}
   <div class="trade-card{% if mode == 'open' %} trade-live{% elif mode == 'archived' %} trade-archived{% endif %}">
@@ -524,6 +488,12 @@
           </div>
         </div>
         <div class="metric">
+          <div class="label">Unrealized</div>
+          <div class="value {{ 'pos' if live_unrealized_usd >= 0 else 'neg' }}">
+            {% if live_open %}{{ "%+.2f"|format(live_unrealized_usd) }}{% else %}—{% endif %}
+          </div>
+        </div>
+        <div class="metric">
           <div class="label">Open</div>
           <div class="value">{{ live_open|length }}</div>
         </div>
@@ -533,52 +503,19 @@
         </div>
       </div>
       {% if live_open %}
-      <p class="sub news-section">Open live positions</p>
-      <div class="table-scroll">
-        <table>
-          <thead>
-            <tr><th>Opened</th><th>Sleeve</th><th>Instrument</th><th>Side</th><th>Qty</th><th>Entry</th><th>Stop</th></tr>
-          </thead>
-          <tbody>
-            {% for t in live_open %}
-            <tr>
-              <td>{{ (t.opened_at or '')[:16] }}</td>
-              <td>{{ t.source }}</td>
-              <td>{{ t.instrument }}</td>
-              <td>{{ t.side }}</td>
-              <td>{{ "%.4f"|format(t.qty) }}</td>
-              <td>${{ "%.2f"|format(t.entry) }}</td>
-              <td>{% if t.stop_loss %}${{ "%.2f"|format(t.stop_loss) }}{% else %}—{% endif %}</td>
-            </tr>
-            {{ live_logic_row(t, 7) }}
-            {% endfor %}
-          </tbody>
-        </table>
+      <h3 class="journal-subhead">Open</h3>
+      <div class="trade-list">
+        {% for t in live_open %}
+        {{ trade_card(t, 'open') }}
+        {% endfor %}
       </div>
       {% endif %}
       {% if live_closed %}
-      <p class="sub news-section">Closed live trades</p>
-      <div class="table-scroll">
-        <table>
-          <thead>
-            <tr><th>Closed</th><th>Sleeve</th><th>Instrument</th><th>Side</th><th>Entry</th><th>Exit</th><th>P&amp;L</th><th>Reason</th></tr>
-          </thead>
-          <tbody>
-            {% for t in live_closed %}
-            <tr>
-              <td>{{ (t.closed_at or '')[:16] }}</td>
-              <td>{{ t.source }}</td>
-              <td>{{ t.instrument }}</td>
-              <td>{{ t.side }}</td>
-              <td>${{ "%.2f"|format(t.entry) }}</td>
-              <td>{% if t.exit_price %}${{ "%.2f"|format(t.exit_price) }}{% else %}—{% endif %}</td>
-              <td class="{{ 'pos-row' if (t.pnl_usd or 0) >= 0 else 'neg-row' }}">{{ "%+.2f"|format(t.pnl_usd or 0) }}</td>
-              <td>{{ t.close_reason or '—' }}</td>
-            </tr>
-            {{ live_logic_row(t, 8) }}
-            {% endfor %}
-          </tbody>
-        </table>
+      <h3 class="journal-subhead">Closed</h3>
+      <div class="trade-list">
+        {% for t in live_closed %}
+        {{ trade_card(t, 'closed') }}
+        {% endfor %}
       </div>
       {% endif %}
       {% if not live_open and not live_closed %}

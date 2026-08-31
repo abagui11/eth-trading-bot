@@ -176,6 +176,54 @@ class DashboardUiSmokeTests(unittest.TestCase):
             p.stop()
         self._tmpdir.cleanup()
 
+    def test_live_book_uses_the_same_cards_as_the_paper_journal(self) -> None:
+        """Eva's live rows were a bare table: no thesis, no chart, no mark."""
+        live_row = {
+            "id": 1,
+            "cycle_id": "20260831T020000Z",
+            "source": "hq",
+            "product_id": "ETH-USD",
+            "instrument": "ETH-27JUN25-CDE",
+            "side": "long",
+            "qty": 0.4,
+            "entry": 1900.0,
+            "stop_loss": 1850.0,
+            "fill_type": "auto",
+            "opened_at": "2026-08-31T02:00:56Z",
+        }
+        story = {
+            "action": "deriv_buy",
+            "rationale": "Live thesis should be readable from the card.",
+            "setup_tags": ["h4_ob"],
+            "stop_loss": 1850.0,
+            "take_profits": [2050.0],
+            "risk_reward": 2.4,
+            "chart_path": None,
+            "marked_chart_paths": {"H4": "x.png"},
+        }
+        with patch("live_ledger.get_open_trades", return_value=[live_row]), patch(
+            "live_ledger.get_closed_trades", return_value=[]
+        ), patch("dashboard.data._trade_story_from_cycle", return_value=story), patch(
+            "dashboard.data.trade_chart_urls",
+            return_value={
+                "structure_chart_url": "/api/chart/live?kind=structure&tf=H4",
+                "execution_chart_url": None,
+                "thumb_chart_url": "/api/chart/live?kind=structure&tf=H4",
+            },
+        ):
+            html = self.client.get("/").text
+
+        live_card = html.split('id="live-book-card"', 1)[1].split("</section>", 1)[0]
+        # Same accordion + thumbnail treatment as the paper journal.
+        self.assertIn('class="trade-card trade-live"', live_card)
+        self.assertIn("Live thesis should be readable from the card.", live_card)
+        self.assertIn("/api/chart/live?kind=structure&amp;tf=H4", live_card)
+        self.assertIn("trade-thumb", live_card)
+        # Spot 2000 vs entry 1900 on 0.4 qty — the mark the table never showed.
+        self.assertIn("mark $2000.00", live_card)
+        self.assertIn("+40.00", live_card)
+        self.assertIn("auto", live_card)
+
     def test_trade_cards_use_button_accordion_collapsed(self) -> None:
         html = self.client.get("/").text
         # No native <details> — avoids double disclosure arrows.
