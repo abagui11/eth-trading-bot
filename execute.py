@@ -166,8 +166,21 @@ def arm_exits(
                 gw.cancel_orders(placed)
             except GatewayError:
                 logger.exception("Could not cancel partial brackets for %s", label)
-        remaining = qty - sum(r["qty"] for r in result["realized"])
         result["exit_order_ids"] = []
+        # A market leg can fail *after* executing (the confirming read 404s on a
+        # just-placed order), so the size to protect comes from the exchange
+        # rather than from what this function thinks it sold.
+        remaining = qty - sum(r["qty"] for r in result["realized"])
+        try:
+            live_size = abs(float((gw.get_position(instrument) or {}).get("size") or 0.0))
+            if live_size < remaining:
+                logger.warning(
+                    "%s: exchange holds %.4f, expected %.4f — protecting the "
+                    "smaller size", label, live_size, remaining,
+                )
+                remaining = live_size
+        except Exception:
+            logger.exception("Could not re-read position for %s", label)
         if remaining <= 0:
             result["mode"] = "flat"
             return result

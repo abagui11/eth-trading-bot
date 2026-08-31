@@ -340,13 +340,27 @@ class DerivGateway:
         # the actual fill price/size.
         avg_price, filled_underlying = 0.0, 0.0
         csize = self.contract_size(instrument)
-        for _ in range(5):
-            o = self._fetch_order(order_id)
+        seen = False
+        for _ in range(8):
+            try:
+                o = self._fetch_order(order_id)
+            except GatewayError:
+                # A just-placed order is not immediately queryable and 404s.
+                # Treating that as "did not fill" would be dangerous: the order
+                # is already live and may have executed.
+                time.sleep(1.0)
+                continue
+            seen = True
             avg_price = float(o.get("average_filled_price") or 0)
             filled_underlying = float(o.get("filled_size") or 0) * csize
             if o.get("status") in ("FILLED", "CANCELLED", "EXPIRED", "FAILED"):
                 break
             time.sleep(1.0)
+        if not seen:
+            raise GatewayError(
+                f"{instrument}: market order {order_id} could not be confirmed — "
+                "it may have filled; reconcile before retrying"
+            )
         if filled_underlying <= 0:
             raise GatewayError(
                 f"{instrument}: market order {order_id} did not fill"

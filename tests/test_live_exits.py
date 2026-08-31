@@ -13,6 +13,7 @@ import json
 import tempfile
 import unittest
 from pathlib import Path
+from typing import Any
 from unittest.mock import MagicMock, patch
 
 import config
@@ -205,6 +206,78 @@ class ArmExitsTests(unittest.TestCase):
         )
         self.assertEqual(res["mode"], "stop_only")
         gw.place_bracket.assert_not_called()
+
+
+class MarketOrderConfirmationTests(unittest.TestCase):
+    """A just-placed order 404s on lookup — that is not a failed order.
+
+    Treating the 404 as "did not fill" once caused a live sell to execute while
+    the caller believed it had not, and then try to protect a position that had
+    already shrunk.
+    """
+
+    def _gateway(self) -> Any:
+        from coinbase_deriv import DerivGateway
+
+        gw = DerivGateway.__new__(DerivGateway)
+        gw.contract_size = lambda _pid: 0.1
+        gw._to_contracts = lambda _pid, amt: int(round(amt / 0.1))
+        gw._create_order = lambda **kw: "ord-1"
+        return gw
+
+    def test_lookup_404_is_retried_not_treated_as_no_fill(self) -> None:
+        gw = self._gateway()
+        calls = []
+
+        def fetch(order_id):
+            calls.append(order_id)
+            if len(calls) < 3:
+                raise GatewayError("HTTP 404 order with this orderID was not found")
+            return {
+                "status": "FILLED",
+                "filled_size": "1",
+                "average_filled_price": "2466",
+            }
+
+        gw._fetch_order = fetch
+        with patch("coinbase_deriv.time.sleep"):
+            out = gw.place_market_order(
+                instrument="ETP-20DEC30-CDE", side="sell", amount=0.1, label="t"
+            )
+        self.assertEqual(out["order"]["average_price"], 2466.0)
+        self.assertAlmostEqual(out["order"]["filled_qty"], 0.1)
+        self.assertGreaterEqual(len(calls), 3)
+
+    def test_never_confirmed_order_says_so_rather_than_no_fill(self) -> None:
+        gw = self._gateway()
+        gw._fetch_order = MagicMock(side_effect=GatewayError("HTTP 404"))
+        with patch("coinbase_deriv.time.sleep"):
+            with self.assertRaises(GatewayError) as ctx:
+                gw.place_market_order(
+                    instrument="ETP-20DEC30-CDE", side="sell", amount=0.1, label="t"
+                )
+        self.assertIn("could not be confirmed", str(ctx.exception))
+
+
+class ArmExitsFallbackSizingTests(unittest.TestCase):
+    def test_fallback_stop_never_exceeds_what_the_exchange_holds(self) -> None:
+        """A market leg can fail after executing, shrinking the position."""
+        gw = _gateway(mark=2420.0)
+        gw.place_bracket.side_effect = GatewayError("rejected")
+        gw.get_position.return_value = {"size": 0.1, "mark_price": 2420.0}
+        res = live_exec.arm_exits(
+            gw,
+            instrument="ETP-20DEC30-CDE",
+            side="long",
+            qty=0.4,
+            entry=2411.5,
+            stop_loss=2385.0,
+            take_profits=[2440.0, 2477.0, 2534.0],
+            label="hq:c1",
+            mark=2420.0,
+        )
+        self.assertEqual(res["mode"], "stop_only")
+        self.assertAlmostEqual(gw.place_stop_market.call_args.kwargs["amount"], 0.1)
 
 
 class LedgerDbTestCase(unittest.TestCase):
