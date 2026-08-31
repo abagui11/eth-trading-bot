@@ -282,7 +282,7 @@ def create_app() -> FastAPI:
     def api_investor_snapshot(request: Request) -> dict:
         if not _investor_authorized(request):
             raise HTTPException(status_code=404, detail="Not Found")
-        return build_investor_payload(include_paper=False)
+        return build_investor_payload()
 
     @app.get("/feed", response_class=HTMLResponse)
     async def idea_feed(request: Request) -> HTMLResponse:

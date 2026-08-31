@@ -9,15 +9,16 @@ numbers are re-aggregated here rather than reused piecemeal.
 
 from __future__ import annotations
 
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Any
 
 import bot_config
 import live_ledger
-import paper
 
 from dashboard import data
 from dashboard.account import CONFIGURED_CAPITAL_USD, build_health
+
+NAV_LOOKBACK_DAYS = 365
 
 _SOURCE = "hq"
 SLEEVE_LABELS = {"hq": "Eva"}
@@ -106,6 +107,40 @@ def _capital_base() -> dict[str, Any]:
     return {"usd": round(CONFIGURED_CAPITAL_USD, 2), "basis": "configured"}
 
 
+def build_nav_series(
+    *,
+    base_usd: float,
+    days: list[dict[str, Any]],
+    unrealized: float,
+    today: str,
+    lookback_days: int = NAV_LOOKBACK_DAYS,
+) -> list[dict[str, Any]]:
+    """Daily Eva NAV: sleeve + realized through that UTC day.
+
+    There is no historical mark, so past days are realized-only. Today's point
+    also includes the open unrealized so the last dot matches portfolio value.
+    Days with no fill carry the previous close forward (cash sitting idle).
+    Realized from before the window is folded into the first point so a week
+    chart does not reset to the sleeve just because older P&L fell off.
+    """
+    by_date = {str(d["date"]): float(d["realized_pnl_usd"] or 0.0) for d in days}
+    end = datetime.strptime(today, "%Y-%m-%d")
+    start = end - timedelta(days=max(int(lookback_days), 1) - 1)
+    start_s = start.strftime("%Y-%m-%d")
+    cum = sum(pnl for date, pnl in by_date.items() if date < start_s)
+    out: list[dict[str, Any]] = []
+    cur = start
+    while cur <= end:
+        ds = cur.strftime("%Y-%m-%d")
+        cum += by_date.get(ds, 0.0)
+        value = float(base_usd) + cum
+        if ds == today:
+            value += float(unrealized or 0.0)
+        out.append({"date": ds, "value": round(value, 2)})
+        cur += timedelta(days=1)
+    return out
+
+
 def _pct(numerator: float, denominator: float) -> float | None:
     if not denominator:
         return None
@@ -155,15 +190,8 @@ def _attach_liquidation(trades: list[dict[str, Any]]) -> None:
 def build_investor_payload(
     *,
     closed_limit: int = 40,
-    paper_limit: int = 15,
-    include_paper: bool = True,
 ) -> dict[str, Any]:
-    """Full investor snapshot. Blocking — call from a sync route handler.
-
-    ``include_paper`` is off for the polling endpoint: the paper books re-read
-    the ledger and audit tables per trade, and none of it changes between
-    refreshes.
-    """
+    """Full investor snapshot. Blocking — call from a sync route handler."""
     # HQ only — mill clips share the Coinbase account but are a different
     # product, and mixing them here made Eva's book unreadable.
     open_trades = data.enrich_live_trades(live_ledger.get_open_trades(source=_SOURCE))
@@ -178,7 +206,8 @@ def build_investor_payload(
     now = datetime.now(timezone.utc)
     year = now.year
     today = now.strftime("%Y-%m-%d")
-    days = live_ledger.get_realized_by_day(source=_SOURCE, year=year)
+    all_days = live_ledger.get_realized_by_day(source=_SOURCE)
+    days = [d for d in all_days if d["date"][:4] == str(year)]
     daily = _daily_stats(days, today)
 
     unrealized = round(data.live_unrealized_usd(open_trades), 2)
@@ -195,19 +224,12 @@ def build_investor_payload(
         equity_usd=portfolio_value,
         gross_notional_usd=exposure["gross_notional_usd"],
     )
-
-    paper_books: dict[str, Any] = {"available": False}
-    if include_paper:
-        paper_books = {
-            "available": True,
-            "current": data.get_performance_payload(),
-            "current_label": bot_config.PAPER_EPOCH_LABEL,
-            "current_trades": data.get_closed_trades_payload(limit=paper_limit),
-            "current_open": data.get_open_positions_payload(),
-            "archived": data.get_archived_performance_payload(),
-            "archived_trades": data.get_archived_trades_payload(limit=paper_limit),
-            "epoch": paper.get_epoch_info(),
-        }
+    nav_series = build_nav_series(
+        base_usd=base_usd,
+        days=all_days,
+        unrealized=unrealized,
+        today=today,
+    )
 
     return {
         "generated_at": _now_iso(),
@@ -228,10 +250,10 @@ def build_investor_payload(
             "realized_all_time_usd": round(realized_total, 2),
             "total_pnl_usd": round(realized_ytd + unrealized, 2),
             "total_pnl_pct": _pct(realized_ytd + unrealized, base_usd),
+            "nav_series": nav_series,
         },
         "daily": {**daily, "days": days},
         "performance": performance,
         "open_trades": open_trades,
         "closed_trades": closed_trades,
-        "paper": paper_books,
     }

@@ -355,7 +355,7 @@ The dashboard is the intelligence hub. Four tabs: **Brain** (vision / tape / new
 
 ### Private investor link (`/investors`)
 
-A read-only page for investors, not linked from the hub and marked `noindex,nofollow`. It shows Eva's portfolio value, realized gain for the day and year to date, unrealized, the **health factor** (Eva equity ÷ Eva open position size), every open Eva position with remaining size (ETH and $ notional), liquidation price (or n/a), take-profit ladder and current stop, per-day realized P&L, and the paper track record. Mill clips and the raw Coinbase account are not on this page.
+A read-only page for investors, not linked from the hub and marked `noindex,nofollow`. It shows Eva's portfolio value (week/month/year chart), realized gain for the day and year to date, unrealized, the **health factor** (Eva equity ÷ Eva open position size), every open Eva position with remaining size (ETH and $ notional), liquidation price (or n/a), take-profit ladder and current stop, and per-day realized P&L. Mill clips, the raw Coinbase account, and the paper books are not on this page.
 
 Gate it before sharing the URL:
 

@@ -5,7 +5,7 @@
   <meta name="robots" content="noindex,nofollow">
   <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
   <title>Eva — Investor View</title>
-  <link rel="stylesheet" href="/static/style.css?v=inv1">
+  <link rel="stylesheet" href="/static/style.css?v=inv2">
 </head>
 <body>
 {% from "_macros.html" import trade_card, tip_badge %}
@@ -27,6 +27,22 @@
   <!-- ==== The four numbers, above the fold ==== -->
   <section class="card inv-hero">
     <h2>Portfolio at a glance</h2>
+    <div class="inv-nav">
+      <div class="inv-nav-top">
+        <div class="inv-range" role="tablist" aria-label="Portfolio range">
+          <button type="button" class="inv-range-btn is-on" data-range="week" aria-pressed="true">Week</button>
+          <button type="button" class="inv-range-btn" data-range="month" aria-pressed="false">Month</button>
+          <button type="button" class="inv-range-btn" data-range="year" aria-pressed="false">Year</button>
+        </div>
+        <div class="inv-nav-delta" id="inv-nav-delta"></div>
+      </div>
+      <svg id="inv-nav-svg" viewBox="0 0 640 160" preserveAspectRatio="none" role="img" aria-label="Eva portfolio value"></svg>
+      <div class="inv-nav-axis">
+        <span id="inv-nav-from"></span>
+        <span id="inv-nav-to"></span>
+      </div>
+    </div>
+    <script id="inv-nav-data" type="application/json">{{ p.nav_series|tojson }}</script>
     <div class="inv-hero-grid">
       <div class="inv-hero-cell">
         <div class="label">Portfolio value</div>
@@ -69,6 +85,8 @@
       taken out of open trades. Unrealized is the mark-to-market on what is
       still riding. Percentages are measured against
       the Eva sleeve of {{ p.capital_base_usd|usd(decimals=0) }}.
+      The chart is sleeve plus realized P&amp;L each UTC day; today's point
+      also includes the open mark.
     </p>
   </section>
 
@@ -244,112 +262,6 @@
     {% endif %}
   </section>
 
-  <!-- ==== Paper history ==== -->
-  {% if inv.paper.available %}
-  {% set pp = inv.paper.current %}
-  <section class="card journal-card" id="inv-paper-card">
-    <h2>Paper book v2 · simulated</h2>
-    <p class="sub journal-intro">
-      Track record from the paper book the live agent was validated against. No
-      real money — kept here so the live results above can be read against a
-      longer history.
-    </p>
-    <div class="metrics" style="margin-bottom:10px">
-      <div class="metric">
-        <div class="label">Equity</div>
-        <div class="value">{{ pp.equity_usd|usd }}</div>
-      </div>
-      <div class="metric">
-        <div class="label">Total P&amp;L</div>
-        <div class="value {{ 'pos' if pp.total_pnl_usd >= 0 else 'neg' }}">
-          {{ pp.total_pnl_usd|usd(sign=True) }} ({{ pp.total_pnl_pct|pct(decimals=1) }})
-        </div>
-      </div>
-      <div class="metric">
-        <div class="label">Win rate</div>
-        <div class="value">{{ pp.win_rate_pct }}%</div>
-      </div>
-      <div class="metric">
-        <div class="label">Profit factor</div>
-        <div class="value">
-          {% if pp.profit_factor is not none %}{{ "%.2f"|format(pp.profit_factor) }}{% else %}—{% endif %}
-        </div>
-      </div>
-    </div>
-    <p class="sub" style="margin-bottom:10px">
-      {{ pp.starting_usd|usd(decimals=0) }} start ({{ inv.paper.current_label }})
-      · {{ pp.closed_trade_count }} closed · {{ pp.open_count }} open
-    </p>
-    {% if inv.paper.current_trades or inv.paper.current_open %}
-    <button type="button" class="load-more" id="inv-paper-toggle" aria-expanded="false">Show v2 journal</button>
-    <div id="inv-paper-body" hidden>
-      {% if inv.paper.current_open %}
-      <h3 class="journal-subhead">Open</h3>
-      <div class="trade-list">
-        {% for t in inv.paper.current_open %}
-        {{ trade_card(t, 'open') }}
-        {% endfor %}
-      </div>
-      {% endif %}
-      {% if inv.paper.current_trades %}
-      <h3 class="journal-subhead">Closed</h3>
-      <div class="trade-list">
-        {% for t in inv.paper.current_trades %}
-        {{ trade_card(t, 'closed') }}
-        {% endfor %}
-      </div>
-      {% endif %}
-    </div>
-    {% else %}
-    <p class="sub">No v2 paper trades to list.</p>
-    {% endif %}
-  </section>
-
-  {% set ap = inv.paper.archived %}
-  {% if ap.available or inv.paper.archived_trades %}
-  <section class="card journal-card journal-archived">
-    <h2>Archived paper book v1 · simulated</h2>
-    <p class="sub journal-intro">
-      The first paper epoch, archived when the book reset. Not included in any
-      figure above.
-    </p>
-    <div class="metrics" style="margin-bottom:10px">
-      <div class="metric">
-        <div class="label">Start</div>
-        <div class="value">{{ ap.starting_usd|usd(decimals=0) }}</div>
-      </div>
-      <div class="metric">
-        <div class="label">Realized P&amp;L</div>
-        <div class="value {{ 'pos' if ap.realized_pnl_usd >= 0 else 'neg' }}">
-          {{ ap.realized_pnl_usd|usd(sign=True) }}
-          {% if ap.starting_usd %}({{ ap.realized_pnl_pct|pct(decimals=1) }}){% endif %}
-        </div>
-      </div>
-      <div class="metric">
-        <div class="label">Win rate</div>
-        <div class="value">{{ ap.win_rate_pct }}%</div>
-      </div>
-      <div class="metric">
-        <div class="label">Closed</div>
-        <div class="value">{{ ap.closed_trade_count }}</div>
-      </div>
-    </div>
-    {% if inv.paper.archived_trades %}
-    <button type="button" class="load-more" id="inv-archived-toggle" aria-expanded="false">Show v1 journal</button>
-    <div id="inv-archived-body" hidden>
-      <div class="trade-list">
-        {% for t in inv.paper.archived_trades %}
-        {{ trade_card(t, 'archived') }}
-        {% endfor %}
-      </div>
-    </div>
-    {% else %}
-    <p class="sub">No closed v1 trades to list.</p>
-    {% endif %}
-  </section>
-  {% endif %}
-  {% endif %}
-
   <footer>
     Republic Technologies · Eva investor view · private link.
     Figures are informational, not an offer or a performance guarantee.
@@ -428,20 +340,6 @@
   }
   initChartLightbox();
 
-  function bindToggle(btnId, bodyId, showLabel, hideLabel) {
-    var btn = document.getElementById(btnId);
-    var body = document.getElementById(bodyId);
-    if (!btn || !body) return;
-    btn.addEventListener('click', function () {
-      var open = body.hidden;
-      body.hidden = !open;
-      btn.setAttribute('aria-expanded', open ? 'true' : 'false');
-      btn.textContent = open ? hideLabel : showLabel;
-    });
-  }
-  bindToggle('inv-paper-toggle', 'inv-paper-body', 'Show v2 journal', 'Hide v2 journal');
-  bindToggle('inv-archived-toggle', 'inv-archived-body', 'Show v1 journal', 'Hide v1 journal');
-
   function usd(n, sign) {
     if (n === null || n === undefined) return '—';
     var abs = Math.abs(Number(n)).toLocaleString(undefined, {
@@ -464,6 +362,91 @@
     if (el) el.textContent = text;
     return el;
   }
+
+  var NAV_DAYS = { week: 7, month: 30, year: 365 };
+  var navSeries = [];
+  var navRange = 'week';
+  try {
+    var raw = document.getElementById('inv-nav-data');
+    navSeries = raw ? JSON.parse(raw.textContent || '[]') : [];
+  } catch (e) { navSeries = []; }
+
+  function sliceNav(series, range) {
+    var n = NAV_DAYS[range] || 7;
+    if (!series || !series.length) return [];
+    return series.slice(Math.max(0, series.length - n));
+  }
+
+  function fmtNavDate(iso) {
+    if (!iso) return '';
+    var p = iso.split('-');
+    var months = ['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'];
+    var m = months[Number(p[1]) - 1] || p[1];
+    return navRange === 'year' ? m + ' ' + p[0] : m + ' ' + Number(p[2]);
+  }
+
+  function drawNav(series) {
+    var svg = document.getElementById('inv-nav-svg');
+    if (!svg) return;
+    var pts = sliceNav(series, navRange);
+    var w = 640, h = 160, padT = 12, padR = 8, padB = 8, padL = 8;
+    if (!pts.length) {
+      svg.innerHTML = '';
+      setText('inv-nav-delta', '');
+      setText('inv-nav-from', '');
+      setText('inv-nav-to', '');
+      return;
+    }
+    var vals = pts.map(function (p) { return Number(p.value); });
+    var min = Math.min.apply(null, vals);
+    var max = Math.max.apply(null, vals);
+    if (max === min) { max = min + 1; }
+    var span = max - min;
+    min -= span * 0.1;
+    max += span * 0.1;
+    function x(i) {
+      var den = Math.max(pts.length - 1, 1);
+      return padL + i * (w - padL - padR) / den;
+    }
+    function y(v) {
+      return padT + (1 - (v - min) / (max - min)) * (h - padT - padB);
+    }
+    var line = pts.map(function (p, i) {
+      return (i ? 'L' : 'M') + x(i).toFixed(1) + ' ' + y(p.value).toFixed(1);
+    }).join(' ');
+    var lastX = x(pts.length - 1);
+    var area = line + ' L' + lastX.toFixed(1) + ' ' + (h - padB) + ' L' + x(0).toFixed(1) + ' ' + (h - padB) + ' Z';
+    var up = pts[pts.length - 1].value >= pts[0].value;
+    var color = up ? '#3fb950' : '#f85149';
+    var last = pts[pts.length - 1];
+    svg.innerHTML =
+      '<path d="' + area + '" fill="' + color + '" fill-opacity="0.16"></path>' +
+      '<path d="' + line + '" fill="none" stroke="' + color + '" stroke-width="2" stroke-linejoin="round" stroke-linecap="round"></path>' +
+      '<circle cx="' + lastX.toFixed(1) + '" cy="' + y(last.value).toFixed(1) + '" r="3.5" fill="' + color + '"></circle>';
+    var delta = last.value - pts[0].value;
+    var deltaPct = pts[0].value ? (delta / pts[0].value) * 100 : 0;
+    var deltaEl = document.getElementById('inv-nav-delta');
+    if (deltaEl) {
+      deltaEl.textContent = usd(delta, true) + ' (' + pct(deltaPct, 2) + ')';
+      deltaEl.classList.toggle('pos', delta >= 0);
+      deltaEl.classList.toggle('neg', delta < 0);
+    }
+    setText('inv-nav-from', fmtNavDate(pts[0].date));
+    setText('inv-nav-to', fmtNavDate(last.date));
+  }
+
+  document.querySelectorAll('.inv-range-btn').forEach(function (btn) {
+    btn.addEventListener('click', function () {
+      navRange = btn.getAttribute('data-range') || 'week';
+      document.querySelectorAll('.inv-range-btn').forEach(function (b) {
+        var on = b === btn;
+        b.classList.toggle('is-on', on);
+        b.setAttribute('aria-pressed', on ? 'true' : 'false');
+      });
+      drawNav(navSeries);
+    });
+  });
+  drawNav(navSeries);
 
   // The access token rides in the query string, so the poll has to carry the
   // same search params or it 404s on a token-gated deployment.
@@ -496,6 +479,10 @@
       if (fill) {
         fill.style.width = Math.min(h.health_pct || 0, 100) + '%';
         fill.className = 'inv-health-fill band-' + h.band;
+      }
+      if (p.nav_series) {
+        navSeries = p.nav_series;
+        drawNav(navSeries);
       }
     } catch (e) {}
   }

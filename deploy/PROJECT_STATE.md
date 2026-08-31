@@ -275,7 +275,7 @@ Legend: ✅ done · 🟡 in progress · 🔧 needs work · ⬜ planned · ⚠️
 | Telegram beta UI | `bot.py`, `telegram_ui.py`, `display_summary.py` | ✅ | Open account / My Metrics / My book / Journal / Research; trade Yes/No/Join/See more; concise cards (deterministic blurb by default) |
 | Decision chart | `charts.build_decision_chart` | ✅ | clean candles + red SL / green TP1 bands with % annotations; source/SL/TP-reference-aware M5 history (up to 300 bars) |
 | Dashboard | `dashboard/` | ✅ | Intelligence hub: Brain (vision) · Eva Trades (HQ ICT live + paper) · Yield Generation · Trade mill (idea stream + nano-ETH live clip). Consumer `/feed` + `/me` |
-| Investor view | `dashboard/investor.py`, `templates/investors.html` | ✅ | Private `/investors` link: Eva portfolio value, realized day/YTD, unrealized, health factor, every open Eva position (size + liq price), per-day P&L, paper history. Token-gated via `INVESTOR_ACCESS_TOKEN`, `noindex`, unlinked from the hub |
+| Investor view | `dashboard/investor.py`, `templates/investors.html` | ✅ | Private `/investors` link: Eva portfolio value with week/month/year chart, realized day/YTD, unrealized, health factor, every open Eva position (size + liq price), per-day P&L. Token-gated via `INVESTOR_ACCESS_TOKEN`, `noindex`, unlinked from the hub |
 | Live execution | `execute.py` | ⬜ | shadow/live path not built |
 | OHLC history cache | `ohlc_cache.py` | ✅ | research/backfill; ETH+BTC H1/D1; not hot path |
 | Legacy scheduler | `scheduler.py` | ⚠️ | deprecated; use `main.py` |
@@ -394,6 +394,7 @@ Defaults from `bot_config.py` (non-secret tunables). Secrets and portfolio size 
 
 | Date | Change |
 |---|---|
+| 2026-08-31 | **Investor page chart + no paper books.** Portfolio at a glance now opens with an Eva NAV sparkline (week / month / year). The series is the $2,000 sleeve plus realized P&L each UTC day; today's point includes the open mark. Dropped the v1/v2 paper journals from this page — they belong on the operator hub. |
 | 2026-08-31 | **Investor page is Eva-only and no longer mirrors Coinbase.** Dropped the exchange-account card (USD equity, buying power, Coinbase realized) — those numbers are a different book (mill + fees + USDC/USD wallets) and read as if Eva were wrong. Health factor no longer shows Coinbase's 1000% liquidation buffer. Open rows now show remaining size (ETH and $ notional) and liquidation price (`n/a` when Coinbase is not quoting one). |
 | 2026-08-31 | **Mill clips are always one nano contract.** Dropped `LIVE_MILL_NOTIONAL_USD` ($260 target / price, then round up). `_mill_clip` now sizes to `LIVE_PRODUCT_QTY_FLOORS` (0.1 ETH / 0.01 BTC); notional is qty × mark. Sleeve check still rejects a BTC contract that no longer fits. Telegram Accept replies say `1 contract (0.1)` rather than a pre-floor request like 0.104565. |
 | 2026-08-31 | **Investor view is Eva-only.** Mill clips share the Coinbase account but are a different product; `/investors` now filters live trades, daily P&L, health, and portfolio value to the HQ sleeve (`LIVE_HQ_EQUITY_USD`). Whole-account Coinbase equity stays on the exchange card, labelled as shared. |

@@ -1032,6 +1032,59 @@ a.news-title:hover {
   gap: 10px;
 }
 
+.inv-nav { margin: 0 0 14px; }
+.inv-nav-top {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  margin-bottom: 8px;
+  flex-wrap: wrap;
+}
+.inv-range {
+  display: flex;
+  gap: 2px;
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  padding: 3px;
+}
+.inv-range-btn {
+  appearance: none;
+  background: transparent;
+  border: 0;
+  color: var(--muted);
+  font-size: 0.75rem;
+  font-weight: 600;
+  padding: 5px 12px;
+  border-radius: 999px;
+  cursor: pointer;
+}
+.inv-range-btn.is-on {
+  background: var(--card);
+  color: var(--text);
+  box-shadow: 0 0 0 1px var(--border);
+}
+.inv-nav-delta {
+  font-size: 0.85rem;
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+}
+.inv-nav-delta.pos { color: var(--good); }
+.inv-nav-delta.neg { color: var(--bad); }
+#inv-nav-svg {
+  width: 100%;
+  height: 148px;
+  display: block;
+}
+.inv-nav-axis {
+  display: flex;
+  justify-content: space-between;
+  font-size: 0.7rem;
+  color: var(--muted);
+  margin-top: 4px;
+}
+
 .inv-hero-cell {
   background: var(--bg);
   border: 1px solid var(--border);

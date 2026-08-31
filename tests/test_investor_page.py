@@ -71,7 +71,7 @@ class InvestorPageTests(unittest.TestCase):
         """$2k Eva sleeve behind $4.2k of exposure is 2.1x / ~48%."""
         from dashboard.investor import build_investor_payload
 
-        health = build_investor_payload(include_paper=False)["health"]
+        health = build_investor_payload()["health"]
 
         self.assertEqual(health["equity_usd"], 2000.0)
         self.assertEqual(health["gross_notional_usd"], 4200.0)
@@ -96,7 +96,7 @@ class InvestorPageTests(unittest.TestCase):
         )
         from dashboard.investor import build_investor_payload
 
-        payload = build_investor_payload(include_paper=False)
+        payload = build_investor_payload()
         html = self.client.get("/investors").text
 
         self.assertEqual(len(payload["open_trades"]), 1)
@@ -118,7 +118,7 @@ class InvestorPageTests(unittest.TestCase):
         )
         from dashboard.investor import build_investor_payload
 
-        health = build_investor_payload(include_paper=False)["health"]
+        health = build_investor_payload()["health"]
 
         self.assertFalse(health["has_exposure"])
         self.assertIsNone(health["health_pct"])
@@ -134,6 +134,9 @@ class InvestorPageTests(unittest.TestCase):
         self.assertIn("Health factor", html)
         self.assertIn("Open positions (1)", html)
         self.assertNotIn("Exchange account", html)
+        self.assertIn("data-range=\"week\"", html)
+        self.assertIn("data-range=\"month\"", html)
+        self.assertIn("data-range=\"year\"", html)
         self.assertNotIn("Account equity", html)
 
     def test_page_is_not_indexable(self) -> None:
@@ -224,9 +227,36 @@ class InvestorPageTests(unittest.TestCase):
             total, self.live_ledger.get_live_performance()["total_pnl_usd"]
         )
 
-    def test_archived_paper_history_is_included(self) -> None:
+    def test_paper_books_are_not_on_the_page(self) -> None:
         html = self.client.get("/investors").text
-        self.assertIn("Paper book v2 · simulated", html)
+        self.assertNotIn("Paper book v2", html)
+        self.assertNotIn("Archived paper book v1", html)
+
+    def test_nav_series_is_a_year_of_daily_points_ending_at_portfolio_value(self) -> None:
+        from dashboard.investor import NAV_LOOKBACK_DAYS, build_investor_payload
+
+        payload = build_investor_payload()
+        series = payload["portfolio"]["nav_series"]
+
+        self.assertEqual(len(series), NAV_LOOKBACK_DAYS)
+        self.assertEqual(series[0]["value"], 2000.0)
+        self.assertEqual(series[-1]["value"], payload["portfolio"]["value_usd"])
+
+    def test_nav_series_steps_up_on_the_day_a_trade_closes(self) -> None:
+        from dashboard.investor import build_nav_series
+
+        series = build_nav_series(
+            base_usd=2000.0,
+            days=[{"date": "2026-08-31", "realized_pnl_usd": 12.25}],
+            unrealized=13.45,
+            today="2026-08-31",
+            lookback_days=7,
+        )
+
+        self.assertEqual(len(series), 7)
+        self.assertEqual(series[0]["value"], 2000.0)
+        self.assertEqual(series[-2]["value"], 2000.0)
+        self.assertEqual(series[-1]["value"], 2025.7)
 
 
 class InvestorAccessTests(unittest.TestCase):
@@ -292,7 +322,7 @@ class InvestorAccessTests(unittest.TestCase):
         import bot_config
         from dashboard.investor import build_investor_payload
 
-        payload = build_investor_payload(include_paper=False)
+        payload = build_investor_payload()
 
         self.assertEqual(payload["portfolio"]["capital_base_basis"], "configured")
         self.assertEqual(
