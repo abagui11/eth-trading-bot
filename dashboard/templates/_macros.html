@@ -55,8 +55,9 @@
         {% set q = t.get('qty_open') %}
         {% if q is none %}{% set q = t.get('qty') %}{% endif %}
         {% if q is none %}{% set q = t.get('eth_qty') %}{% endif %}
+        {% set px = t.get('spot') or t.get('entry') or t.get('avg_entry') %}
         {% if q is not none %}
-        · {{ "%.2f"|format(q) }} {{ t.product_label or 'ETH' }}
+        · {{ "%.2f"|format(q) }} {{ t.product_label or 'ETH' }}{% if px %} (${{ "%.0f"|format(q * px) }}){% endif %}
         {% endif %}
         {% if t.liquidation_price is defined %}
         · liq {% if t.liquidation_price %}${{ "%.2f"|format(t.liquidation_price) }}{% else %}n/a{% endif %}

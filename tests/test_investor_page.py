@@ -146,7 +146,7 @@ class InvestorPageTests(unittest.TestCase):
 
         self.assertIn("$2000.00", html)  # entry
         self.assertIn("mark $2000.00", html)
-        self.assertIn("2.10 ETH", html)
+        self.assertIn("2.10 ETH ($4200)", html)
         self.assertIn("liq n/a", html)
         self.assertIn("Unrealized", html)
 
