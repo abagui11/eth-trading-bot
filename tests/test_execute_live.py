@@ -318,6 +318,10 @@ class MillSleeveTests(unittest.TestCase):
                 "INSTRUMENT_MAP",
                 {"ETH-USD": "ETP-20DEC30-CDE", "BTC-USD": "BIP-20DEC30-CDE"},
             ),
+            # These cases are about the sleeve gates. Revalidation is off so the
+            # synthetic levels are not judged against the live ETH mark (and so
+            # the suite makes no network call); it has its own tests.
+            patch.object(bot_config, "LIVE_REVALIDATE_ON_FILL", False),
         ]
         for p in self._patches:
             p.start()

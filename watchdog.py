@@ -759,6 +759,15 @@ def run_watchdog() -> list[Suggestion] | None:
     except Exception:
         logger.exception("Watchdog user-book maintenance failed")
 
+    # Retire mill cards nobody acted on, so silence is a pass and a late
+    # Accept can't fill a setup whose premise has gone.
+    try:
+        import trade_ideas_bridge
+
+        trade_ideas_bridge.expire_stale_ideas()
+    except Exception:
+        logger.exception("Watchdog idea expiry failed")
+
     posture = active_posture()
     macro_snap = decision_macro_snapshot(posture)
     execute = bot_config.watchdog_execute_enabled()

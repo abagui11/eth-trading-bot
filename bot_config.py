@@ -133,6 +133,33 @@ LIVE_MILL_AUTO_MIN_CONFIDENCE = 0.5
 # Everyone else's Accept stays paper-only (user_paper_trades).
 LIVE_MILL_FILL_TELEGRAM_IDS: tuple[int, ...] = (8282981740, 2037245798)
 
+# --- Accept-time revalidation -------------------------------------------
+# An idea is priced when it is minted and filled whenever someone taps Accept,
+# which can be minutes later. The levels are re-checked against the live mark
+# before any money moves: targets the market has already taken are dropped, and
+# a setup the drift has ruined is refused rather than filled at a worse price.
+LIVE_REVALIDATE_ON_FILL: bool = True
+# How far price may run past the entry, in units of the planned risk, before an
+# Accept counts as chasing. Holding the stop still while the entry drifts would
+# quietly turn a 1R trade into a 2R one on a fixed-notional clip.
+LIVE_MAX_CHASE_R: float = 0.5
+# Reward:risk floor for the re-anchored plan, measured against the average of
+# the targets still ahead — not TP1, which a scale-out ladder puts close in on
+# purpose. This is a backstop against ideas that were poor to begin with.
+LIVE_MIN_FILL_RR: float = 1.0
+# A target closer than this to the mark is not worth resting an order against.
+LIVE_TP_MIN_EDGE_PCT: float = 0.1
+
+# --- Idea lifecycle -----------------------------------------------------
+# How long a posted card stays acceptable. Past this it is marked expired, so
+# silence becomes an explicit pass instead of an offer that never closes, and a
+# late Accept is refused rather than filling a stale setup. 0 disables.
+IDEA_EXPIRY_MINUTES: int = 15
+# When a mill clip closes, replay the recent backlog to refill the sleeve.
+# Auto-fill otherwise only ever fires at the moment an idea is minted, so a
+# closed clip left the sleeve idle until the next mint happened to land.
+LIVE_MILL_REOFFER_ENABLED: bool = True
+
 # Every live open/close/halt is pushed to these chats on top of
 # TELEGRAM_ADMIN_CHAT_ID. Both sleeves now fill without a human in the loop, so
 # a real fill must never be discoverable only by reading the journal.

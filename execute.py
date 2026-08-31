@@ -195,6 +195,80 @@ def arm_exits(
     return result
 
 
+def revalidate_levels(
+    *,
+    direction: str,
+    entry: float,
+    stop_loss: float,
+    take_profits: list[float],
+    spot: float,
+) -> dict[str, Any]:
+    """Re-check an idea's plan against the price we would actually fill at.
+
+    An idea is priced at mint and filled whenever someone taps Accept, so the
+    market has usually moved in between. The entry always becomes the live
+    mark, because that is what a market order gets; what happens to the rest
+    depends on which way it moved:
+
+    * price ran **against** the entry (a worse fill than planned) — the whole
+      structure shifts with it, so the clip still risks the distance the plan
+      called for instead of silently risking more. Past ``LIVE_MAX_CHASE_R``
+      of that distance it is chasing, and is refused.
+    * price came **toward** the entry (a better fill) — the structural stop
+      and targets are kept, so the trade simply risks less for the same
+      reward. Through the stop, the premise is dead.
+
+    Returns ``{"ok": False, "reason": ...}`` or the re-anchored plan.
+    """
+    long = direction == "long"
+    if spot <= 0:
+        return {"ok": False, "reason": "no_mark"}
+
+    risk_planned = (entry - stop_loss) if long else (stop_loss - entry)
+    if risk_planned <= 0:
+        return {"ok": False, "reason": "bad_levels"}
+
+    chase = (spot - entry) if long else (entry - spot)
+    if chase > risk_planned * bot_config.LIVE_MAX_CHASE_R:
+        return {"ok": False, "reason": "chased", "chase_r": round(chase / risk_planned, 2)}
+
+    if chase > 0:
+        shift = spot - entry
+        new_stop = stop_loss + shift
+        tps = [float(tp) + shift for tp in (take_profits or [])]
+    else:
+        new_stop = float(stop_loss)
+        tps = [float(tp) for tp in (take_profits or [])]
+
+    risk_now = (spot - new_stop) if long else (new_stop - spot)
+    if risk_now <= 0:
+        return {"ok": False, "reason": "stop_breached"}
+
+    edge = spot * (bot_config.LIVE_TP_MIN_EDGE_PCT / 100.0)
+    ahead = sorted(
+        (tp for tp in tps if (tp > spot + edge if long else tp < spot - edge)),
+        reverse=not long,
+    )
+    if not ahead:
+        return {"ok": False, "reason": "targets_passed"}
+
+    avg = sum(ahead) / len(ahead)
+    rr = ((avg - spot) if long else (spot - avg)) / risk_now
+    if rr < bot_config.LIVE_MIN_FILL_RR:
+        return {"ok": False, "reason": "rr_collapsed", "risk_reward": round(rr, 2)}
+
+    return {
+        "ok": True,
+        "entry": float(spot),
+        "stop_loss": round(new_stop, 2),
+        "take_profits": [round(t, 2) for t in ahead],
+        "risk_reward": round(rr, 2),
+        "shifted": chase > 0,
+        "drift_pct": round((spot - entry) / entry * 100.0, 2) if entry else 0.0,
+        "dropped_tps": [round(t, 2) for t in tps if t not in ahead],
+    }
+
+
 def _trailed_stop(
     entry: float, ordered_tps: list[float], tps_hit: int
 ) -> float | None:
@@ -755,6 +829,60 @@ def mill_capacity() -> dict[str, Any]:
     }
 
 
+def _revalidated_plan(
+    *,
+    product_id: str,
+    direction: str,
+    entry: float,
+    stop_loss: float,
+    take_profits: list[float],
+) -> dict[str, Any]:
+    """Fetch the live mark and re-check the plan against it.
+
+    Fail-open on a mark we cannot read: the levels are then no worse than what
+    the mill already vetted, and refusing every fill because the ticker is
+    down would be its own outage.
+    """
+    if not bot_config.LIVE_REVALIDATE_ON_FILL:
+        return {"ok": True, "entry": entry, "stop_loss": stop_loss,
+                "take_profits": take_profits, "risk_reward": None, "skipped": True}
+    spot = 0.0
+    try:
+        gw = get_gateway()
+        instrument = gw.resolve_instrument(product_id)
+        spot = float((gw.get_ticker(instrument) or {}).get("mark_price") or 0)
+    except Exception:
+        logger.exception("Revalidation could not read a mark for %s", product_id)
+    if spot <= 0:
+        # No mark to check against. The mill already vetted these levels, and
+        # refusing every fill because the ticker is unreadable would be its own
+        # outage, so the minted plan stands.
+        logger.warning("Revalidation has no mark for %s — using minted levels", product_id)
+        return {"ok": True, "entry": entry, "stop_loss": stop_loss,
+                "take_profits": take_profits, "risk_reward": None, "no_mark": True}
+
+    plan = revalidate_levels(
+        direction=direction,
+        entry=entry,
+        stop_loss=stop_loss,
+        take_profits=take_profits,
+        spot=spot,
+    )
+    plan["spot"] = spot
+    if plan.get("ok"):
+        logger.info(
+            "Revalidated %s %s at %.2f (was %.2f, %+.2f%%): R:R %.2f, targets %s",
+            product_id, direction, spot, entry, plan["drift_pct"],
+            plan["risk_reward"], plan["take_profits"],
+        )
+    else:
+        logger.info(
+            "Revalidation refused %s %s: %s (mark %.2f vs entry %.2f, stop %.2f)",
+            product_id, direction, plan.get("reason"), spot, entry, stop_loss,
+        )
+    return plan
+
+
 def execute_mill_idea(
     *,
     idea_id: int,
@@ -822,13 +950,29 @@ def execute_mill_idea(
     if capacity["slots_free"] <= 0:
         return _skip("sleeve_full")
 
+    # The idea was priced when it was minted; this fills at the price now.
+    plan = _revalidated_plan(
+        product_id=product_id,
+        direction=direction,
+        entry=entry,
+        stop_loss=stop_loss,
+        take_profits=list(take_profits or []),
+    )
+    if not plan.get("ok"):
+        verdict["revalidation"] = plan
+        return _skip(str(plan.get("reason") or "stale_levels"))
+    verdict["revalidation"] = plan
+    entry = float(plan["entry"])
+    stop_loss = float(plan["stop_loss"])
+    take_profits = list(plan["take_profits"])
+
     suggestion = Suggestion(
         action="deriv_buy" if direction == "long" else "deriv_sell",
         size=0.0,  # live sizing comes from the mill clip, not paper size
         entry=entry,
         stop_loss=stop_loss,
         take_profits=list(take_profits or []),
-        risk_reward=None,
+        risk_reward=plan.get("risk_reward"),
         rationale=f"mill idea #{idea_id}",
         product_id=product_id,
         # Dedupe key: one live clip per mill idea, mirroring the OB rule.
@@ -1003,6 +1147,18 @@ def _close_out(
             f"entry {float(row.get('entry') or 0):,.2f} -> avg exit {avg_exit:,.2f}\n"
             f"P&L {total:+,.2f} ({reason})"
         )
+    if str(row.get("source") or "") == "mill":
+        _refill_mill_sleeve()
+
+
+def _refill_mill_sleeve() -> None:
+    """A closed clip frees the sleeve, so look for something to put in it."""
+    try:
+        import trade_ideas_bridge
+
+        trade_ideas_bridge.sweep_reoffer()
+    except Exception:
+        logger.exception("Re-offer sweep failed after a mill clip closed")
 
 
 def _reconcile_flat_instrument(gw: Any, instrument: str) -> None:

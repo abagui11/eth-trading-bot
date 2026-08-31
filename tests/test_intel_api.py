@@ -9,6 +9,7 @@ from unittest import mock
 
 from fastapi.testclient import TestClient
 
+import bot_config
 import config
 from dashboard import data
 from intelligence import store
@@ -222,12 +223,14 @@ class IntelApiTests(unittest.TestCase):
         return body
 
     def test_execute_mill_forwards_to_executor(self) -> None:
+        # Revalidation is off: this asserts the route wiring, not whether the
+        # body's synthetic levels survive the live ETH mark.
         with mock.patch(
             "execute.maybe_execute_live", return_value={"mode": "shadow"}
         ) as mocked, mock.patch(
             "execute.mill_capacity",
             return_value={"open": 0, "max_open": 3, "slots_free": 3, "halted": None},
-        ):
+        ), mock.patch.object(bot_config, "LIVE_REVALIDATE_ON_FILL", False):
             response = self.client.post(
                 "/api/v1/execute/mill", headers=self.auth, json=self._mill_body()
             )

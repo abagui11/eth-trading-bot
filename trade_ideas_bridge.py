@@ -18,7 +18,7 @@ import json
 import logging
 import os
 import sqlite3
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 
@@ -228,7 +228,7 @@ def request_manual_fill(idea_id: int, user_id: int) -> dict[str, Any]:
             row = conn.execute(
                 """
                 SELECT product_id, direction, entry, stop_loss,
-                       take_profits_json, signal_key, confidence
+                       take_profits_json, signal_key, confidence, status
                 FROM ideas WHERE id = ?
                 """,
                 (int(idea_id),),
@@ -241,6 +241,8 @@ def request_manual_fill(idea_id: int, user_id: int) -> dict[str, Any]:
     try:
         if row is None:
             return {"executed": False, "skip_reason": "unknown_idea"}
+        if str(row["status"] or "") == "expired":
+            return {"executed": False, "skip_reason": "expired"}
         if row["entry"] is None or row["stop_loss"] is None:
             return {"executed": False, "skip_reason": "unsized"}
 
@@ -270,6 +272,148 @@ def request_manual_fill(idea_id: int, user_id: int) -> dict[str, Any]:
         return {"executed": False, "skip_reason": "error"}
     finally:
         conn.close()
+
+
+# Refusals that mean "the plan was fine, the price is not any more".
+_STALE_REASONS = {
+    "chased": (
+        "Price has already run well past the entry, so filling now would be "
+        "chasing it — the clip would risk more than the setup was worth."
+    ),
+    "stop_breached": "Price has already traded through the stop — the setup is invalid.",
+    "targets_passed": "Price has already run past the targets — there is no room left.",
+    "rr_collapsed": (
+        "From here the trade would risk more than it stands to make."
+    ),
+    "bad_levels": "The idea's entry and stop are inconsistent.",
+    "no_mark": "No live price was available to check the levels against.",
+}
+
+
+def expire_stale_ideas(minutes: int | None = None) -> int:
+    """Retire cards nobody acted on. Silence is a pass, not an open order.
+
+    A card used to stay live forever, so an Accept hours later would fill a
+    setup whose premise had long gone. Expiring on a clock makes "nobody did
+    anything" an explicit outcome, and takes the idea out of the broadcast
+    queue and out of reach of a late Accept.
+
+    Returns how many ideas were expired.
+    """
+    window = int(minutes if minutes is not None else bot_config.IDEA_EXPIRY_MINUTES)
+    if window <= 0:
+        return 0
+    conn = _connect()
+    if conn is None:
+        return 0
+    cutoff = (
+        datetime.now(timezone.utc) - timedelta(minutes=window)
+    ).strftime("%Y-%m-%dT%H:%M:%SZ")
+    try:
+        with conn:
+            cur = conn.execute(
+                """
+                UPDATE ideas SET status = 'expired'
+                WHERE status NOT IN ('expired', 'live')
+                  AND live_fill_type IS NULL
+                  AND COALESCE(sent_at, created_at) < ?
+                  AND id NOT IN (
+                      SELECT idea_id FROM decisions WHERE decision = 'accept'
+                  )
+                """,
+                (cutoff,),
+            )
+            n = cur.rowcount or 0
+    except sqlite3.Error:
+        logger.exception("Idea expiry sweep failed")
+        return 0
+    finally:
+        conn.close()
+    if n:
+        logger.info("Expired %d mill idea(s) older than %d min", n, window)
+    return n
+
+
+def reoffer_candidates(limit: int = 5) -> list[dict[str, Any]]:
+    """Recent cards that could still fill an empty sleeve, freshest first.
+
+    Freshest rather than oldest: the sweep runs when a clip closes, which can
+    be hours after minting, and a newer read of the market is likelier to
+    survive revalidation than the stalest one in the queue.
+    """
+    conn = _connect()
+    if conn is None:
+        return []
+    try:
+        rows = conn.execute(
+            """
+            SELECT id, product_id, direction, entry, stop_loss,
+                   take_profits_json, signal_key, confidence
+            FROM ideas
+            WHERE status != 'expired'
+              AND live_fill_type IS NULL
+              AND entry IS NOT NULL AND stop_loss IS NOT NULL
+              AND direction IN ('long', 'short')
+              AND confidence >= ?
+            ORDER BY COALESCE(sent_at, created_at) DESC
+            LIMIT ?
+            """,
+            (float(bot_config.LIVE_MILL_AUTO_MIN_CONFIDENCE), int(limit)),
+        ).fetchall()
+    except sqlite3.Error:
+        logger.exception("Re-offer candidate read failed")
+        return []
+    finally:
+        conn.close()
+    return [dict(r) for r in rows]
+
+
+def sweep_reoffer() -> dict[str, Any] | None:
+    """Try to refill an empty mill sleeve from ideas already on the table.
+
+    Auto-fill otherwise gets exactly one chance per idea, at the moment it is
+    minted, and only while the sleeve is empty — so when a clip closed the
+    sleeve sat idle until the next mint happened to land. This replays the
+    recent backlog instead. Revalidation is what makes it safe: an idea whose
+    price has run away is refused rather than chased.
+    """
+    if not bot_config.LIVE_MILL_REOFFER_ENABLED:
+        return None
+    try:
+        import execute
+    except Exception:
+        logger.exception("Re-offer sweep could not import execute")
+        return None
+
+    for row in reoffer_candidates():
+        verdict = execute.execute_mill_idea(
+            idea_id=int(row["id"]),
+            product_id=str(row["product_id"]),
+            direction=str(row["direction"] or ""),
+            entry=float(row["entry"]),
+            stop_loss=float(row["stop_loss"]),
+            take_profits=_parse_take_profits(row["take_profits_json"]),
+            signal_key=str(row["signal_key"] or "") or None,
+            confidence=row["confidence"],
+            fill_type="auto",
+        )
+        if verdict.get("executed"):
+            logger.info("Re-offer sweep filled idea #%s", row["id"])
+            conn = _connect()
+            if conn is not None:
+                try:
+                    with conn:
+                        _mark_idea_live_fill(conn, int(row["id"]), "auto", None)
+                except sqlite3.Error:
+                    logger.exception("Re-offer tag failed for #%s", row["id"])
+                finally:
+                    conn.close()
+            return verdict
+        # The sleeve refilling underneath us ends the sweep; a stale idea just
+        # means try the next one.
+        if verdict.get("skip_reason") in ("book_not_empty", "sleeve_full", "halted"):
+            return None
+    return None
 
 
 def format_manual_fill_reply(verdict: dict[str, Any], idea_id: int) -> str | None:
@@ -316,6 +460,23 @@ def format_manual_fill_reply(verdict: dict[str, Any], idea_id: int) -> str | Non
         )
     if reason == "unsized":
         return f"Idea #{idea_id} has no entry/stop yet — no live clip placed."
+    if reason == "expired":
+        return (
+            f"Idea #{idea_id} expired — it was NOT filled.\n\n"
+            f"Cards are only live for {bot_config.IDEA_EXPIRY_MINUTES} minutes; after "
+            "that the levels are too old to trade. Your Accept was still recorded "
+            "in your paper book."
+        )
+    if reason in _STALE_REASONS:
+        rv = verdict.get("revalidation") or {}
+        spot = rv.get("spot")
+        head = f"Idea #{idea_id} was NOT filled — the market moved since it was posted."
+        detail = _STALE_REASONS[reason]
+        lines = [head, "", detail]
+        if spot:
+            lines.append(f"Mark is now {_fmt_px(spot)}.")
+        lines.append("Wait for the next card rather than chasing this one.")
+        return "\n".join(lines)
     if reason == "rejected":
         return (
             f"Idea #{idea_id} was accepted but the live clip did not go through "
