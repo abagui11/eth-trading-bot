@@ -95,6 +95,45 @@ class IdeasDbTestCase(unittest.TestCase):
             ).fetchone()[0]
 
 
+class HubColumnMigrationTests(unittest.TestCase):
+    """The mill's own migration may never have run: /opt/trade-ideas is not a
+    git checkout, so the hub adds the columns it writes rather than erroring."""
+
+    def setUp(self) -> None:
+        self._tmp = tempfile.TemporaryDirectory(ignore_cleanup_errors=True)
+        self.db = Path(self._tmp.name) / "ideas.db"
+        legacy = _IDEAS_SCHEMA.replace(
+            "    live_fill_type TEXT,\n    live_filled_by INTEGER\n", "    sent_at2 TEXT\n"
+        ).replace("    sent_at TEXT,\n    sent_at2 TEXT\n", "    sent_at TEXT\n")
+        with sqlite3.connect(self.db) as conn:
+            conn.executescript(legacy)
+        self._env = patch.dict(os.environ, {"IDEAS_DB": str(self.db)})
+        self._env.start()
+
+    def tearDown(self) -> None:
+        self._env.stop()
+        self._tmp.cleanup()
+
+    def _columns(self) -> set[str]:
+        with sqlite3.connect(self.db) as conn:
+            return {r[1] for r in conn.execute("PRAGMA table_info(ideas)")}
+
+    def test_missing_columns_are_added_on_connect(self) -> None:
+        self.assertNotIn("live_fill_type", self._columns())
+        bridge._connect().close()
+        self.assertIn("live_fill_type", self._columns())
+        self.assertIn("live_filled_by", self._columns())
+
+    def test_expiry_works_against_a_legacy_database(self) -> None:
+        with sqlite3.connect(self.db) as conn:
+            conn.execute(
+                "INSERT INTO ideas (product_id, direction, signal_key, status, "
+                "created_at, sent_at) VALUES ('ETH-USD','long','k','sent',?,?)",
+                ("2020-01-01T00:00:00Z", "2020-01-01T00:00:00Z"),
+            )
+        self.assertEqual(bridge.expire_stale_ideas(15), 1)
+
+
 class ExpiryTests(IdeasDbTestCase):
     def test_a_card_older_than_the_window_expires(self) -> None:
         old = self._idea(minutes_ago=20)
@@ -139,6 +178,12 @@ class ExpiryTests(IdeasDbTestCase):
         self.assertEqual(bridge.expire_stale_ideas(15), 1)
         self.assertEqual(bridge.expire_stale_ideas(15), 0)
 
+    def test_the_mills_own_retired_marker_is_not_overwritten(self) -> None:
+        """'retired' is the mill's word for undeliverable; it is not our expiry."""
+        retired = self._idea(minutes_ago=999, status="retired")
+        bridge.expire_stale_ideas(15)
+        self.assertEqual(self._status(retired), "retired")
+
     def test_a_zero_window_disables_expiry(self) -> None:
         old = self._idea(minutes_ago=999)
         self.assertEqual(bridge.expire_stale_ideas(0), 0)
@@ -160,9 +205,10 @@ class ExpiryTests(IdeasDbTestCase):
 
 
 class ReofferCandidateTests(IdeasDbTestCase):
-    def test_expired_and_filled_cards_are_not_candidates(self) -> None:
+    def test_expired_retired_and_filled_cards_are_not_candidates(self) -> None:
         self._idea(key="a", minutes_ago=5, status="expired")
         self._idea(key="b", minutes_ago=6, live_fill_type="manual")
+        self._idea(key="d", minutes_ago=4, status="retired")
         good = self._idea(key="c", minutes_ago=7)
         self.assertEqual([c["id"] for c in bridge.reoffer_candidates()], [good])
 

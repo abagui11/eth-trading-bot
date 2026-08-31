@@ -64,12 +64,42 @@ def enabled() -> bool:
     return path is not None and path.exists()
 
 
+# Statuses a card can still be acted on from. 'retired' is the mill's own
+# marker for ideas it could never deliver, and must not be overwritten.
+_LIVE_STATUSES = ("offered", "queued", "paper", "sent")
+
+# Columns the hub owns on the mill's table. The mill declares them too, but
+# /opt/trade-ideas is not a git checkout, so its migration may never have run
+# there — the hub adds them itself rather than failing every write.
+_HUB_COLUMNS = (
+    ("live_fill_type", "TEXT"),
+    ("live_filled_by", "INTEGER"),
+)
+
+
+def _ensure_hub_columns(conn: sqlite3.Connection) -> None:
+    try:
+        have = {r["name"] for r in conn.execute("PRAGMA table_info(ideas)")}
+    except sqlite3.Error:
+        return
+    for name, decl in _HUB_COLUMNS:
+        if name in have:
+            continue
+        try:
+            with conn:
+                conn.execute(f"ALTER TABLE ideas ADD COLUMN {name} {decl}")
+            logger.info("Added missing ideas.%s to the mill database", name)
+        except sqlite3.Error:
+            logger.exception("Could not add ideas.%s", name)
+
+
 def _connect() -> sqlite3.Connection | None:
     path = ideas_db_path()
     if path is None or not path.exists():
         return None
     conn = sqlite3.connect(path, timeout=5)
     conn.row_factory = sqlite3.Row
+    _ensure_hub_columns(conn)
     return conn
 
 
@@ -312,16 +342,16 @@ def expire_stale_ideas(minutes: int | None = None) -> int:
     try:
         with conn:
             cur = conn.execute(
-                """
+                f"""
                 UPDATE ideas SET status = 'expired'
-                WHERE status NOT IN ('expired', 'live')
+                WHERE status IN ({", ".join("?" * len(_LIVE_STATUSES))})
                   AND live_fill_type IS NULL
                   AND COALESCE(sent_at, created_at) < ?
                   AND id NOT IN (
                       SELECT idea_id FROM decisions WHERE decision = 'accept'
                   )
                 """,
-                (cutoff,),
+                (*_LIVE_STATUSES, cutoff),
             )
             n = cur.rowcount or 0
     except sqlite3.Error:
@@ -346,11 +376,11 @@ def reoffer_candidates(limit: int = 5) -> list[dict[str, Any]]:
         return []
     try:
         rows = conn.execute(
-            """
+            f"""
             SELECT id, product_id, direction, entry, stop_loss,
                    take_profits_json, signal_key, confidence
             FROM ideas
-            WHERE status != 'expired'
+            WHERE status IN ({", ".join("?" * len(_LIVE_STATUSES))})
               AND live_fill_type IS NULL
               AND entry IS NOT NULL AND stop_loss IS NOT NULL
               AND direction IN ('long', 'short')
@@ -358,7 +388,11 @@ def reoffer_candidates(limit: int = 5) -> list[dict[str, Any]]:
             ORDER BY COALESCE(sent_at, created_at) DESC
             LIMIT ?
             """,
-            (float(bot_config.LIVE_MILL_AUTO_MIN_CONFIDENCE), int(limit)),
+            (
+                *_LIVE_STATUSES,
+                float(bot_config.LIVE_MILL_AUTO_MIN_CONFIDENCE),
+                int(limit),
+            ),
         ).fetchall()
     except sqlite3.Error:
         logger.exception("Re-offer candidate read failed")
