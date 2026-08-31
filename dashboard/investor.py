@@ -23,11 +23,9 @@ from dashboard.account import (
     get_account_snapshot,
 )
 
-SLEEVE_LABELS = {"hq": "Eva", "mill": "Trade mill"}
-SLEEVE_CAPITAL = {
-    "hq": float(bot_config.LIVE_HQ_EQUITY_USD),
-    "mill": float(bot_config.LIVE_MILL_SLEEVE_USD),
-}
+_SOURCE = "hq"
+SLEEVE_LABELS = {"hq": "Eva"}
+SLEEVE_CAPITAL = {"hq": float(bot_config.LIVE_HQ_EQUITY_USD)}
 
 
 def _now_iso() -> str:
@@ -80,9 +78,7 @@ def _exposure(open_trades: list[dict[str, Any]]) -> dict[str, Any]:
         "gross_notional_usd": round(gross, 2),
         "net_notional_usd": round(net, 2),
         "open_count": len(open_trades),
-        "by_sleeve": [
-            by_sleeve[k] for k in ("hq", "mill") if k in by_sleeve
-        ] + [v for k, v in by_sleeve.items() if k not in ("hq", "mill")],
+        "by_sleeve": [by_sleeve[k] for k in ("hq",) if k in by_sleeve],
     }
 
 
@@ -109,24 +105,8 @@ def _daily_stats(days: list[dict[str, Any]], today: str) -> dict[str, Any]:
     }
 
 
-def _capital_base(
-    account: dict[str, Any],
-    *,
-    realized_ytd: float,
-    unrealized: float,
-) -> dict[str, Any]:
-    """What the year's gain should be measured against.
-
-    With a real equity read the base is worked back from today: strip out this
-    year's realized P&L and the open mark. That is only exact for an account
-    with no deposits or withdrawals, which is why the number is labelled an
-    estimate everywhere it is shown. Without exchange access there is nothing
-    to work back from, so the configured sleeve capital stands in.
-    """
-    if account.get("available"):
-        derived = float(account.get("equity_usd") or 0.0) - realized_ytd - unrealized
-        if derived > 0:
-            return {"usd": round(derived, 2), "basis": "derived"}
+def _capital_base() -> dict[str, Any]:
+    """Eva's allocated sleeve — mill capital is not mixed in."""
     return {"usd": round(CONFIGURED_CAPITAL_USD, 2), "basis": "configured"}
 
 
@@ -150,30 +130,31 @@ def build_investor_payload(
     """
     account = get_account_snapshot()
 
-    open_trades = data.enrich_live_trades(live_ledger.get_open_trades())
+    # HQ only — mill clips share the Coinbase account but are a different
+    # product, and mixing them here made Eva's book unreadable.
+    open_trades = data.enrich_live_trades(live_ledger.get_open_trades(source=_SOURCE))
     closed_trades = data.enrich_live_trades(
-        live_ledger.get_closed_trades(limit=closed_limit), closed=True
+        live_ledger.get_closed_trades(limit=closed_limit, source=_SOURCE),
+        closed=True,
     )
     performance = live_ledger.get_live_performance()
+    hq_perf = (performance.get("by_source") or {}).get(_SOURCE) or {}
 
     now = datetime.now(timezone.utc)
     year = now.year
     today = now.strftime("%Y-%m-%d")
-    days = live_ledger.get_realized_by_day(year=year)
+    days = live_ledger.get_realized_by_day(source=_SOURCE, year=year)
     daily = _daily_stats(days, today)
 
     unrealized = round(data.live_unrealized_usd(open_trades), 2)
-    realized_total = float(performance.get("total_pnl_usd") or 0.0)
+    realized_total = float(hq_perf.get("pnl_usd") or 0.0)
     realized_ytd = float(daily["ytd_usd"])
 
     exposure = _exposure(open_trades)
-    base = _capital_base(account, realized_ytd=realized_ytd, unrealized=unrealized)
+    base = _capital_base()
     base_usd = float(base["usd"])
-
-    if account.get("available"):
-        portfolio_value = float(account.get("equity_usd") or 0.0)
-    else:
-        portfolio_value = round(base_usd + realized_total + unrealized, 2)
+    # Eva NAV, not Coinbase account equity — the latter includes the mill.
+    portfolio_value = round(base_usd + realized_total + unrealized, 2)
 
     health = build_health(
         equity_usd=portfolio_value,
@@ -202,7 +183,7 @@ def build_investor_payload(
         "exposure": exposure,
         "portfolio": {
             "value_usd": round(portfolio_value, 2),
-            "value_source": "exchange" if account.get("available") else "estimated",
+            "value_source": "eva_sleeve",
             "capital_base_usd": base_usd,
             "capital_base_basis": base["basis"],
             "unrealized_usd": unrealized,

@@ -22,12 +22,9 @@ logger = logging.getLogger(__name__)
 _TTL_SEC = 60.0
 _cache: tuple[dict[str, Any], float] = ({}, 0.0)
 
-# Configured sleeve capital, used as the denominator when the exchange read is
-# unavailable. This is what the bot *thinks* it is trading, not what is really
-# on deposit — the payload flags which one the reader is looking at.
-CONFIGURED_CAPITAL_USD = float(
-    bot_config.LIVE_HQ_EQUITY_USD + bot_config.LIVE_MILL_SLEEVE_USD
-)
+# Eva's allocated sleeve. The investor page is HQ-only, so mill capital is
+# not mixed in even though both sleeves share one Coinbase futures account.
+CONFIGURED_CAPITAL_USD = float(bot_config.LIVE_HQ_EQUITY_USD)
 
 
 def reset_cache() -> None:

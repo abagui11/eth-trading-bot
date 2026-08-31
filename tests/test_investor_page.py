@@ -87,16 +87,41 @@ class InvestorPageTests(unittest.TestCase):
         self._tmpdir.cleanup()
 
     def test_health_factor_is_collateral_over_total_position_size(self) -> None:
-        """$1.4k backing $4.2k is 3x geared and has to read ~33%, not 300%."""
+        """$2k Eva sleeve behind $4.2k of exposure is 2.1x / ~48%."""
         from dashboard.investor import build_investor_payload
 
         health = build_investor_payload(include_paper=False)["health"]
 
-        self.assertEqual(health["equity_usd"], 1400.0)
+        self.assertEqual(health["equity_usd"], 2000.0)
         self.assertEqual(health["gross_notional_usd"], 4200.0)
-        self.assertAlmostEqual(health["health_pct"], 33.3, places=1)
-        self.assertAlmostEqual(health["leverage_x"], 3.0, places=2)
-        self.assertEqual(health["band"], "warn")
+        self.assertAlmostEqual(health["health_pct"], 47.6, places=1)
+        self.assertAlmostEqual(health["leverage_x"], 2.1, places=2)
+        self.assertEqual(health["band"], "good")
+
+    def test_mill_clips_do_not_appear_on_the_page(self) -> None:
+        """Mill shares the Coinbase account but is a different product."""
+        self.live_ledger.record_open(
+            cycle_id=None,
+            source="mill",
+            product_id="ETH-USD",
+            instrument="ETH-20DEC30-CDE",
+            side="long",
+            qty=0.1,
+            entry=2000.0,
+            stop_loss=1900.0,
+            take_profits_json="[]",
+            order_id="mill-1",
+            stop_order_id="mill-s1",
+        )
+        from dashboard.investor import build_investor_payload
+
+        payload = build_investor_payload(include_paper=False)
+        html = self.client.get("/investors").text
+
+        self.assertEqual(len(payload["open_trades"]), 1)
+        self.assertEqual(payload["open_trades"][0]["source"], "hq")
+        self.assertNotIn("Mill realized", html)
+        self.assertNotIn("Trade mill", html)
 
     def test_flat_book_reports_no_exposure_rather_than_dividing_by_zero(self) -> None:
         self.live_ledger.record_close(
@@ -283,7 +308,7 @@ class InvestorAccessTests(unittest.TestCase):
         self.assertEqual(payload["portfolio"]["capital_base_basis"], "configured")
         self.assertEqual(
             payload["portfolio"]["capital_base_usd"],
-            bot_config.LIVE_HQ_EQUITY_USD + bot_config.LIVE_MILL_SLEEVE_USD,
+            bot_config.LIVE_HQ_EQUITY_USD,
         )
 
 
