@@ -167,6 +167,15 @@ def record_open(
         return int(cur.lastrowid or 0)
 
 
+def set_stop_loss(trade_id: int, stop_loss: float) -> None:
+    """Record a trailed stop so the book shows the level actually resting."""
+    with _connect() as conn:
+        conn.execute(
+            "UPDATE live_trades SET stop_loss = ? WHERE id = ?",
+            (float(stop_loss), trade_id),
+        )
+
+
 def set_exit_orders(trade_id: int, order_ids: list[str]) -> None:
     """Replace the resting exit order ids (re-armed stops, swapped brackets)."""
     with _connect() as conn:

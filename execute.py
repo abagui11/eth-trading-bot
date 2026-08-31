@@ -195,6 +195,154 @@ def arm_exits(
     return result
 
 
+def _trailed_stop(
+    entry: float, ordered_tps: list[float], tps_hit: int
+) -> float | None:
+    """Mirror of the paper ladder's trail: after TP1 → breakeven, TP2 → TP1.
+
+    Returns None while no target has filled, so an untouched trade keeps the
+    structural stop the thesis chose.
+    """
+    if tps_hit <= 0:
+        return None
+    if tps_hit == 1:
+        return float(entry)
+    idx = min(tps_hit - 2, len(ordered_tps) - 1)
+    return float(ordered_tps[idx]) if idx >= 0 else float(entry)
+
+
+def _tps_taken(trade: dict[str, Any]) -> int:
+    try:
+        fills = json.loads(trade.get("exit_fills_json") or "{}")
+    except json.JSONDecodeError:
+        return 0
+    return sum(1 for f in fills.values() if f.get("reason") == "take_profit")
+
+
+def _improves_stop(side: str, old: float | None, new: float) -> bool:
+    """A trail may only ever reduce risk."""
+    if old is None:
+        return True
+    return new > float(old) if side == "long" else new < float(old)
+
+
+def retrail_exits(gw: Any, trade: dict[str, Any], new_stop: float) -> list[str]:
+    """Move the stop on the resting brackets by cancel-and-replace.
+
+    A bracket's stop leg can't be amended, so each rung is cancelled and
+    re-placed individually rather than all at once — that way a single tranche
+    is briefly uncovered instead of the whole position. Anything that fails to
+    re-place is protected by a plain stop so no size is left naked.
+    """
+    instrument = trade["instrument"]
+    side = str(trade["side"])
+    closing = "sell" if side == "long" else "buy"
+    csize = gw.contract_size(instrument)
+    fresh: list[str] = []
+    stranded = 0.0
+
+    for oid in _exit_order_ids(trade):
+        try:
+            order = gw.get_order(oid)
+        except GatewayError:
+            logger.exception("Retrail: could not read %s", oid)
+            fresh.append(oid)
+            continue
+        if str(order.get("status") or "") != "OPEN":
+            continue
+        cfg = (order.get("order_configuration") or {}).get("trigger_bracket_gtc") or {}
+        contracts = float(cfg.get("base_size") or 0)
+        limit_price = float(cfg.get("limit_price") or 0)
+        if contracts <= 0 or limit_price <= 0:
+            fresh.append(oid)
+            continue
+
+        leg_qty = contracts * csize
+        try:
+            gw.cancel_orders([oid])
+        except GatewayError:
+            logger.exception("Retrail: cancel failed for %s — leaving it in place", oid)
+            fresh.append(oid)
+            continue
+        try:
+            replaced = gw.place_bracket(
+                instrument=instrument,
+                side=closing,
+                amount=leg_qty,
+                limit_price=limit_price,
+                stop_trigger_price=new_stop,
+                label=f"{trade['source']}-retrail",
+            )
+            new_id = str(((replaced or {}).get("order") or {}).get("order_id") or "")
+            if new_id:
+                fresh.append(new_id)
+            else:
+                stranded += leg_qty
+        except GatewayError:
+            logger.exception(
+                "Retrail: re-place failed for %.4f of %s", leg_qty, instrument
+            )
+            stranded += leg_qty
+
+    if stranded > 0:
+        logger.error(
+            "Retrail left %.4f %s uncovered — placing a plain stop at %.2f",
+            stranded, instrument, new_stop,
+        )
+        try:
+            stop = gw.place_stop_market(
+                instrument=instrument, side=closing, amount=stranded,
+                trigger_price=new_stop, label=f"{trade['source']}-retrail-stop",
+            )
+            sid = str(((stop or {}).get("order") or {}).get("order_id") or "")
+            if sid:
+                fresh.append(sid)
+        except GatewayError:
+            logger.exception("Retrail fallback stop FAILED for %s", instrument)
+            halt_live(
+                f"retrail_uncovered:{instrument}:{stranded:.4f} — verify on Coinbase"
+            )
+    return fresh
+
+
+def _maybe_trail_stop(gw: Any, trade_id: int, row: dict[str, Any]) -> None:
+    """Reduce risk on the runner once a target has paid out."""
+    tps_hit = _tps_taken(row)
+    if tps_hit <= 0:
+        return
+    entry = float(row["entry"])
+    ordered = _ordered_tps(
+        str(row["side"]), _as_tp_list(row.get("take_profits_json")), entry
+    )
+    new_stop = _trailed_stop(entry, ordered, tps_hit)
+    if new_stop is None or not _improves_stop(str(row["side"]), row.get("stop_loss"), new_stop):
+        return
+    logger.info(
+        "Trailing stop on #%s after %d target(s): %s -> %.2f",
+        trade_id, tps_hit, row.get("stop_loss"), new_stop,
+    )
+    fresh = retrail_exits(gw, row, new_stop)
+    live_ledger.set_exit_orders(trade_id, fresh)
+    live_ledger.set_stop_loss(trade_id, new_stop)
+    if bot_config.LIVE_FILL_ALERTS_ENABLED:
+        label = "breakeven" if tps_hit == 1 else f"TP{tps_hit - 1}"
+        _notify_ops(
+            f"STOP TRAILED #{trade_id} — {row.get('source')}\n"
+            f"{row.get('product_id')} stop -> {new_stop:,.2f} ({label})\n"
+            f"after {tps_hit} target(s) filled"
+        )
+
+
+def _as_tp_list(raw: Any) -> list[float]:
+    if not raw:
+        return []
+    try:
+        parsed = json.loads(raw) if isinstance(raw, str) else raw
+    except json.JSONDecodeError:
+        return []
+    return [float(x) for x in parsed] if isinstance(parsed, list) else []
+
+
 def _arm_plain_stop(
     gw: Any,
     instrument: str,
@@ -522,6 +670,15 @@ def _execute(
             reason="take_profit",
         )
 
+    # A gap-through target banks at arm time, which already earns the trail.
+    if exits.get("realized"):
+        try:
+            row = live_ledger.get_trade(trade_id) or {}
+            if float(row.get("qty_open") or 0) > 0:
+                _maybe_trail_stop(gw, trade_id, row)
+        except Exception:
+            logger.exception("Stop trail after arming failed for #%s", trade_id)
+
     if source == "mill":
         fills = live_ledger.get_meta(_MILL_FILLS_KEY) or ""
         date, _, count_raw = fills.partition(":")
@@ -803,6 +960,10 @@ def _reconcile_trade(gw: Any, trade: dict[str, Any]) -> None:
                 )
                 + f"\nbanked {banked:+,.2f} · {qty_open:.4f} still open"
             )
+        try:
+            _maybe_trail_stop(gw, trade_id, row)
+        except Exception:
+            logger.exception("Stop trail failed for live trade #%s", trade_id)
         return
 
     _close_out(gw, trade_id, row, reason=exits[-1][2])

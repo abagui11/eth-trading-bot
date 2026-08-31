@@ -280,6 +280,129 @@ class ArmExitsFallbackSizingTests(unittest.TestCase):
         self.assertAlmostEqual(gw.place_stop_market.call_args.kwargs["amount"], 0.1)
 
 
+class TrailedStopTests(unittest.TestCase):
+    """Paper trails SL to breakeven after TP1 and to TP1 after TP2; live must too.
+
+    Without this the runner still risks the original stop below entry, so a
+    banked tranche can be handed straight back.
+    """
+
+    def test_no_trail_before_any_target_fills(self) -> None:
+        self.assertIsNone(live_exec._trailed_stop(2411.5, [2440.0, 2477.0], 0))
+
+    def test_breakeven_after_the_first_target(self) -> None:
+        self.assertEqual(
+            live_exec._trailed_stop(2411.5, [2440.0, 2477.0, 2534.0], 1), 2411.5
+        )
+
+    def test_trails_to_the_previous_target_after_that(self) -> None:
+        tps = [2440.0, 2477.0, 2534.0]
+        self.assertEqual(live_exec._trailed_stop(2411.5, tps, 2), 2440.0)
+        self.assertEqual(live_exec._trailed_stop(2411.5, tps, 3), 2477.0)
+
+    def test_trail_only_ever_reduces_risk(self) -> None:
+        self.assertTrue(live_exec._improves_stop("long", 2385.0, 2411.5))
+        self.assertFalse(live_exec._improves_stop("long", 2411.5, 2385.0))
+        self.assertTrue(live_exec._improves_stop("short", 2450.0, 2411.5))
+        self.assertFalse(live_exec._improves_stop("short", 2411.5, 2450.0))
+
+    def test_counts_only_take_profit_legs(self) -> None:
+        trade = {
+            "exit_fills_json": json.dumps(
+                {
+                    "a": {"reason": "take_profit"},
+                    "b": {"reason": "stop_loss"},
+                    "c": {"reason": "take_profit"},
+                }
+            )
+        }
+        self.assertEqual(live_exec._tps_taken(trade), 2)
+
+
+class RetrailExitsTests(unittest.TestCase):
+    @staticmethod
+    def _bracket(size: str, limit: str, status: str = "OPEN") -> dict:
+        return {
+            "status": status,
+            "order_configuration": {
+                "trigger_bracket_gtc": {
+                    "base_size": size,
+                    "limit_price": limit,
+                    "stop_trigger_price": "2385",
+                }
+            },
+        }
+
+    def _trade(self) -> dict:
+        return {
+            "id": 8,
+            "source": "hq",
+            "instrument": "ETP-20DEC30-CDE",
+            "side": "long",
+            "exit_order_ids_json": json.dumps(["br-2477", "br-2534"]),
+        }
+
+    def test_each_rung_is_replaced_with_the_new_stop(self) -> None:
+        gw = _gateway()
+        gw.get_order.side_effect = lambda oid: {
+            "br-2477": self._bracket("1", "2477"),
+            "br-2534": self._bracket("2", "2534"),
+        }[oid]
+        fresh = live_exec.retrail_exits(gw, self._trade(), 2411.5)
+
+        self.assertEqual(len(fresh), 2)
+        # Targets are preserved; only the stop leg moves.
+        self.assertEqual(
+            [c.kwargs["limit_price"] for c in gw.place_bracket.call_args_list],
+            [2477.0, 2534.0],
+        )
+        for call in gw.place_bracket.call_args_list:
+            self.assertEqual(call.kwargs["stop_trigger_price"], 2411.5)
+        self.assertAlmostEqual(gw.place_bracket.call_args_list[1].kwargs["amount"], 0.2)
+        # One rung at a time, so the whole position is never uncovered at once.
+        self.assertEqual(gw.cancel_orders.call_count, 2)
+
+    def test_already_filled_rung_is_dropped(self) -> None:
+        gw = _gateway()
+        gw.get_order.side_effect = lambda oid: {
+            "br-2477": self._bracket("1", "2477", status="FILLED"),
+            "br-2534": self._bracket("2", "2534"),
+        }[oid]
+        fresh = live_exec.retrail_exits(gw, self._trade(), 2411.5)
+        self.assertEqual(len(fresh), 1)
+        self.assertEqual(gw.place_bracket.call_count, 1)
+
+    def test_failed_replacement_is_covered_by_a_plain_stop(self) -> None:
+        """Cancel succeeded but re-place failed: that size must not stay naked."""
+        gw = _gateway()
+        gw.get_order.side_effect = lambda oid: {
+            "br-2477": self._bracket("1", "2477"),
+            "br-2534": self._bracket("2", "2534"),
+        }[oid]
+        gw.place_bracket.side_effect = [
+            {"order": {"order_id": "new-1"}},
+            GatewayError("rejected"),
+        ]
+        fresh = live_exec.retrail_exits(gw, self._trade(), 2411.5)
+
+        gw.place_stop_market.assert_called_once()
+        self.assertAlmostEqual(gw.place_stop_market.call_args.kwargs["amount"], 0.2)
+        self.assertEqual(gw.place_stop_market.call_args.kwargs["trigger_price"], 2411.5)
+        self.assertIn("stop-1", fresh)
+
+    def test_a_rung_that_cannot_be_cancelled_is_left_alone(self) -> None:
+        gw = _gateway()
+        gw.get_order.side_effect = lambda oid: {
+            "br-2477": self._bracket("1", "2477"),
+            "br-2534": self._bracket("2", "2534"),
+        }[oid]
+        gw.cancel_orders.side_effect = [GatewayError("cancel failed"), None]
+        fresh = live_exec.retrail_exits(gw, self._trade(), 2411.5)
+        # Untouched rung keeps its original id and its original protection.
+        self.assertIn("br-2477", fresh)
+        self.assertEqual(gw.place_bracket.call_count, 1)
+
+
 class LedgerDbTestCase(unittest.TestCase):
     def setUp(self) -> None:
         self._tmp = tempfile.TemporaryDirectory(ignore_cleanup_errors=True)
@@ -442,6 +565,50 @@ class ReconcileTests(LedgerDbTestCase):
         self.assertAlmostEqual(row["qty_open"], 0.3)
         self.assertAlmostEqual(row["realized_pnl_usd"], (2440.0 - 2411.5) * 0.1)
         self.assertEqual(row["status"], "open")
+
+    def test_first_target_moves_the_stop_to_breakeven(self) -> None:
+        """End to end: bank TP1, and the runner stops risking the original SL."""
+        tid = self._open_trade(exit_order_ids=["br-2440", "br-2477", "br-2534"])
+        gw = MagicMock()
+        gw.contract_size.return_value = 0.1
+        gw.get_position.return_value = {"size": 0.3, "mark_price": 2450.0}
+        gw.get_open_orders.return_value = []
+        gw.place_bracket.side_effect = lambda **kw: {
+            "order": {"order_id": f"new-{kw['limit_price']:g}"}
+        }
+
+        def order(oid):
+            if oid == "br-2440":
+                return {
+                    "status": "FILLED",
+                    "filled_size": "1",
+                    "average_filled_price": "2440.0",
+                }
+            limit = "2477" if oid.endswith("2477") else "2534"
+            return {
+                "status": "OPEN",
+                "filled_size": "0",
+                "average_filled_price": "0",
+                "order_configuration": {
+                    "trigger_bracket_gtc": {
+                        "base_size": "1" if limit == "2477" else "2",
+                        "limit_price": limit,
+                        "stop_trigger_price": "2385",
+                    }
+                },
+            }
+
+        gw.get_order.side_effect = order
+        with patch.object(live_exec, "get_gateway", return_value=gw):
+            live_exec.sync_live_positions()
+
+        row = live_ledger.get_trade(tid)
+        self.assertAlmostEqual(row["stop_loss"], 2411.5)
+        self.assertEqual(
+            json.loads(row["exit_order_ids_json"]), ["new-2477", "new-2534"]
+        )
+        for call in gw.place_bracket.call_args_list:
+            self.assertEqual(call.kwargs["stop_trigger_price"], 2411.5)
 
     def test_all_targets_filled_closes_at_weighted_average(self) -> None:
         tid = self._open_trade(exit_order_ids=["br-2440", "br-2477", "br-2534"])
