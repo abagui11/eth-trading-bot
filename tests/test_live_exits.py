@@ -610,6 +610,58 @@ class ReconcileTests(LedgerDbTestCase):
         for call in gw.place_bracket.call_args_list:
             self.assertEqual(call.kwargs["stop_trigger_price"], 2411.5)
 
+    def test_a_stop_left_behind_is_caught_up_on_a_later_pass(self) -> None:
+        """Self-heal: a target banked earlier still earns its trail."""
+        tid = self._open_trade(exit_order_ids=["br-2477"])
+        live_ledger.record_partial_exit(
+            tid, exit_qty=0.1, exit_price=2440.0, pnl_usd=2.85,
+            order_id="br-2440", reason="take_profit",
+        )
+        gw = MagicMock()
+        gw.contract_size.return_value = 0.1
+        gw.get_position.return_value = {"size": 0.3, "mark_price": 2450.0}
+        gw.get_open_orders.return_value = []
+        gw.place_bracket.return_value = {"order": {"order_id": "healed"}}
+        gw.get_order.return_value = {
+            "status": "OPEN",
+            "filled_size": "0",
+            "average_filled_price": "0",
+            "order_configuration": {
+                "trigger_bracket_gtc": {
+                    "base_size": "3",
+                    "limit_price": "2477",
+                    "stop_trigger_price": "2385",
+                }
+            },
+        }
+        with patch.object(live_exec, "get_gateway", return_value=gw):
+            live_exec.sync_live_positions()
+
+        self.assertAlmostEqual(live_ledger.get_trade(tid)["stop_loss"], 2411.5)
+        self.assertEqual(gw.place_bracket.call_args.kwargs["stop_trigger_price"], 2411.5)
+
+    def test_untouched_trade_keeps_its_structural_stop(self) -> None:
+        tid = self._open_trade(exit_order_ids=["br-2477"])
+        gw = MagicMock()
+        gw.contract_size.return_value = 0.1
+        gw.get_position.return_value = {"size": 0.4, "mark_price": 2420.0}
+        gw.get_open_orders.return_value = []
+        gw.get_order.return_value = {
+            "status": "OPEN", "filled_size": "0", "average_filled_price": "0",
+            "order_configuration": {
+                "trigger_bracket_gtc": {
+                    "base_size": "4", "limit_price": "2477",
+                    "stop_trigger_price": "2385",
+                }
+            },
+        }
+        with patch.object(live_exec, "get_gateway", return_value=gw):
+            live_exec.sync_live_positions()
+
+        self.assertAlmostEqual(live_ledger.get_trade(tid)["stop_loss"], 2385.0)
+        gw.place_bracket.assert_not_called()
+        gw.cancel_orders.assert_not_called()
+
     def test_all_targets_filled_closes_at_weighted_average(self) -> None:
         tid = self._open_trade(exit_order_ids=["br-2440", "br-2477", "br-2534"])
         gw = MagicMock()

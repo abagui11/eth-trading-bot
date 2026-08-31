@@ -946,6 +946,13 @@ def _reconcile_trade(gw: Any, trade: dict[str, Any]) -> None:
             )
 
     if not exits:
+        # Nothing new filled, but the stop can still be behind where the trail
+        # says it belongs — a target booked before the trail existed, or an
+        # earlier re-place that failed. Checked every pass so it self-heals.
+        try:
+            _maybe_trail_stop(gw, trade_id, trade)
+        except Exception:
+            logger.exception("Stop trail failed for live trade #%s", trade_id)
         return
 
     row = live_ledger.get_trade(trade_id) or {}
