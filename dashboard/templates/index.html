@@ -145,6 +145,16 @@
           <span class="value">{{ "%.4f"|format(t.qty or t.eth_qty) }} {{ t.product_label or 'ETH' }}</span>
         </div>
         {% endif %}
+        {% if t.scaled_out %}
+        <div class="level">
+          <span class="label">Still open</span>
+          <span class="value">{{ "%.4f"|format(t.qty_open) }} {{ t.product_label or 'ETH' }}</span>
+        </div>
+        <div class="level">
+          <span class="label">Banked</span>
+          <span class="value {{ 'pos' if t.realized_pnl_usd >= 0 else 'neg' }}">{{ "%+.2f"|format(t.realized_pnl_usd) }}</span>
+        </div>
+        {% endif %}
       </div>
 
       {% if mode == 'open' and (t.dist_to_sl_pct is not none or t.dist_to_tp_pct is not none) %}

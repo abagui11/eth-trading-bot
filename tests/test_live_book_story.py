@@ -133,6 +133,34 @@ class EnrichLiveTradesTests(unittest.TestCase):
         self.assertIsNone(row["spot"])
         self.assertEqual(row["pnl_usd"], 0.0)
 
+    def test_only_the_remaining_size_is_marked_after_a_scale_out(self) -> None:
+        """A banked tranche is realized — marking it again would double count."""
+        with patch.object(data, "_trade_story_from_cycle", return_value=STORY):
+            row = data.enrich_live_trades(
+                [self._row(qty_open=0.3, realized_pnl_usd=2.85)]
+            )[0]
+        self.assertAlmostEqual(row["unrealized_pnl_usd"], (2465.0 - 2411.5) * 0.3)
+        self.assertAlmostEqual(row["realized_pnl_usd"], 2.85)
+        # Headline is banked plus still-riding.
+        self.assertAlmostEqual(row["pnl_usd"], (2465.0 - 2411.5) * 0.3 + 2.85)
+        self.assertTrue(row["scaled_out"])
+
+    def test_untouched_row_is_not_flagged_as_scaled_out(self) -> None:
+        with patch.object(data, "_trade_story_from_cycle", return_value=STORY):
+            row = data.enrich_live_trades([self._row(qty_open=0.4)])[0]
+        self.assertFalse(row["scaled_out"])
+        self.assertEqual(row["realized_pnl_usd"], 0.0)
+
+    def test_book_total_excludes_banked_profit(self) -> None:
+        """Live performance already counts realized; the metric is mark-only."""
+        with patch.object(data, "_trade_story_from_cycle", return_value=STORY):
+            rows = data.enrich_live_trades(
+                [self._row(qty_open=0.3, realized_pnl_usd=2.85)]
+            )
+        self.assertAlmostEqual(
+            data.live_unrealized_usd(rows), (2465.0 - 2411.5) * 0.3
+        )
+
     def test_original_ledger_row_is_not_mutated(self) -> None:
         original = self._row()
         with patch.object(data, "_trade_story_from_cycle", return_value=STORY):

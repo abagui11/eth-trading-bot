@@ -7,6 +7,7 @@ paper house P&L and vice versa.
 
 from __future__ import annotations
 
+import json
 import sqlite3
 from datetime import datetime, timezone
 from typing import Any
@@ -35,7 +36,11 @@ CREATE TABLE IF NOT EXISTS live_trades (
     closed_at TEXT,
     notes TEXT,
     fill_type TEXT NOT NULL DEFAULT 'auto',       -- 'auto' | 'manual'
-    filled_by INTEGER                             -- Telegram id on manual fills
+    filled_by INTEGER,                            -- Telegram id on manual fills
+    exit_order_ids_json TEXT,                     -- resting bracket/stop order ids
+    qty_open REAL,                                -- underlying still on the exchange
+    realized_pnl_usd REAL NOT NULL DEFAULT 0,     -- banked from partial exits
+    exit_fills_json TEXT                          -- booked exit legs, keyed by order id
 );
 
 CREATE TABLE IF NOT EXISTS live_meta (
@@ -86,6 +91,25 @@ def init_db() -> None:
             )
         if "filled_by" not in live_cols:
             conn.execute("ALTER TABLE live_trades ADD COLUMN filled_by INTEGER")
+        if "exit_order_ids_json" not in live_cols:
+            conn.execute(
+                "ALTER TABLE live_trades ADD COLUMN exit_order_ids_json TEXT"
+            )
+        if "realized_pnl_usd" not in live_cols:
+            conn.execute(
+                "ALTER TABLE live_trades ADD COLUMN realized_pnl_usd REAL "
+                "NOT NULL DEFAULT 0"
+            )
+        if "exit_fills_json" not in live_cols:
+            conn.execute("ALTER TABLE live_trades ADD COLUMN exit_fills_json TEXT")
+        if "qty_open" not in live_cols:
+            conn.execute("ALTER TABLE live_trades ADD COLUMN qty_open REAL")
+            # Rows written before partial exits existed were all-or-nothing, so
+            # an open row still holds its full size and a closed row holds none.
+            conn.execute(
+                "UPDATE live_trades SET qty_open = "
+                "CASE WHEN status = 'open' THEN qty ELSE 0 END"
+            )
 
 
 # ---------------------------------------------------------------------------
@@ -108,6 +132,7 @@ def record_open(
     notes: str | None = None,
     fill_type: str = "auto",
     filled_by: int | None = None,
+    exit_order_ids: list[str] | None = None,
 ) -> int:
     with _connect() as conn:
         cur = conn.execute(
@@ -115,8 +140,9 @@ def record_open(
             INSERT INTO live_trades (
                 cycle_id, source, product_id, instrument, side, qty, entry,
                 stop_loss, take_profits_json, order_id, stop_order_id,
-                status, opened_at, notes, fill_type, filled_by
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'open', ?, ?, ?, ?)
+                status, opened_at, notes, fill_type, filled_by,
+                exit_order_ids_json, qty_open, realized_pnl_usd
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'open', ?, ?, ?, ?, ?, ?, 0)
             """,
             (
                 cycle_id,
@@ -134,9 +160,72 @@ def record_open(
                 notes,
                 fill_type,
                 int(filled_by) if filled_by is not None else None,
+                json.dumps(list(exit_order_ids or [])),
+                float(qty),
             ),
         )
         return int(cur.lastrowid or 0)
+
+
+def set_exit_orders(trade_id: int, order_ids: list[str]) -> None:
+    """Replace the resting exit order ids (re-armed stops, swapped brackets)."""
+    with _connect() as conn:
+        conn.execute(
+            "UPDATE live_trades SET exit_order_ids_json = ? WHERE id = ?",
+            (json.dumps(list(order_ids)), trade_id),
+        )
+
+
+def record_partial_exit(
+    trade_id: int,
+    *,
+    exit_qty: float,
+    exit_price: float,
+    pnl_usd: float,
+    order_id: str | None,
+    reason: str,
+) -> bool:
+    """Bank one exit leg. Returns False if this leg was already booked.
+
+    Reconciliation polls the same resting orders repeatedly, so booking is
+    keyed by order id to stay idempotent across watchdog passes.
+    """
+    key = str(order_id or f"{reason}:{_now_iso()}")
+    with _connect() as conn:
+        row = conn.execute(
+            "SELECT qty_open, qty, realized_pnl_usd, exit_fills_json "
+            "FROM live_trades WHERE id = ?",
+            (trade_id,),
+        ).fetchone()
+        if row is None:
+            return False
+        booked = json.loads(row["exit_fills_json"] or "{}")
+        if key in booked:
+            return False
+        open_before = row["qty_open"]
+        open_before = float(open_before if open_before is not None else row["qty"])
+        booked[key] = {
+            "qty": float(exit_qty),
+            "price": float(exit_price),
+            "pnl_usd": float(pnl_usd),
+            "reason": reason,
+            "at": _now_iso(),
+        }
+        conn.execute(
+            """
+            UPDATE live_trades
+            SET qty_open = ?, realized_pnl_usd = realized_pnl_usd + ?,
+                exit_fills_json = ?
+            WHERE id = ?
+            """,
+            (
+                max(0.0, open_before - float(exit_qty)),
+                float(pnl_usd),
+                json.dumps(booked),
+                trade_id,
+            ),
+        )
+    return True
 
 
 def record_close(
@@ -146,16 +235,30 @@ def record_close(
     pnl_usd: float,
     close_reason: str,
 ) -> None:
+    """Close a trade. ``pnl_usd`` is the final leg; banked partials are added.
+
+    Performance reads sum ``pnl_usd`` over closed rows, so it has to end up
+    holding the whole trade's result, not just the last tranche.
+    """
     with _connect() as conn:
         conn.execute(
             """
             UPDATE live_trades
-            SET status = 'closed', exit_price = ?, pnl_usd = ?,
-                close_reason = ?, closed_at = ?
+            SET status = 'closed', exit_price = ?,
+                pnl_usd = COALESCE(realized_pnl_usd, 0) + ?,
+                close_reason = ?, closed_at = ?, qty_open = 0
             WHERE id = ? AND status = 'open'
             """,
             (float(exit_price), float(pnl_usd), close_reason, _now_iso(), trade_id),
         )
+
+
+def get_trade(trade_id: int) -> dict[str, Any] | None:
+    with _connect() as conn:
+        row = conn.execute(
+            "SELECT * FROM live_trades WHERE id = ?", (trade_id,)
+        ).fetchone()
+        return dict(row) if row else None
 
 
 def get_open_trades(source: str | None = None) -> list[dict[str, Any]]:

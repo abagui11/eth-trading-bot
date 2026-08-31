@@ -303,6 +303,18 @@ class DerivGateway:
         )
         return res.get("order") or {}
 
+    def get_order(self, order_id: str) -> dict[str, Any]:
+        """Order status/fill detail. Used to reconcile resting exits."""
+        return self._fetch_order(order_id)
+
+    def get_open_orders(self, instrument: str) -> list[dict[str, Any]]:
+        res = self._request(
+            "GET",
+            f"{_BROKERAGE}/orders/historical/batch",
+            params={"order_status": "OPEN", "product_id": instrument},
+        )
+        return list(res.get("orders") or [])
+
     def place_market_order(
         self,
         *,
@@ -385,6 +397,52 @@ class DerivGateway:
                         if selling
                         else "STOP_DIRECTION_STOP_UP"
                     ),
+                }
+            },
+        )
+        return {"order": {"order_id": order_id}}
+
+    def place_bracket(
+        self,
+        *,
+        instrument: str,
+        side: str,  # closing side: 'sell' closes a long, 'buy' closes a short
+        amount: float,  # underlying units
+        limit_price: float,  # take-profit leg
+        stop_trigger_price: float,  # protective stop leg
+        label: str,
+    ) -> dict[str, Any]:
+        """One resting order carrying both a take-profit and a stop.
+
+        The venue rejects ``reduce_only`` (``REDUCE_ONLY_NOT_ALLOWED_ON_VENUE``),
+        so a plain resting take-profit could flip the account short once the
+        position is gone. Brackets are sized against the *unreserved* position
+        instead — the venue refuses one that exceeds it — which gives the
+        protection ``reduce_only`` would have. It also means the whole position
+        must not already be reserved by a separate stop when this is called.
+        """
+        contracts = self._to_contracts(instrument, amount)
+        increment = (
+            self._product(instrument).get("price_increment")
+            or self._product(instrument).get("quote_increment")
+            or "0.01"
+        )
+        selling = side.lower() == "sell"
+        # Round each leg away from the fill so neither is made easier to hit.
+        limit_px = _quantize(limit_price, increment, up=selling)
+        stop_px = _quantize(stop_trigger_price, increment, up=not selling)
+        logger.info(
+            "FUTURES BRACKET %s %s %d contracts tp=%s sl=%s [%s]",
+            side, instrument, contracts, limit_px, stop_px, label,
+        )
+        order_id = self._create_order(
+            product_id=instrument,
+            side=side,
+            order_configuration={
+                "trigger_bracket_gtc": {
+                    "base_size": str(contracts),
+                    "limit_price": limit_px,
+                    "stop_trigger_price": stop_px,
                 }
             },
         )

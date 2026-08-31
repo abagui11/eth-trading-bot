@@ -505,6 +505,12 @@ def enrich_live_trades(
         product_id = str(row.get("product_id") or story.get("product_id") or "ETH-USD")
         side = str(row.get("side") or "")
         qty = float(row.get("qty") or 0)
+        # Scale-outs leave part of the clip on the exchange; only that part is
+        # still marked to market. Pre-migration rows have no qty_open, and 0 is
+        # a real value, so None is the only fallback signal.
+        raw_open = row.get("qty_open")
+        qty_open = qty if raw_open is None else float(raw_open)
+        banked = float(row.get("realized_pnl_usd") or 0.0)
         entry = float(row.get("entry") or 0)
         notional = entry * qty
         stop = row.get("stop_loss")
@@ -516,12 +522,16 @@ def enrich_live_trades(
         if closed:
             exit_price = float(row.get("exit_price") or 0) or None
             pnl_usd = float(row.get("pnl_usd") or 0)
+            unrealized = 0.0
             mark = exit_price
         else:
             exit_price = None
             mark = float(spots.get(product_id) or 0) or None
             direction = 1.0 if side == "long" else -1.0
-            pnl_usd = (mark - entry) * qty * direction if mark else 0.0
+            unrealized = (mark - entry) * qty_open * direction if mark else 0.0
+            # Headline is the trade's result so far: what's banked plus what's
+            # still riding.
+            pnl_usd = unrealized + banked
 
         # Auto vs manual is the thing an operator most wants at a glance, so it
         # leads the badges ahead of the cycle's own setup tags.
@@ -536,6 +546,10 @@ def enrich_live_trades(
                 "product_label": bot_config.product_label(product_id),
                 "open_cycle_id": cycle_id,
                 "qty": qty,
+                "qty_open": qty_open,
+                "realized_pnl_usd": banked,
+                "unrealized_pnl_usd": unrealized,
+                "scaled_out": (not closed) and qty_open < qty - 1e-9,
                 "entry": entry,
                 "exit": exit_price,
                 "spot": mark,
@@ -565,8 +579,12 @@ def enrich_live_trades(
 
 
 def live_unrealized_usd(open_rows: list[dict[str, Any]]) -> float:
-    """Mark-to-market total for the open live book (already enriched)."""
-    return sum(float(r.get("pnl_usd") or 0.0) for r in open_rows)
+    """Mark-to-market total for the open live book (already enriched).
+
+    Banked scale-outs are excluded — those are realized and already counted by
+    the live performance read.
+    """
+    return sum(float(r.get("unrealized_pnl_usd") or 0.0) for r in open_rows)
 
 
 def _open_counts_by_product(positions: list[dict[str, Any]]) -> dict[str, int]:

@@ -45,6 +45,168 @@ def _today() -> str:
 
 
 # ---------------------------------------------------------------------------
+# Exit ladder — take-profits are exchange-resting, not just ledger metadata
+# ---------------------------------------------------------------------------
+
+def _ordered_tps(side: str, take_profits: list[float] | None, entry: float) -> list[float]:
+    """Targets in the order price would reach them, wrong-side levels dropped."""
+    levels = [float(tp) for tp in (take_profits or []) if tp]
+    if side == "long":
+        return sorted(tp for tp in levels if tp > entry)
+    return sorted((tp for tp in levels if tp < entry), reverse=True)
+
+
+def _tp_ladder(contracts: int, levels: list[float]) -> list[tuple[float, int]]:
+    """Whole-contract scale-out plan as ``(price, contracts)`` rungs.
+
+    Contracts are indivisible, so a clip with fewer contracts than targets
+    can't use the whole ladder. It banks at the *nearest* targets rather than
+    skipping early profit — a one-contract clip closes fully at TP1.
+    """
+    if contracts <= 0 or not levels:
+        return []
+    used = levels[: min(contracts, len(levels))]
+    rungs = len(used)
+    base, extra = divmod(contracts, rungs)
+    # The remainder rides the furthest targets, so the runner is the last rung.
+    return [
+        (price, base + (1 if i >= rungs - extra else 0))
+        for i, price in enumerate(used)
+    ]
+
+
+def _tp_reached(side: str, price: float, level: float) -> bool:
+    return price >= level if side == "long" else price <= level
+
+
+def arm_exits(
+    gw: Any,
+    *,
+    instrument: str,
+    side: str,
+    qty: float,
+    entry: float,
+    stop_loss: float,
+    take_profits: list[float] | None,
+    label: str,
+    mark: float | None = None,
+) -> dict[str, Any]:
+    """Put the exit plan on the exchange and report what it did.
+
+    Every target rests as a bracket carrying both the take-profit and the stop,
+    so a filled leg consumes its own protection. Targets already through the
+    market are realized now rather than rested, mirroring the paper book's
+    gap-through fills. Falls back to one plain stop for the whole position if
+    brackets can't be placed — the position is never left unprotected.
+    """
+    closing = "sell" if side == "long" else "buy"
+    result: dict[str, Any] = {
+        "exit_order_ids": [],
+        "realized": [],
+        "mode": "brackets",
+        "stop_order_id": None,
+    }
+
+    try:
+        csize = gw.contract_size(instrument)
+        contracts = int(round(qty / csize))
+    except Exception:
+        logger.exception("Exit ladder: contract sizing failed (%s)", instrument)
+        contracts, csize = 0, 0.0
+
+    ladder = _tp_ladder(contracts, _ordered_tps(side, take_profits, entry))
+    if not ladder:
+        logger.info("Exit ladder: no usable targets for %s — plain stop", label)
+        return _arm_plain_stop(gw, instrument, closing, qty, stop_loss, label, result)
+
+    if mark is None:
+        try:
+            mark = float((gw.get_position(instrument) or {}).get("mark_price") or 0)
+        except Exception:
+            mark = 0.0
+
+    placed: list[str] = []
+    try:
+        for rung, (price, n) in enumerate(ladder, start=1):
+            leg_qty = n * csize
+            if mark and _tp_reached(side, mark, price):
+                # Target already through: bank it now instead of resting an
+                # order behind the market, exactly as the paper ladder does.
+                fill = gw.place_market_order(
+                    instrument=instrument,
+                    side=closing,
+                    amount=leg_qty,
+                    label=f"{label}-tp@{price:g}",
+                )
+                info = (fill or {}).get("order") or {}
+                result["realized"].append(
+                    {
+                        "order_id": str(info.get("order_id") or ""),
+                        "qty": float(info.get("filled_qty") or leg_qty),
+                        "price": float(info.get("average_price") or mark),
+                        "target": price,
+                    }
+                )
+                continue
+            order = gw.place_bracket(
+                instrument=instrument,
+                side=closing,
+                amount=leg_qty,
+                limit_price=price,
+                stop_trigger_price=stop_loss,
+                label=f"{label}-tp{rung}",
+            )
+            oid = str(((order or {}).get("order") or {}).get("order_id") or "")
+            if oid:
+                placed.append(oid)
+    except GatewayError as exc:
+        logger.error("Bracket placement failed (%s) — reverting to plain stop: %s", label, exc)
+        if placed:
+            try:
+                gw.cancel_orders(placed)
+            except GatewayError:
+                logger.exception("Could not cancel partial brackets for %s", label)
+        remaining = qty - sum(r["qty"] for r in result["realized"])
+        result["exit_order_ids"] = []
+        if remaining <= 0:
+            result["mode"] = "flat"
+            return result
+        return _arm_plain_stop(
+            gw, instrument, closing, remaining, stop_loss, label, result
+        )
+
+    result["exit_order_ids"] = placed
+    if not placed and result["realized"]:
+        # Every rung was already through the market: nothing left to protect.
+        result["mode"] = "flat"
+    return result
+
+
+def _arm_plain_stop(
+    gw: Any,
+    instrument: str,
+    closing: str,
+    qty: float,
+    stop_loss: float,
+    label: str,
+    result: dict[str, Any],
+) -> dict[str, Any]:
+    """Single protective stop for the whole position — the fallback path."""
+    stop = gw.place_stop_market(
+        instrument=instrument,
+        side=closing,
+        amount=qty,
+        trigger_price=float(stop_loss),
+        label=f"{label}-stop",
+    )
+    stop_id = str(((stop or {}).get("order") or {}).get("order_id") or "")
+    result["mode"] = "stop_only"
+    result["stop_order_id"] = stop_id or None
+    result["exit_order_ids"] = [stop_id] if stop_id else []
+    return result
+
+
+# ---------------------------------------------------------------------------
 # Halt / kill-switch state
 # ---------------------------------------------------------------------------
 
@@ -291,26 +453,30 @@ def _execute(
     # stop and ledger must use the actual filled quantity.
     qty = float(order_info.get("filled_qty") or qty)
 
-    # Stop first, questions later: reject → flatten + halt.
+    # Exits first, questions later: no protection → flatten + halt.
     try:
-        stop = gw.place_stop_market(
+        exits = arm_exits(
+            gw,
             instrument=instrument,
-            side="sell" if side == "long" else "buy",
-            amount=qty,
-            trigger_price=float(suggestion.stop_loss),
-            label=f"{source}-stop:{cycle_id or 'manual'}",
+            side=side,
+            qty=qty,
+            entry=fill_price,
+            stop_loss=float(suggestion.stop_loss),
+            take_profits=suggestion.take_profits,
+            label=f"{source}:{cycle_id or 'manual'}",
         )
-        stop_order_id = str(((stop or {}).get("order") or {}).get("order_id") or "")
     except GatewayError as exc:
-        logger.error("STOP REJECTED — flattening and halting live: %s", exc)
+        logger.error("EXITS REJECTED — flattening and halting live: %s", exc)
         try:
             gw.close_position(instrument)
         except GatewayError:
-            logger.exception("Flatten after stop-reject ALSO failed — manual action required")
+            logger.exception("Flatten after exit-reject ALSO failed — manual action required")
         halt_live(
             f"stop_reject:{instrument}:{exc} — position flattened, verify on Coinbase"
         )
         return None
+
+    stop_order_id = exits.get("stop_order_id") or ""
 
     trade_id = live_ledger.record_open(
         cycle_id=cycle_id,
@@ -327,7 +493,21 @@ def _execute(
         notes=f"ob:{ob_ref}" if ob_ref else None,
         fill_type=fill_type,
         filled_by=filled_by,
+        exit_order_ids=exits.get("exit_order_ids") or [],
     )
+
+    # A target already through the market is banked during arming, so book it
+    # against the row that was just written.
+    direction = 1.0 if side == "long" else -1.0
+    for leg in exits.get("realized") or []:
+        live_ledger.record_partial_exit(
+            trade_id,
+            exit_qty=float(leg["qty"]),
+            exit_price=float(leg["price"]),
+            pnl_usd=(float(leg["price"]) - fill_price) * float(leg["qty"]) * direction,
+            order_id=leg.get("order_id"),
+            reason="take_profit",
+        )
 
     if source == "mill":
         fills = live_ledger.get_meta(_MILL_FILLS_KEY) or ""
@@ -346,6 +526,16 @@ def _execute(
             f"{product_id} {side} {qty:.4f} @ {fill_price:,.2f}",
             f"stop {float(suggestion.stop_loss):,.2f}",
         ]
+        n_resting = len(exits.get("exit_order_ids") or [])
+        if exits.get("mode") == "brackets":
+            lines.append(f"{n_resting} target(s) resting on the exchange")
+        elif exits.get("mode") == "stop_only":
+            lines.append("NO take-profit orders — stop only, targets need manual arming")
+        for leg in exits.get("realized") or []:
+            lines.append(
+                f"banked {leg['qty']:.4f} at {float(leg['price']):,.2f} "
+                f"(target {float(leg['target']):,.2f} already through)"
+            )
         if filled_by:
             lines.append(f"accepted by {filled_by}")
         status = _sleeve_status(source)
@@ -496,8 +686,13 @@ def execute_mill_idea(
 # ---------------------------------------------------------------------------
 
 def sync_live_positions() -> None:
-    """Mark ledger trades closed when the exchange no longer holds them.
-    Called periodically (watchdog loop). Best-effort; never raises."""
+    """Book exit fills and close trades the exchange has released.
+
+    Reads each trade's own resting exit orders rather than the instrument's net
+    size. HQ and the mill can hold the same contract, so the netted position
+    stays non-zero when one sleeve's exit fills, and a size check alone misses
+    it — that let partial closes go unrecorded. Best-effort; never raises.
+    """
     if config.EXECUTION_MODE != "live":
         return
     open_trades = live_ledger.get_open_trades()
@@ -505,40 +700,237 @@ def sync_live_positions() -> None:
         return
     try:
         gw = get_gateway()
-        for instrument in {t["instrument"] for t in open_trades}:
-            pos = gw.get_position(instrument)
-            size = abs(float((pos or {}).get("size") or 0.0))
-            if size > 0:
-                continue
-            mark = float((pos or {}).get("mark_price") or 0.0)
-            for t in open_trades:
-                if t["instrument"] != instrument:
-                    continue
-                exit_price = mark or float(t.get("stop_loss") or t["entry"])
-                qty = float(t["qty"])
-                direction = 1.0 if t["side"] == "long" else -1.0
-                pnl = (exit_price - float(t["entry"])) * qty * direction
-                live_ledger.record_close(
-                    int(t["id"]),
-                    exit_price=exit_price,
-                    pnl_usd=pnl,
-                    close_reason="exchange_close",
-                )
-                logger.info(
-                    "Live trade #%s closed on exchange (%.2f, pnl %.2f)",
-                    t["id"], exit_price, pnl,
-                )
-                if bot_config.LIVE_FILL_ALERTS_ENABLED:
-                    _notify_ops(
-                        f"LIVE CLOSE #{t['id']} — {t['source']}\n"
-                        f"{t['product_id']} {t['side']} {qty:.4f}\n"
-                        f"entry {float(t['entry']):,.2f} -> exit {exit_price:,.2f}\n"
-                        f"P&L {pnl:+,.2f} (exchange close / stop)"
-                    )
-            _check_daily_loss("hq")
-            _check_daily_loss("mill")
     except Exception:
-        logger.exception("sync_live_positions failed")
+        logger.exception("sync_live_positions: gateway unavailable")
+        return
+
+    for trade in open_trades:
+        try:
+            _reconcile_trade(gw, trade)
+        except Exception:
+            logger.exception("Reconcile failed for live trade #%s", trade.get("id"))
+
+    for instrument in {t["instrument"] for t in open_trades}:
+        try:
+            _reconcile_flat_instrument(gw, instrument)
+        except Exception:
+            logger.exception("Flat-position check failed for %s", instrument)
+
+    try:
+        _sweep_orphan_exits(gw)
+    except Exception:
+        logger.exception("Orphan exit sweep failed")
+
+    try:
+        _check_daily_loss("hq")
+        _check_daily_loss("mill")
+    except Exception:
+        logger.exception("Daily loss check after reconcile failed")
+
+
+def _qty_open(trade: dict[str, Any]) -> float:
+    """Remaining size. Pre-migration rows have no ``qty_open``; 0 is not None."""
+    raw = trade.get("qty_open")
+    return float(trade["qty"] if raw is None else raw)
+
+
+def _reconcile_trade(gw: Any, trade: dict[str, Any]) -> None:
+    """Book any exit legs of one trade that have filled since the last pass."""
+    trade_id = int(trade["id"])
+    entry = float(trade["entry"])
+    direction = 1.0 if trade["side"] == "long" else -1.0
+    csize = gw.contract_size(trade["instrument"])
+    order_ids = _exit_order_ids(trade)
+    if not order_ids:
+        return
+
+    exits: list[tuple[float, float, str]] = []
+    for oid in order_ids:
+        try:
+            order = gw.get_order(oid)
+        except GatewayError:
+            logger.exception("Could not read exit order %s (trade #%s)", oid, trade_id)
+            continue
+        # Book only settled legs: a partially filled bracket would otherwise be
+        # booked now and again later at a different average price.
+        if str(order.get("status") or "") not in ("FILLED", "EXPIRED", "CANCELLED"):
+            continue
+        qty = float(order.get("filled_size") or 0.0) * csize
+        price = float(order.get("average_filled_price") or 0.0)
+        if qty <= 0 or price <= 0:
+            continue
+        pnl = (price - entry) * qty * direction
+        reason = "take_profit" if pnl > 0 else "stop_loss"
+        if live_ledger.record_partial_exit(
+            trade_id,
+            exit_qty=qty,
+            exit_price=price,
+            pnl_usd=pnl,
+            order_id=oid,
+            reason=reason,
+        ):
+            exits.append((qty, price, reason))
+            logger.info(
+                "Live trade #%s exit leg booked: %.4f @ %.2f (%s, pnl %.2f)",
+                trade_id, qty, price, reason, pnl,
+            )
+
+    if not exits:
+        return
+
+    row = live_ledger.get_trade(trade_id) or {}
+    qty_open = float(row.get("qty_open") or 0.0)
+    if qty_open > csize * 0.5:
+        if bot_config.LIVE_FILL_ALERTS_ENABLED:
+            banked = float(row.get("realized_pnl_usd") or 0.0)
+            _notify_ops(
+                f"LIVE PARTIAL #{trade_id} — {trade['source']}\n"
+                + "\n".join(
+                    f"{reason} {qty:.4f} @ {price:,.2f}" for qty, price, reason in exits
+                )
+                + f"\nbanked {banked:+,.2f} · {qty_open:.4f} still open"
+            )
+        return
+
+    _close_out(gw, trade_id, row, reason=exits[-1][2])
+
+
+def _close_out(
+    gw: Any, trade_id: int, row: dict[str, Any], *, reason: str
+) -> None:
+    """Finalise a fully-exited trade and cancel whatever is still resting."""
+    fills = json.loads(row.get("exit_fills_json") or "{}")
+    total_qty = sum(float(f.get("qty") or 0) for f in fills.values())
+    avg_exit = (
+        sum(float(f["qty"]) * float(f["price"]) for f in fills.values()) / total_qty
+        if total_qty
+        else float(row.get("entry") or 0)
+    )
+    live_ledger.record_close(
+        trade_id, exit_price=avg_exit, pnl_usd=0.0, close_reason=reason
+    )
+    _cancel_exit_orders(gw, row)
+    total = float(row.get("realized_pnl_usd") or 0.0)
+    logger.info(
+        "Live trade #%s closed (%s) avg exit %.2f, pnl %.2f",
+        trade_id, reason, avg_exit, total,
+    )
+    if bot_config.LIVE_FILL_ALERTS_ENABLED:
+        _notify_ops(
+            f"LIVE CLOSE #{trade_id} — {row.get('source')}\n"
+            f"{row.get('product_id')} {row.get('side')} {float(row.get('qty') or 0):.4f}\n"
+            f"entry {float(row.get('entry') or 0):,.2f} -> avg exit {avg_exit:,.2f}\n"
+            f"P&L {total:+,.2f} ({reason})"
+        )
+
+
+def _reconcile_flat_instrument(gw: Any, instrument: str) -> None:
+    """Catch closes the exit orders can't explain, e.g. a manual flatten.
+
+    Only acts when the exchange holds nothing: with two sleeves netted into one
+    contract, a partial shortfall can't be attributed to a specific trade, so
+    that case is logged for a human rather than guessed at.
+    """
+    open_trades = [
+        t for t in live_ledger.get_open_trades() if t["instrument"] == instrument
+    ]
+    if not open_trades:
+        return
+    pos = gw.get_position(instrument)
+    size = abs(float((pos or {}).get("size") or 0.0))
+    ledger_qty = sum(_qty_open(t) for t in open_trades)
+    if size > 0:
+        if ledger_qty - size > gw.contract_size(instrument) * 0.5:
+            logger.warning(
+                "%s: exchange holds %.4f but ledger expects %.4f across %d trades "
+                "— unattributed shortfall, needs review",
+                instrument, size, ledger_qty, len(open_trades),
+            )
+        return
+
+    mark = float((pos or {}).get("mark_price") or 0.0)
+    for trade in open_trades:
+        trade_id = int(trade["id"])
+        qty_open = _qty_open(trade)
+        exit_price = mark or float(trade.get("stop_loss") or trade["entry"])
+        direction = 1.0 if trade["side"] == "long" else -1.0
+        pnl = (exit_price - float(trade["entry"])) * qty_open * direction
+        live_ledger.record_partial_exit(
+            trade_id,
+            exit_qty=qty_open,
+            exit_price=exit_price,
+            pnl_usd=pnl,
+            order_id=f"flat:{trade_id}",
+            reason="exchange_close",
+        )
+        row = live_ledger.get_trade(trade_id) or {}
+        _close_out(gw, trade_id, row, reason="exchange_close")
+
+
+def _exit_order_ids(trade: dict[str, Any]) -> list[str]:
+    try:
+        ids = json.loads(trade.get("exit_order_ids_json") or "[]")
+    except json.JSONDecodeError:
+        ids = []
+    if not ids and trade.get("stop_order_id"):
+        ids = [str(trade["stop_order_id"])]
+    return [str(i) for i in ids if i]
+
+
+def _cancel_exit_orders(gw: Any, trade: dict[str, Any]) -> None:
+    ids = _exit_order_ids(trade)
+    if not ids:
+        return
+    try:
+        gw.cancel_orders(ids)
+    except GatewayError:
+        logger.exception("Could not cancel exit orders %s", ids)
+
+
+def _sweep_orphan_exits(gw: Any) -> None:
+    """Cancel resting exits no open trade owns.
+
+    The venue rejects ``reduce_only``, so an exit left behind after its
+    position is gone can open a brand-new position in the opposite direction.
+    Brackets are sized against the live position and so are largely self-
+    limiting, but the plain-stop fallback is not.
+    """
+    open_trades = live_ledger.get_open_trades()
+    owned = {oid for t in open_trades for oid in _exit_order_ids(t)}
+    for instrument in {t["instrument"] for t in open_trades} | _recent_instruments():
+        try:
+            resting = gw.get_open_orders(instrument)
+        except GatewayError:
+            logger.exception("Could not list open orders for %s", instrument)
+            continue
+        orphans = [
+            str(o.get("order_id"))
+            for o in resting
+            if str(o.get("order_id")) not in owned
+        ]
+        if not orphans:
+            continue
+        logger.warning(
+            "%s: cancelling %d orphaned exit order(s) %s",
+            instrument, len(orphans), orphans,
+        )
+        try:
+            gw.cancel_orders(orphans)
+        except GatewayError:
+            logger.exception("Orphan cancel failed for %s", instrument)
+
+
+def _recent_instruments() -> set[str]:
+    """Instruments from recently closed trades, so their leftovers get swept."""
+    try:
+        return {
+            str(t["instrument"])
+            for t in live_ledger.get_closed_trades(limit=10)
+            if t.get("instrument")
+        }
+    except Exception:
+        logger.exception("Recent instrument lookup failed")
+        return set()
 
 
 def _sleeve_status(source: str) -> str:
