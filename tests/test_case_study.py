@@ -322,6 +322,26 @@ class CaseStudyGateTests(unittest.TestCase):
             )
         self.assertEqual(seen, ["H4 supply rejected after Asia swept."])
 
+    def test_stop_out_callout_stays_at_the_event_not_the_left_margin(self) -> None:
+        """A late stop-out must not park on the TP left-margin — that hid the dot."""
+        import case_study
+
+        stopped = case_study.Slot(
+            n=5, kind="stopped", title="5 STOPPED OUT", body="x",
+            price=2439.5, ts=None, place="bl",
+        )
+        tp = case_study.Slot(
+            n=3, kind="tp", title="3 TP1", body="x",
+            price=2440.0, ts=None, place="left",
+        )
+        placed: list[tuple[float, float]] = []
+        tp_box, _, tp_coords = case_study._slot_xybox(tp, 0.40, 0.55, placed)
+        stop_box, _, stop_coords = case_study._slot_xybox(stopped, 0.88, 0.52, placed)
+        self.assertEqual(tp_coords, "axes fraction")
+        self.assertLess(tp_box[0], 0.08)
+        self.assertEqual(stop_coords, "offset points")
+        self.assertGreater(abs(stop_box[1]), 10)
+
     def test_render_writes_a_png(self) -> None:
         import case_study
 

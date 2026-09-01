@@ -34,6 +34,7 @@ import matplotlib
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 import mplfinance as mpf
+from matplotlib.colors import to_rgba
 from matplotlib.offsetbox import AnnotationBbox, TextArea, VPacker
 
 import bot_config
@@ -995,6 +996,7 @@ def _datetime_format(df) -> str:
 # 3-5 wrapped lines tall.
 _BOX_W = 0.27
 _BOX_H = 0.17
+_BOX_FACE_ALPHA = 0.58
 
 
 def _axes_fraction(ax, x: float, y: float) -> tuple[float, float]:
@@ -1003,30 +1005,58 @@ def _axes_fraction(ax, x: float, y: float) -> tuple[float, float]:
     return float(fx), float(fy)
 
 
+def _clamp(value: float, lo: float, hi: float) -> float:
+    return min(max(value, lo), hi)
+
+
+def _boxes_overlap(a: tuple[float, float], b: tuple[float, float]) -> bool:
+    return abs(a[0] - b[0]) < _BOX_W and abs(a[1] - b[1]) < _BOX_H
+
+
 def _claim_xybox(
     bx: float, by: float, placed: list[tuple[float, float]]
 ) -> tuple[float, float]:
-    """Nudge a callout vertically until it stops overlapping earlier ones.
-
-    Fixed-corner slots made the leader lines criss-cross the whole chart, so
-    boxes now sit next to their dots and only move to dodge a neighbor.
-    """
-    by = min(max(by, 0.04), 0.93)
+    """Nudge a callout vertically until it stops overlapping earlier ones."""
+    by = _clamp(by, 0.04, 0.96)
     for _ in range(24):
-        hit = next(
-            (
-                p
-                for p in placed
-                if abs(p[0] - bx) < _BOX_W and abs(p[1] - by) < _BOX_H
-            ),
-            None,
-        )
+        hit = next((p for p in placed if _boxes_overlap((bx, by), p)), None)
         if hit is None:
             break
         by = (hit[1] - _BOX_H) if by <= hit[1] else (hit[1] + _BOX_H)
-        by = min(max(by, 0.04), 0.93)
+        by = _clamp(by, 0.04, 0.96)
     placed.append((bx, by))
     return bx, by
+
+
+def _event_offset(
+    slot: Slot, fx: float, fy: float
+) -> tuple[tuple[float, float], tuple[float, float]]:
+    """Pixel offset from the marker so the leader is short and obvious.
+
+    Global sky/ground parking put the stop-out box on the floor of the axes
+    while the red dot sat on the last candle — a long diagonal that was
+    unreadable. Offset-points keep the box next to its own event; the extra
+    ylim pad is what stops a below-range stop from clipping.
+    """
+    above = ((0.0, 28.0), (0.5, 0.0))
+    below = ((0.0, -28.0), (0.5, 1.0))
+    right = ((28.0, 0.0), (0.0, 0.5))
+    left = ((-28.0, 0.0), (1.0, 0.5))
+
+    if fx > 0.78:
+        side = left
+    elif fx < 0.22:
+        side = right
+    else:
+        side = right if fx <= 0.55 else left
+
+    if slot.kind == "stop":
+        return below if fy < 0.35 else (side if fy > 0.72 else below)
+    if slot.kind in {"stopped", "exit"}:
+        return below if fy >= 0.28 else above
+    if slot.kind == "misc":
+        return above if fy <= 0.72 else below
+    return above if fy < 0.58 else below
 
 
 def _slot_xybox(
@@ -1034,22 +1064,17 @@ def _slot_xybox(
     fx: float,
     fy: float,
     placed: list[tuple[float, float]],
-) -> tuple[tuple[float, float], tuple[float, float]]:
-    """Anchor a callout beside its dot; returns (xybox, box_alignment).
+) -> tuple[tuple[float, float], tuple[float, float], str]:
+    """Returns (xybox, box_alignment, boxcoords).
 
-    Level slots (TPs, exits, stops-out) already draw a horizontal price line
-    to the left margin, so their boxes park at the left edge vertically
-    aligned with that line — the leader stays flat. Everything else (entry,
-    stop, post-exit note) sits just beside its own dot.
+    Take-profit rungs stay on the left edge in axes fraction, aligned with
+    their price line. Every other kind uses offset points from its marker.
     """
-    if slot.place in {"left", "bl"}:
-        return _claim_xybox(0.015, fy, placed), (0.0, 0.5)
-
-    to_right = fx <= 0.60 and fx + 0.05 + _BOX_W <= 1.0
-    bx = fx + 0.05 if to_right else fx - 0.05
-    dy = 0.14 if fy < 0.55 else -0.14
-    xybox = _claim_xybox(bx, fy + dy, placed)
-    return xybox, ((0.0, 0.5) if to_right else (1.0, 0.5))
+    if slot.kind == "tp":
+        return _claim_xybox(0.015, fy, placed), (0.0, 0.5), "axes fraction"
+    xybox, align = _event_offset(slot, fx, fy)
+    placed.append((fx, fy))
+    return xybox, align, "offset points"
 
 
 def _offset_box(slot: Slot):
@@ -1121,8 +1146,8 @@ def render_case_study(
     for slot in slots:
         lo = min(lo, float(slot.price))
         hi = max(hi, float(slot.price))
-    pad = (hi - lo) * 0.16 if hi > lo else abs(hi) * 0.01
-    ax.set_ylim(lo - pad, hi + pad * 1.15)
+    pad = (hi - lo) * 0.22 if hi > lo else abs(hi) * 0.01
+    ax.set_ylim(lo - pad, hi + pad * 1.2)
     ax.set_facecolor(_FIG_BG)
     fig.patch.set_facecolor(_FIG_BG)
 
@@ -1170,15 +1195,27 @@ def render_case_study(
         ax.scatter(
             [x],
             [y],
-            s=36,
+            s=90,
             c=slot.color,
-            zorder=7,
-            edgecolors=_FIG_BG,
-            linewidths=0.8,
+            zorder=12,
+            edgecolors="white",
+            linewidths=1.15,
         )
-        x_edge = float(ax.get_xlim()[0])
+        ax.annotate(
+            str(slot.n),
+            xy=(x, y),
+            xytext=(7, 6),
+            textcoords="offset points",
+            color=slot.color,
+            fontsize=8,
+            fontweight="bold",
+            fontfamily="DejaVu Sans",
+            zorder=13,
+        )
         arrow_xy: tuple[float, float] = (float(x), y)
-        if slot.kind in {"tp", "exit", "stopped"}:
+        if slot.kind == "tp":
+            x_edge = float(ax.get_xlim()[0])
+            x_span = float(ax.get_xlim()[1]) - x_edge
             ax.plot(
                 [x_edge, x],
                 [y, y],
@@ -1187,39 +1224,41 @@ def render_case_study(
                 alpha=0.75,
                 zorder=5,
             )
-            # The horizontal level line already reaches the dot; the callout
-            # arrow only needs to touch the near end of that line, otherwise
-            # a vertically-nudged box drags a diagonal across the chart.
-            arrow_xy = (x_edge + 0.01 * (float(ax.get_xlim()[1]) - x_edge), y)
+            # Arrow only needs to meet the near end of the level line; the
+            # green marker already shows which bar paid.
+            arrow_xy = (x_edge + 0.02 * x_span, y)
         fx, fy = _axes_fraction(ax, float(x), y)
-        xybox, box_alignment = _slot_xybox(slot, fx, fy, placed_boxes)
+        xybox, box_alignment, boxcoords = _slot_xybox(slot, fx, fy, placed_boxes)
         packed = _offset_box(slot)
         ab = AnnotationBbox(
             packed,
             xy=arrow_xy,
             xybox=xybox,
             xycoords="data",
-            boxcoords="axes fraction",
+            boxcoords=boxcoords,
             box_alignment=box_alignment,
             bboxprops={
                 "boxstyle": "round,pad=0.55",
-                "fc": _BOX_FACE,
+                "fc": to_rgba(_BOX_FACE, _BOX_FACE_ALPHA),
                 "ec": slot.color,
                 "lw": 1.35,
-                "alpha": 0.96,
             },
             arrowprops={
                 "arrowstyle": "-|>",
                 "color": slot.color,
-                "lw": 1.15,
-                "shrinkA": 4,
-                "shrinkB": 2,
+                "lw": 1.5,
+                "mutation_scale": 12,
+                "shrinkA": 6,
+                "shrinkB": 5,
             },
             frameon=True,
             pad=0.25,
             zorder=8,
+            clip_on=False,
         )
         ax.add_artist(ab)
+        ab.patch.set_facecolor(_BOX_FACE)
+        ab.patch.set_alpha(_BOX_FACE_ALPHA)
 
     out_path.parent.mkdir(parents=True, exist_ok=True)
     fig.savefig(
