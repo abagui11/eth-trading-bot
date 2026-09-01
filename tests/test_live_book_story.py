@@ -97,6 +97,7 @@ class EnrichLiveTradesTests(unittest.TestCase):
             row = data.enrich_live_trades([self._row()])[0]
         self.assertEqual(row["rationale"], STORY["rationale"])
         self.assertEqual(row["risk_reward"], 2.4)
+        self.assertEqual(row["risk_reward_kind"], "planned")
         self.assertEqual(row["take_profits"], [2460.0])
         self.assertEqual(row["product_label"], "ETH")
         self.assertEqual(row["thumb_chart_url"], CHARTS["thumb_chart_url"])
@@ -174,6 +175,29 @@ class EnrichLiveTradesTests(unittest.TestCase):
             )
         expected = (2465.0 - 2411.5) * 0.4 + (2465.0 - 2400.0) * 0.1
         self.assertAlmostEqual(data.live_unrealized_usd(rows), expected, places=6)
+
+    def test_closed_card_reports_realized_r_not_the_planned_first_tp(self) -> None:
+        """Eva #8: $17.85 on $10.60 of opening risk is 1.68R, not the 2.4 plan."""
+        with patch.object(data, "_trade_story_from_cycle", return_value=STORY):
+            row = data.enrich_live_trades(
+                [
+                    self._row(
+                        exit_price=2456.12,
+                        pnl_usd=17.85,
+                        stop_loss=2440.0,
+                        initial_stop_loss=2440.0,
+                    )
+                ],
+                closed=True,
+            )[0]
+        self.assertEqual(row["risk_reward_kind"], "realized")
+        self.assertAlmostEqual(row["risk_reward"], 1.68, places=2)
+
+    def test_realized_r_is_pnl_over_opening_risk(self) -> None:
+        self.assertEqual(
+            data.realized_r_multiple(17.85, 0.4, 2411.5, 2385.0), 1.68
+        )
+        self.assertIsNone(data.realized_r_multiple(17.85, 0.4, 2411.5, None))
 
 
 if __name__ == "__main__":

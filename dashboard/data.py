@@ -377,6 +377,7 @@ def enrich_open_position(pos: dict[str, Any]) -> dict[str, Any]:
         "tps_hit": int(pos.get("tps_hit") or 0),
         "tp_count": len(tps_progress),
         "risk_reward": pos.get("risk_reward") if pos.get("risk_reward") is not None else story.get("risk_reward"),
+        "risk_reward_kind": "planned",
         "rationale": story.get("rationale") or "",
         "setup_tags": story.get("setup_tags") or [],
         "order_block": story.get("order_block"),
@@ -415,6 +416,11 @@ def enrich_closed_trade(
     qty = float(trade.get("qty") or trade.get("eth_qty") or 0)
     notional = float(trade.get("entry") or 0) * qty
 
+    planned_rr = story.get("risk_reward")
+    realized_rr = realized_r_multiple(
+        pnl_usd, qty, float(trade.get("entry") or 0), story.get("stop_loss")
+    )
+
     return {
         **trade,
         "status": status,
@@ -427,7 +433,8 @@ def enrich_closed_trade(
         "action": story.get("action") or trade.get("side"),
         "stop_loss": story.get("stop_loss"),
         "take_profits": tps,
-        "risk_reward": story.get("risk_reward"),
+        "risk_reward": realized_rr if realized_rr is not None else planned_rr,
+        "risk_reward_kind": "realized" if realized_rr is not None else "planned",
         "rationale": story.get("rationale") or "",
         "setup_tags": story.get("setup_tags") or [],
         "order_block": story.get("order_block"),
@@ -579,6 +586,11 @@ def enrich_live_trades(
         )
         open_notional = entry * qty_open
 
+        planned_rr = story.get("risk_reward")
+        realized_rr = (
+            realized_r_multiple(pnl_usd, qty, entry, initial_stop) if closed else None
+        )
+
         enriched.append(
             {
                 **row,
@@ -605,7 +617,10 @@ def enrich_live_trades(
                 "tps_hit": sum(1 for r in tps_progress if r["hit"]),
                 "tp_count": len(tps_progress),
                 "exit_legs": legs,
-                "risk_reward": story.get("risk_reward"),
+                "risk_reward": realized_rr if realized_rr is not None else planned_rr,
+                "risk_reward_kind": (
+                    "realized" if realized_rr is not None else "planned"
+                ),
                 "rationale": story.get("rationale") or "",
                 "setup_tags": tags,
                 "order_block": story.get("order_block"),
@@ -701,6 +716,25 @@ def _distance_to_tp_pct(side: str, spot: float, take_profits: list[float]) -> fl
 
 def _tp_price_reached(side: str, price: float, level: float) -> bool:
     return price >= level if side == "long" else price <= level
+
+
+def realized_r_multiple(
+    pnl_usd: float,
+    qty: float,
+    entry: float,
+    opening_stop: float | None,
+) -> float | None:
+    """How many R the trade actually banked: P&L over dollars originally at risk.
+
+    Planned R:R is entry→TP1 and describes a different trade than the ladder
+    executes. Closed cards should report this instead.
+    """
+    if opening_stop is None or qty <= 0 or entry <= 0:
+        return None
+    risk = abs(float(entry) - float(opening_stop)) * float(qty)
+    if risk <= 0:
+        return None
+    return round(float(pnl_usd) / risk, 2)
 
 
 def recover_opening_stop(

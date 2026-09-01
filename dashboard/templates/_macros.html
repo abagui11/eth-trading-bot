@@ -166,7 +166,7 @@
       {% endif %}
       {% if t.risk_reward is not none %}
       <div class="level">
-        <span class="label">R:R</span>
+        <span class="label">{% if t.risk_reward_kind == 'realized' %}Realized R{% else %}R:R{% endif %}</span>
         <span class="value">{{ "%.2f"|format(t.risk_reward) }}</span>
       </div>
       {% endif %}
