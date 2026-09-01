@@ -5,7 +5,7 @@
   <meta name="robots" content="noindex,nofollow">
   <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
   <title>Eva — Investor View</title>
-  <link rel="stylesheet" href="/static/style.css?v=inv5">
+  <link rel="stylesheet" href="/static/style.css?v=inv6">
 </head>
 <body>
 {% from "_macros.html" import trade_card, tip_badge %}
@@ -20,9 +20,9 @@
     <div class="inv-kicker-row">
       <p class="inv-kicker"><span class="feed-live"></span> Private link · not indexed · please do not redistribute</p>
       <span class="inv-acct-health band-{{ ah.band }}" id="inv-acct-health"
-            title="Coinbase margin usage for the whole futures account: liquidation threshold vs available margin. 100% is a forced close; 80%+ shows red.">
+            title="Coinbase CDE Cross Margin ratio: maintenance ÷ funds for margin. Liquidation begins at 100%. Whole futures account, mill included.">
         <span class="inv-acct-dot"></span>
-        health <strong id="inv-acct-health-pct">{% if ah.usage_pct is not none %}{{ ah.usage_pct|pct(decimals=0, sign=False) }}{% else %}n/a{% endif %}</strong>
+        margin <strong id="inv-acct-health-pct">{% if ah.usage_pct is not none %}{{ ah.usage_pct|pct(decimals=1, sign=False) }}{% else %}n/a{% endif %}</strong>
       </span>
     </div>
     <h1>Eva — live trading performance</h1>
@@ -429,7 +429,7 @@
 
       if (ah) {
         setText('inv-acct-health-pct',
-          ah.usage_pct === null ? 'n/a' : Math.round(ah.usage_pct) + '%');
+          ah.usage_pct === null ? 'n/a' : Number(ah.usage_pct).toFixed(1) + '%');
         var pill = document.getElementById('inv-acct-health');
         if (pill) pill.className = 'inv-acct-health band-' + ah.band;
       }

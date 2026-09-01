@@ -110,37 +110,52 @@ def get_account_snapshot(*, force: bool = False) -> dict[str, Any]:
 
 
 def account_usage_band(usage_pct: float | None) -> str:
-    """Coinbase-style margin usage: higher is worse, red at 80%."""
+    """Coinbase CDE Cross Margin bands: warning 80%, danger 90%, liq at 100%."""
     if usage_pct is None:
         return "none"
-    if usage_pct >= 80:
+    if usage_pct >= 90:
         return "bad"
-    if usage_pct >= 60:
+    if usage_pct >= 80:
         return "warn"
     return "good"
 
 
-def build_account_health(account: dict[str, Any] | None = None) -> dict[str, Any]:
-    """Whole-account margin usage the way Coinbase frames it.
+def funds_for_margin_usd(account: dict[str, Any]) -> float | None:
+    """Coinbase's 'Funds for margin': leftover buying power plus posted IM.
 
-    Coinbase liquidates when available margin falls to the liquidation
-    threshold, so usage is threshold over available margin — the inverse of
-    the sleeve's collateral-over-exposure ratio. 0% is an idle account, 100%
-    is a forced close, red starts at 80%. Both inputs are Coinbase's own
-    numbers from ``cfm/balance_summary`` (whole account, mill included), so
-    this matches what their app shows rather than re-deriving margin rules.
+    That is the denominator on the CDE Cross Margin screen, not unencumbered
+    cash (``available_margin``). Buying power already includes leverage, so a
+    nano clip against ~$4k of capacity reads ~5%, matching the app.
+    """
+    buying = account.get("available_funds_usd")
+    if buying is None:
+        return None
+    posted = float(account.get("initial_margin_usd") or 0.0)
+    return float(buying) + posted
+
+
+def build_account_health(account: dict[str, Any] | None = None) -> dict[str, Any]:
+    """Whole-account margin ratio the way Coinbase's CDE screen frames it.
+
+    ``maintenance ÷ funds for margin``. Maintenance is ``liquidation_threshold``.
+    Funds for margin is unused futures buying power plus posted initial margin.
+    0% is idle, 100% is a forced close, amber at 80%, red at 90% — Coinbase's
+    own table. Whole CFM account (mill included).
     """
     account = account if account is not None else get_account_snapshot()
     threshold = account.get("liquidation_threshold_usd")
-    available = account.get("available_margin_usd") or account.get("margin_balance_usd")
+    funds = funds_for_margin_usd(account)
     usage = None
-    if threshold is not None and available:
-        usage = max(float(threshold) / float(available) * 100.0, 0.0)
+    if threshold is not None and funds:
+        usage = max(float(threshold) / float(funds) * 100.0, 0.0)
     return {
         "usage_pct": round(usage, 1) if usage is not None else None,
         "band": account_usage_band(usage),
         "liquidation_threshold_usd": threshold,
+        "funds_for_margin_usd": round(funds, 2) if funds is not None else None,
         "available_margin_usd": account.get("available_margin_usd"),
+        "available_funds_usd": account.get("available_funds_usd"),
+        "initial_margin_usd": account.get("initial_margin_usd"),
         "available": bool(account.get("available")),
     }
 

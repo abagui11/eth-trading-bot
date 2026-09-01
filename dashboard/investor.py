@@ -229,8 +229,8 @@ def build_investor_payload(
         equity_usd=portfolio_value,
         gross_notional_usd=exposure["gross_notional_usd"],
     )
-    # Coinbase's own margin-usage number for the whole futures account —
-    # the small corner pill, red at 80%+.
+    # Coinbase CDE Cross Margin ratio for the whole futures account —
+    # the small corner pill. Same formula as the app: maintenance ÷ funds.
     account_health = build_account_health()
     nav_series = build_nav_series(
         base_usd=base_usd,
