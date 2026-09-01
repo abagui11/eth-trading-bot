@@ -334,6 +334,8 @@ class DashboardUiSmokeTests(unittest.TestCase):
         mill_card = html.split('id="mill-clip-card"', 1)[1].split("</section>", 1)[0]
         self.assertIn("nano ETH", mill_card)
         self.assertIn("/feed", mill_card)
+        self.assertIn("id=\"mill-live-open\"", mill_card)
+        self.assertNotIn("<th>Opened</th>", mill_card)
 
     def test_archived_journal_is_collapsed_with_v1_metrics(self) -> None:
         summary = {

@@ -550,6 +550,9 @@ def enrich_live_trades(
         tps = _as_float_list(row.get("take_profits_json")) or _as_float_list(
             story.get("take_profits")
         )
+        if str(row.get("source") or "") == "mill" and tps:
+            # One nano contract — `_tp_ladder` rests the whole clip on TP1.
+            tps = ordered_take_profits(side, tps, entry)[:1]
         legs = exit_legs(row.get("exit_fills_json"))
         # initial_stop_loss was backfilled from stop_loss for rows opened
         # before the column existed. If that copy landed after a trail, the
@@ -587,6 +590,10 @@ def enrich_live_trades(
         open_notional = entry * qty_open
 
         planned_rr = story.get("risk_reward")
+        if planned_rr is None:
+            planned_rr = planned_risk_reward(
+                side, entry, initial_stop if initial_stop is not None else stop, tps
+            )
         realized_rr = (
             realized_r_multiple(pnl_usd, qty, entry, initial_stop) if closed else None
         )
@@ -716,6 +723,28 @@ def _distance_to_tp_pct(side: str, spot: float, take_profits: list[float]) -> fl
 
 def _tp_price_reached(side: str, price: float, level: float) -> bool:
     return price >= level if side == "long" else price <= level
+
+
+def planned_risk_reward(
+    side: str,
+    entry: float,
+    stop: float | None,
+    take_profits: list[float] | None,
+) -> float | None:
+    """Entry→first-target R:R. Used when the cycle story did not store one."""
+    if stop is None or entry <= 0:
+        return None
+    risk = abs(float(entry) - float(stop))
+    if risk <= 0:
+        return None
+    ladder = ordered_take_profits(side, take_profits or [], entry)
+    if not ladder:
+        return None
+    first = float(ladder[0])
+    reward = (first - entry) if side == "long" else (entry - first)
+    if reward <= 0:
+        return None
+    return round(reward / risk, 2)
 
 
 def realized_r_multiple(

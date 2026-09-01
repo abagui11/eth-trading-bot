@@ -160,6 +160,11 @@ def create_app() -> FastAPI:
 
         mill_paper = trade_ideas_bridge.volume_book_payload(limit=12)
         live_open = data.enrich_live_trades(live_ledger.get_open_trades(source="hq"))
+        mill_open = data.enrich_live_trades(live_ledger.get_open_trades(source="mill"))
+        mill_closed = data.enrich_live_trades(
+            live_ledger.get_closed_trades(limit=20, source="mill"),
+            closed=True,
+        )
         return templates.TemplateResponse(
             request,
             "index.html",
@@ -179,8 +184,8 @@ def create_app() -> FastAPI:
                     closed=True,
                 ),
                 "live_unrealized_usd": data.live_unrealized_usd(live_open),
-                "mill_open": live_ledger.get_open_trades(source="mill"),
-                "mill_closed": live_ledger.get_closed_trades(limit=20, source="mill"),
+                "mill_open": mill_open,
+                "mill_closed": mill_closed,
                 "live_performance": live_ledger.get_live_performance(),
                 "mill_policy": {
                     "sleeve_usd": bot_config.LIVE_MILL_SLEEVE_USD,
@@ -210,9 +215,14 @@ def create_app() -> FastAPI:
         limit: int = 50, offset: int = 0, source: str = "hq"
     ) -> dict:
         return {
-            "open": live_ledger.get_open_trades(source=source or None),
-            "closed": live_ledger.get_closed_trades(
-                limit=min(limit, 100), offset=max(offset, 0), source=source or None
+            "open": data.enrich_live_trades(
+                live_ledger.get_open_trades(source=source or None)
+            ),
+            "closed": data.enrich_live_trades(
+                live_ledger.get_closed_trades(
+                    limit=min(limit, 100), offset=max(offset, 0), source=source or None
+                ),
+                closed=True,
             ),
             "performance": live_ledger.get_live_performance(),
         }

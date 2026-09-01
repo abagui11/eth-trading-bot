@@ -199,6 +199,30 @@ class EnrichLiveTradesTests(unittest.TestCase):
         )
         self.assertIsNone(data.realized_r_multiple(17.85, 0.4, 2411.5, None))
 
+    def test_mill_clip_only_shows_the_armed_target(self) -> None:
+        """One nano contract rests the whole clip on TP1 — TP2/TP3 are not live."""
+        row = data.enrich_live_trades(
+            [
+                self._row(
+                    cycle_id=None,
+                    source="mill",
+                    product_id="BTC-USD",
+                    side="short",
+                    qty=0.01,
+                    entry=78305.0,
+                    stop_loss=78629.22,
+                    initial_stop_loss=78629.22,
+                    take_profits_json=json.dumps(
+                        [77254.43, 76704.51, 76154.59]
+                    ),
+                )
+            ]
+        )[0]
+        self.assertEqual(len(row["tp_progress"]), 1)
+        self.assertAlmostEqual(row["tp_progress"][0]["price"], 77254.43, places=2)
+        self.assertEqual(row["risk_reward_kind"], "planned")
+        self.assertAlmostEqual(row["risk_reward"], 3.24, places=2)
+
 
 if __name__ == "__main__":
     unittest.main()
