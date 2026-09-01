@@ -282,24 +282,20 @@ class ArmExitsFallbackSizingTests(unittest.TestCase):
 
 
 class TrailedStopTests(unittest.TestCase):
-    """Paper trails SL to breakeven after TP1 and to TP1 after TP2; live must too.
+    """After a target fills, the runner's stop locks that target — not the one behind.
 
-    Without this the runner still risks the original stop below entry, so a
-    banked tranche can be handed straight back.
+    Eva #8's remaining 0.2 died at TP1 ($5.60) because the trail sat one
+    rung back. Locking TP2 would have banked ~$13 on that remainder.
     """
 
     def test_no_trail_before_any_target_fills(self) -> None:
         self.assertIsNone(live_exec._trailed_stop(2411.5, [2440.0, 2477.0], 0))
 
-    def test_breakeven_after_the_first_target(self) -> None:
-        self.assertEqual(
-            live_exec._trailed_stop(2411.5, [2440.0, 2477.0, 2534.0], 1), 2411.5
-        )
-
-    def test_trails_to_the_previous_target_after_that(self) -> None:
+    def test_locks_the_target_that_just_paid(self) -> None:
         tps = [2440.0, 2477.0, 2534.0]
-        self.assertEqual(live_exec._trailed_stop(2411.5, tps, 2), 2440.0)
-        self.assertEqual(live_exec._trailed_stop(2411.5, tps, 3), 2477.0)
+        self.assertEqual(live_exec._trailed_stop(2411.5, tps, 1), 2440.0)
+        self.assertEqual(live_exec._trailed_stop(2411.5, tps, 2), 2477.0)
+        self.assertEqual(live_exec._trailed_stop(2411.5, tps, 3), 2534.0)
 
     def test_trail_only_ever_reduces_risk(self) -> None:
         self.assertTrue(live_exec._improves_stop("long", 2385.0, 2411.5))
@@ -586,8 +582,8 @@ class ReconcileTests(LedgerDbTestCase):
         self.assertAlmostEqual(row["realized_pnl_usd"], (2440.0 - 2411.5) * 0.1)
         self.assertEqual(row["status"], "open")
 
-    def test_first_target_moves_the_stop_to_breakeven(self) -> None:
-        """End to end: bank TP1, and the runner stops risking the original SL."""
+    def test_first_target_moves_the_stop_to_that_target(self) -> None:
+        """End to end: bank TP1, and the runner stops risking anything below it."""
         tid = self._open_trade(exit_order_ids=["br-2440", "br-2477", "br-2534"])
         gw = MagicMock()
         gw.contract_size.return_value = 0.1
@@ -623,12 +619,12 @@ class ReconcileTests(LedgerDbTestCase):
             live_exec.sync_live_positions()
 
         row = live_ledger.get_trade(tid)
-        self.assertAlmostEqual(row["stop_loss"], 2411.5)
+        self.assertAlmostEqual(row["stop_loss"], 2440.0)
         self.assertEqual(
             json.loads(row["exit_order_ids_json"]), ["new-2477", "new-2534"]
         )
         for call in gw.place_bracket.call_args_list:
-            self.assertEqual(call.kwargs["stop_trigger_price"], 2411.5)
+            self.assertEqual(call.kwargs["stop_trigger_price"], 2440.0)
 
     def test_a_stop_left_behind_is_caught_up_on_a_later_pass(self) -> None:
         """Self-heal: a target banked earlier still earns its trail."""
@@ -657,8 +653,8 @@ class ReconcileTests(LedgerDbTestCase):
         with patch.object(live_exec, "get_gateway", return_value=gw):
             live_exec.sync_live_positions()
 
-        self.assertAlmostEqual(live_ledger.get_trade(tid)["stop_loss"], 2411.5)
-        self.assertEqual(gw.place_bracket.call_args.kwargs["stop_trigger_price"], 2411.5)
+        self.assertAlmostEqual(live_ledger.get_trade(tid)["stop_loss"], 2440.0)
+        self.assertEqual(gw.place_bracket.call_args.kwargs["stop_trigger_price"], 2440.0)
 
     def test_untouched_trade_keeps_its_structural_stop(self) -> None:
         tid = self._open_trade(exit_order_ids=["br-2477"])

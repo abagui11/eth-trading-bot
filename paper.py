@@ -1206,7 +1206,7 @@ def _format_exit_plan(position: dict) -> str:
             )
     if len(tps) >= 2:
         lines.append(
-            "After TP1, SL trails to breakeven; after TP2, SL trails to TP1; etc."
+            "After each target fills, the stop trails to that target so the runner locks it."
         )
 
     if not lines:
@@ -1639,12 +1639,11 @@ def _sl_after_tp_hit(
     ordered_tps: list[float],
     tps_hit_after: int,
 ) -> float:
-    """Trail SL: after TP1 → breakeven; after TP2 → TP1; etc."""
-    if tps_hit_after <= 0:
-        return avg_entry
-    if tps_hit_after == 1:
+    """Trail SL to the last filled target: after TP1 → TP1; after TP2 → TP2."""
+    if tps_hit_after <= 0 or not ordered_tps:
         return float(avg_entry)
-    return float(ordered_tps[tps_hit_after - 2])
+    idx = min(tps_hit_after - 1, len(ordered_tps) - 1)
+    return float(ordered_tps[idx])
 
 
 def _update_excursions(

@@ -413,7 +413,7 @@ class PaperPositionTests(unittest.TestCase):
         closed = paper.get_closed_trades(limit=1)
         self.assertEqual(closed[0]["close_reason"], "stop_loss")
 
-    def test_tp1_scales_out_one_third_and_moves_sl_to_breakeven(self) -> None:
+    def test_tp1_scales_out_one_third_and_trails_sl_to_tp1(self) -> None:
         paper.restore_open_position(
             action="spot_buy",
             entry=1803.0,
@@ -432,14 +432,14 @@ class PaperPositionTests(unittest.TestCase):
         positions = paper.get_open_positions(1831.62)
         self.assertEqual(len(positions), 1)
         self.assertAlmostEqual(positions[0]["eth_qty"], 0.50, places=4)
-        self.assertAlmostEqual(float(positions[0]["stop_loss"]), 1803.0, places=2)
+        self.assertAlmostEqual(float(positions[0]["stop_loss"]), 1831.62, places=2)
         self.assertEqual(int(positions[0]["tps_hit"]), 1)
         closed = paper.get_closed_trades(limit=1)
         self.assertEqual(closed[0]["close_reason"], "take_profit")
         self.assertAlmostEqual(closed[0]["eth_qty"], 0.25, places=4)
         self.assertAlmostEqual(closed[0]["exit"], 1831.62, places=2)
 
-    def test_tp2_scales_out_and_trails_sl_to_tp1(self) -> None:
+    def test_tp2_scales_out_and_trails_sl_to_tp2(self) -> None:
         paper.restore_open_position(
             action="spot_buy",
             entry=1803.0,
@@ -461,7 +461,7 @@ class PaperPositionTests(unittest.TestCase):
         positions = paper.get_open_positions(1844.67)
         self.assertEqual(len(positions), 1)
         self.assertAlmostEqual(positions[0]["eth_qty"], 0.25, places=4)
-        self.assertAlmostEqual(float(positions[0]["stop_loss"]), 1831.62, places=2)
+        self.assertAlmostEqual(float(positions[0]["stop_loss"]), 1844.67, places=2)
         self.assertEqual(int(positions[0]["tps_hit"]), 2)
 
     def test_tp3_closes_remaining_third(self) -> None:

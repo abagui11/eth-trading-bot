@@ -321,17 +321,23 @@ def revalidate_levels(
 def _trailed_stop(
     entry: float, ordered_tps: list[float], tps_hit: int
 ) -> float | None:
-    """Mirror of the paper ladder's trail: after TP1 → breakeven, TP2 → TP1.
+    """Lock the last filled target on the runner.
+
+    After TP1 the stop sits at TP1; after TP2 it sits at TP2. Trailing one
+    rung behind (breakeven / previous TP) handed the runner's last-target
+    profit back on a normal retrace — Eva #8's remaining 0.2 died at TP1
+    for $5.60 instead of locking TP2 for ~$13.
 
     Returns None while no target has filled, so an untouched trade keeps the
-    structural stop the thesis chose.
+    structural stop the thesis chose. ``entry`` is the fallback when the
+    ladder is empty.
     """
     if tps_hit <= 0:
         return None
-    if tps_hit == 1:
+    if not ordered_tps:
         return float(entry)
-    idx = min(tps_hit - 2, len(ordered_tps) - 1)
-    return float(ordered_tps[idx]) if idx >= 0 else float(entry)
+    idx = min(tps_hit - 1, len(ordered_tps) - 1)
+    return float(ordered_tps[idx])
 
 
 def _tps_taken(trade: dict[str, Any]) -> int:
@@ -481,7 +487,7 @@ def _maybe_trail_stop(gw: Any, trade_id: int, row: dict[str, Any]) -> None:
     live_ledger.set_exit_orders(trade_id, fresh)
     live_ledger.set_stop_loss(trade_id, new_stop)
     if bot_config.LIVE_FILL_ALERTS_ENABLED:
-        label = "breakeven" if tps_hit == 1 else f"TP{tps_hit - 1}"
+        label = f"TP{tps_hit}"
         _notify_ops(
             f"STOP TRAILED #{trade_id} — {row.get('source')}\n"
             f"{row.get('product_id')} stop -> {new_stop:,.2f} ({label})\n"
