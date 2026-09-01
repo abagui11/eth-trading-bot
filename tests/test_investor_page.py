@@ -131,7 +131,11 @@ class InvestorPageTests(unittest.TestCase):
         self.assertIn("Realized 2026 (YTD)", html)
         self.assertIn("Realized today", html)
         self.assertIn("Unrealized (open)", html)
-        self.assertIn("Health factor", html)
+        # Coinbase-style margin-usage pill in the corner replaced the big
+        # collateral-vs-exposure card.
+        self.assertIn("inv-acct-health", html)
+        self.assertNotIn("Health factor", html)
+        self.assertNotIn("collateral vs. exposure", html)
         self.assertIn("Open positions (1)", html)
         self.assertNotIn("Exchange account", html)
         self.assertIn("data-range=\"week\"", html)
@@ -445,6 +449,63 @@ class TpLadderTests(unittest.TestCase):
         self.assertEqual(
             recover_opening_stop("long", 2411.5, 2385.0, 2380.0), 2385.0
         )
+
+
+class AccountHealthPillTests(unittest.TestCase):
+    """Coinbase-style whole-account margin usage: threshold over available margin."""
+
+    def test_usage_is_liquidation_threshold_over_available_margin(self) -> None:
+        from dashboard.account import build_account_health
+
+        health = build_account_health(
+            {
+                "available": True,
+                "liquidation_threshold_usd": 212.84,
+                "available_margin_usd": 317.75,
+                "margin_balance_usd": 231.65,
+            }
+        )
+
+        self.assertAlmostEqual(health["usage_pct"], 67.0, places=1)
+        self.assertEqual(health["band"], "warn")
+
+    def test_eighty_percent_reads_red_like_coinbase(self) -> None:
+        from dashboard.account import build_account_health
+
+        health = build_account_health(
+            {
+                "available": True,
+                "liquidation_threshold_usd": 80.0,
+                "available_margin_usd": 100.0,
+            }
+        )
+
+        self.assertEqual(health["usage_pct"], 80.0)
+        self.assertEqual(health["band"], "bad")
+
+    def test_idle_account_is_green_and_no_exchange_read_is_na(self) -> None:
+        from dashboard.account import build_account_health
+
+        idle = build_account_health(
+            {
+                "available": True,
+                "liquidation_threshold_usd": 0.0,
+                "available_margin_usd": 317.75,
+            }
+        )
+        self.assertEqual(idle["usage_pct"], 0.0)
+        self.assertEqual(idle["band"], "good")
+
+        offline = build_account_health(
+            {
+                "available": False,
+                "liquidation_threshold_usd": None,
+                "available_margin_usd": None,
+                "margin_balance_usd": None,
+            }
+        )
+        self.assertIsNone(offline["usage_pct"])
+        self.assertEqual(offline["band"], "none")
 
 
 if __name__ == "__main__":

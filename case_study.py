@@ -990,19 +990,66 @@ def _datetime_format(df) -> str:
     return "%H:%M"
 
 
-def _place_xybox(slot: Slot, n_left: int, left_i: int) -> tuple[float, float]:
-    """Axes-fraction anchors so every chart uses the same callout layout."""
-    if slot.place == "tr":
-        return 0.74, 0.82
-    if slot.place == "tc":
-        return 0.40, 0.90
-    if slot.place == "left":
-        # Stack TP boxes down the left margin.
-        y = 0.62 - left_i * 0.16
-        return 0.02, max(0.28, y)
-    if slot.place == "bl":
-        return 0.02, 0.12
-    return 0.70, 0.10  # br / misc
+# Approximate callout footprint in axes fraction, used only to keep boxes
+# from stacking on top of each other. Boxes are ~1/4 of the chart wide and
+# 3-5 wrapped lines tall.
+_BOX_W = 0.27
+_BOX_H = 0.17
+
+
+def _axes_fraction(ax, x: float, y: float) -> tuple[float, float]:
+    """Data coords → axes-fraction coords, honoring mpf's x padding."""
+    fx, fy = ax.transAxes.inverted().transform(ax.transData.transform((x, y)))
+    return float(fx), float(fy)
+
+
+def _claim_xybox(
+    bx: float, by: float, placed: list[tuple[float, float]]
+) -> tuple[float, float]:
+    """Nudge a callout vertically until it stops overlapping earlier ones.
+
+    Fixed-corner slots made the leader lines criss-cross the whole chart, so
+    boxes now sit next to their dots and only move to dodge a neighbor.
+    """
+    by = min(max(by, 0.04), 0.93)
+    for _ in range(24):
+        hit = next(
+            (
+                p
+                for p in placed
+                if abs(p[0] - bx) < _BOX_W and abs(p[1] - by) < _BOX_H
+            ),
+            None,
+        )
+        if hit is None:
+            break
+        by = (hit[1] - _BOX_H) if by <= hit[1] else (hit[1] + _BOX_H)
+        by = min(max(by, 0.04), 0.93)
+    placed.append((bx, by))
+    return bx, by
+
+
+def _slot_xybox(
+    slot: Slot,
+    fx: float,
+    fy: float,
+    placed: list[tuple[float, float]],
+) -> tuple[tuple[float, float], tuple[float, float]]:
+    """Anchor a callout beside its dot; returns (xybox, box_alignment).
+
+    Level slots (TPs, exits, stops-out) already draw a horizontal price line
+    to the left margin, so their boxes park at the left edge vertically
+    aligned with that line — the leader stays flat. Everything else (entry,
+    stop, post-exit note) sits just beside its own dot.
+    """
+    if slot.place in {"left", "bl"}:
+        return _claim_xybox(0.015, fy, placed), (0.0, 0.5)
+
+    to_right = fx <= 0.60 and fx + 0.05 + _BOX_W <= 1.0
+    bx = fx + 0.05 if to_right else fx - 0.05
+    dy = 0.14 if fy < 0.55 else -0.14
+    xybox = _claim_xybox(bx, fy + dy, placed)
+    return xybox, ((0.0, 0.5) if to_right else (1.0, 0.5))
 
 
 def _offset_box(slot: Slot):
@@ -1069,6 +1116,11 @@ def render_case_study(
     ax = axes[0]
     lo = float(df["Low"].min())
     hi = float(df["High"].max())
+    # Keep every annotated level on-axis (e.g. a never-touched stop below the
+    # traded range) or its AnnotationBbox is silently clipped away.
+    for slot in slots:
+        lo = min(lo, float(slot.price))
+        hi = max(hi, float(slot.price))
     pad = (hi - lo) * 0.16 if hi > lo else abs(hi) * 0.01
     ax.set_ylim(lo - pad, hi + pad * 1.15)
     ax.set_facecolor(_FIG_BG)
@@ -1111,7 +1163,7 @@ def render_case_study(
         ha="right",
     )
 
-    left_i = 0
+    placed_boxes: list[tuple[float, float]] = []
     for slot in slots:
         x = _bar_index(df, slot.ts, slot.price)
         y = float(slot.price)
@@ -1124,26 +1176,31 @@ def render_case_study(
             edgecolors=_FIG_BG,
             linewidths=0.8,
         )
+        x_edge = float(ax.get_xlim()[0])
+        arrow_xy: tuple[float, float] = (float(x), y)
         if slot.kind in {"tp", "exit", "stopped"}:
             ax.plot(
-                [0, x],
+                [x_edge, x],
                 [y, y],
                 color=slot.color,
                 lw=0.9,
                 alpha=0.75,
                 zorder=5,
             )
-        xybox = _place_xybox(slot, 0, left_i)
-        if slot.place == "left":
-            left_i += 1
+            # The horizontal level line already reaches the dot; the callout
+            # arrow only needs to touch the near end of that line, otherwise
+            # a vertically-nudged box drags a diagonal across the chart.
+            arrow_xy = (x_edge + 0.01 * (float(ax.get_xlim()[1]) - x_edge), y)
+        fx, fy = _axes_fraction(ax, float(x), y)
+        xybox, box_alignment = _slot_xybox(slot, fx, fy, placed_boxes)
         packed = _offset_box(slot)
         ab = AnnotationBbox(
             packed,
-            xy=(x, y),
+            xy=arrow_xy,
             xybox=xybox,
             xycoords="data",
             boxcoords="axes fraction",
-            box_alignment=(0.0, 0.5) if slot.place in {"left", "bl", "tr", "br"} else (0.5, 0.0),
+            box_alignment=box_alignment,
             bboxprops={
                 "boxstyle": "round,pad=0.55",
                 "fc": _BOX_FACE,

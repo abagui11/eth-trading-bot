@@ -57,6 +57,7 @@ def _fallback_snapshot(error: str | None) -> dict[str, Any]:
         "margin_balance_usd": None,
         "exchange_unrealized_pnl_usd": None,
         "initial_margin_usd": None,
+        "available_margin_usd": None,
         "liquidation_threshold_usd": None,
         "liquidation_buffer_usd": None,
         "liquidation_buffer_pct": None,
@@ -96,6 +97,7 @@ def get_account_snapshot(*, force: bool = False) -> dict[str, Any]:
         "margin_balance_usd": float(summary.get("margin_balance") or 0.0),
         "exchange_unrealized_pnl_usd": float(summary.get("unrealized_pnl") or 0.0),
         "initial_margin_usd": _raw_val(raw, "initial_margin"),
+        "available_margin_usd": _raw_val(raw, "available_margin"),
         "liquidation_threshold_usd": _raw_val(raw, "liquidation_threshold"),
         "liquidation_buffer_usd": _raw_val(raw, "liquidation_buffer_amount"),
         "liquidation_buffer_pct": _raw_val(raw, "liquidation_buffer_percentage"),
@@ -105,6 +107,42 @@ def get_account_snapshot(*, force: bool = False) -> dict[str, Any]:
     }
     _cache = (snapshot, now)
     return dict(snapshot)
+
+
+def account_usage_band(usage_pct: float | None) -> str:
+    """Coinbase-style margin usage: higher is worse, red at 80%."""
+    if usage_pct is None:
+        return "none"
+    if usage_pct >= 80:
+        return "bad"
+    if usage_pct >= 60:
+        return "warn"
+    return "good"
+
+
+def build_account_health(account: dict[str, Any] | None = None) -> dict[str, Any]:
+    """Whole-account margin usage the way Coinbase frames it.
+
+    Coinbase liquidates when available margin falls to the liquidation
+    threshold, so usage is threshold over available margin — the inverse of
+    the sleeve's collateral-over-exposure ratio. 0% is an idle account, 100%
+    is a forced close, red starts at 80%. Both inputs are Coinbase's own
+    numbers from ``cfm/balance_summary`` (whole account, mill included), so
+    this matches what their app shows rather than re-deriving margin rules.
+    """
+    account = account if account is not None else get_account_snapshot()
+    threshold = account.get("liquidation_threshold_usd")
+    available = account.get("available_margin_usd") or account.get("margin_balance_usd")
+    usage = None
+    if threshold is not None and available:
+        usage = max(float(threshold) / float(available) * 100.0, 0.0)
+    return {
+        "usage_pct": round(usage, 1) if usage is not None else None,
+        "band": account_usage_band(usage),
+        "liquidation_threshold_usd": threshold,
+        "available_margin_usd": account.get("available_margin_usd"),
+        "available": bool(account.get("available")),
+    }
 
 
 def health_band(health_pct: float | None) -> str:

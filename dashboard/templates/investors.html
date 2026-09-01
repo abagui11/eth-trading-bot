@@ -5,18 +5,26 @@
   <meta name="robots" content="noindex,nofollow">
   <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
   <title>Eva — Investor View</title>
-  <link rel="stylesheet" href="/static/style.css?v=inv4">
+  <link rel="stylesheet" href="/static/style.css?v=inv5">
 </head>
 <body>
 {% from "_macros.html" import trade_card, tip_badge %}
 {% set p = inv.portfolio %}
 {% set h = inv.health %}
+{% set ah = inv.account_health %}
 {% set ex = inv.exposure %}
 {% set d = inv.daily %}
 
 <div class="wrap">
   <header class="inv-header">
-    <p class="inv-kicker"><span class="feed-live"></span> Private link · not indexed · please do not redistribute</p>
+    <div class="inv-kicker-row">
+      <p class="inv-kicker"><span class="feed-live"></span> Private link · not indexed · please do not redistribute</p>
+      <span class="inv-acct-health band-{{ ah.band }}" id="inv-acct-health"
+            title="Coinbase margin usage for the whole futures account: liquidation threshold vs available margin. 100% is a forced close; 80%+ shows red.">
+        <span class="inv-acct-dot"></span>
+        health <strong id="inv-acct-health-pct">{% if ah.usage_pct is not none %}{{ ah.usage_pct|pct(decimals=0, sign=False) }}{% else %}n/a{% endif %}</strong>
+      </span>
+    </div>
     <h1>Eva — live trading performance</h1>
     <p class="sub">
       Eva ICT book only — mill clips are not included.
@@ -87,51 +95,6 @@
       the Eva sleeve of {{ p.capital_base_usd|usd(decimals=0) }}.
       The chart is sleeve plus realized P&amp;L each UTC day; today's point
       also includes the open mark.
-    </p>
-  </section>
-
-  <!-- ==== Collateral health ==== -->
-  <section class="card" id="inv-health-card">
-    <h2>Health factor</h2>
-    <div class="inv-health-top">
-      <div class="inv-health-figure">
-        <span class="inv-health-value badge-{{ h.band }}" id="inv-health-pct">
-          {% if h.health_pct is not none %}{{ h.health_pct|pct(decimals=0, sign=False) }}{% else %}—{% endif %}
-        </span>
-        <span class="inv-health-caption">
-          collateral vs. exposure
-          {% if h.leverage_x %} · {{ "%.2f"|format(h.leverage_x) }}x geared{% endif %}
-        </span>
-      </div>
-      <div class="inv-health-bar" role="img"
-           aria-label="Health factor {% if h.health_pct is not none %}{{ h.health_pct }} percent{% else %}unavailable{% endif %}">
-        <span class="inv-health-fill band-{{ h.band }}"
-              style="width: {{ [h.health_pct or 0, 100]|min }}%"></span>
-      </div>
-    </div>
-    <div class="metrics" style="margin-top:12px">
-      <div class="metric">
-        <div class="label">Equity (collateral)</div>
-        <div class="value" id="inv-health-equity">{{ h.equity_usd|usd }}</div>
-      </div>
-      <div class="metric">
-        <div class="label">Total position size</div>
-        <div class="value" id="inv-health-notional">{{ h.gross_notional_usd|usd }}</div>
-      </div>
-      <div class="metric">
-        <div class="label">Leverage</div>
-        <div class="value">
-          {% if h.leverage_x %}{{ "%.2f"|format(h.leverage_x) }}x{% else %}—{% endif %}
-        </div>
-      </div>
-    </div>
-    <p class="sub inv-footnote">
-      Health factor is Eva equity divided by Eva's open position size:
-      {{ h.equity_usd|usd(decimals=0) }} of collateral behind
-      {{ h.gross_notional_usd|usd(decimals=0) }} of exposure reads
-      {% if h.health_pct is not none %}{{ h.health_pct|pct(decimals=0, sign=False) }}{% else %}—{% endif %}.
-      Higher is safer; 100% is unlevered. Above 40% is green, 20–40% amber,
-      below 20% red.
     </p>
   </section>
 
@@ -451,7 +414,7 @@
       var res = await fetch('/api/investors/snapshot' + location.search);
       if (!res.ok) return;
       var snap = await res.json();
-      var p = snap.portfolio, h = snap.health, ex = snap.exposure;
+      var p = snap.portfolio, ah = snap.account_health, ex = snap.exposure;
 
       setText('inv-updated', snap.generated_at);
       setText('inv-value', usd(p.value_usd));
@@ -464,17 +427,11 @@
       setText('inv-unrealized-pct',
         pct(p.unrealized_pct) + ' · ' + ex.open_count + ' open position' + (ex.open_count === 1 ? '' : 's'));
 
-      setText('inv-health-equity', usd(h.equity_usd));
-      setText('inv-health-notional', usd(h.gross_notional_usd));
-      var hv = document.getElementById('inv-health-pct');
-      if (hv) {
-        hv.textContent = h.health_pct === null ? '—' : Math.round(h.health_pct) + '%';
-        hv.className = 'inv-health-value badge-' + h.band;
-      }
-      var fill = document.querySelector('.inv-health-fill');
-      if (fill) {
-        fill.style.width = Math.min(h.health_pct || 0, 100) + '%';
-        fill.className = 'inv-health-fill band-' + h.band;
+      if (ah) {
+        setText('inv-acct-health-pct',
+          ah.usage_pct === null ? 'n/a' : Math.round(ah.usage_pct) + '%');
+        var pill = document.getElementById('inv-acct-health');
+        if (pill) pill.className = 'inv-acct-health band-' + ah.band;
       }
       if (p.nav_series) {
         navSeries = p.nav_series;

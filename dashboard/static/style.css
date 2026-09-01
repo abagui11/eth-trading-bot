@@ -1039,16 +1039,60 @@ a.news-title:hover {
 /* —— Investor view (/investors) —— */
 .inv-header { margin-bottom: 18px; }
 
+.inv-kicker-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  flex-wrap: wrap;
+  margin: 0 0 6px;
+}
+
 .inv-kicker {
   display: flex;
   align-items: center;
   gap: 8px;
-  margin: 0 0 6px;
+  margin: 0;
   font-size: 0.7rem;
   letter-spacing: 0.08em;
   text-transform: uppercase;
   color: var(--muted);
 }
+
+/* Coinbase-style whole-account margin usage pill (top corner). */
+.inv-acct-health {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  padding: 3px 11px;
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  font-size: 0.7rem;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--muted);
+  white-space: nowrap;
+}
+
+.inv-acct-health strong {
+  font-variant-numeric: tabular-nums;
+  font-weight: 700;
+}
+
+.inv-acct-dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: rgba(139, 148, 158, 0.6);
+}
+
+.inv-acct-health.band-good .inv-acct-dot { background: var(--good); }
+.inv-acct-health.band-good strong { color: var(--good); }
+.inv-acct-health.band-warn .inv-acct-dot { background: var(--warn); }
+.inv-acct-health.band-warn strong { color: var(--warn); }
+.inv-acct-health.band-bad { border-color: rgba(248, 81, 73, 0.6); }
+.inv-acct-health.band-bad .inv-acct-dot { background: var(--bad); }
+.inv-acct-health.band-bad strong { color: var(--bad); }
 
 .inv-hero-grid {
   display: grid;

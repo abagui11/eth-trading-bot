@@ -16,7 +16,7 @@ import bot_config
 import live_ledger
 
 from dashboard import data
-from dashboard.account import CONFIGURED_CAPITAL_USD, build_health
+from dashboard.account import CONFIGURED_CAPITAL_USD, build_account_health, build_health
 
 NAV_LOOKBACK_DAYS = 365
 
@@ -229,6 +229,9 @@ def build_investor_payload(
         equity_usd=portfolio_value,
         gross_notional_usd=exposure["gross_notional_usd"],
     )
+    # Coinbase's own margin-usage number for the whole futures account —
+    # the small corner pill, red at 80%+.
+    account_health = build_account_health()
     nav_series = build_nav_series(
         base_usd=base_usd,
         days=all_days,
@@ -240,6 +243,7 @@ def build_investor_payload(
         "generated_at": _now_iso(),
         "year": year,
         "health": health,
+        "account_health": account_health,
         "exposure": exposure,
         "portfolio": {
             "value_usd": round(portfolio_value, 2),
