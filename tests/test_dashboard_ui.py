@@ -273,6 +273,8 @@ class DashboardUiSmokeTests(unittest.TestCase):
         self.assertIn("display: flex", css)
         self.assertIn(".chart-lightbox", css)
         self.assertIn("cursor: zoom-in", css)
+        self.assertIn("tr.mill-clip-row", css)
+        self.assertIn(".mill-clip-detail", css)
         self.assertNotIn("<details", self.client.get("/").text)
         html = self.client.get("/").text
         self.assertNotIn("macro-scroll", html)
@@ -335,7 +337,43 @@ class DashboardUiSmokeTests(unittest.TestCase):
         self.assertIn("nano ETH", mill_card)
         self.assertIn("/feed", mill_card)
         self.assertIn("id=\"mill-live-open\"", mill_card)
-        self.assertNotIn("<th>Opened</th>", mill_card)
+        self.assertIn("id=\"mill-live-open-table\"", mill_card)
+        self.assertIn("id=\"mill-live-closed-table\"", mill_card)
+        self.assertIn("<th>Opened</th>", mill_card)
+        self.assertIn("<th>Closed</th>", mill_card)
+        self.assertNotIn("trade-card", mill_card)
+        self.assertIn("millClipRowHtml", html)
+        self.assertIn("initMillClipRows", html)
+
+    def test_mill_clips_render_as_expandable_table_rows(self) -> None:
+        mill_row = {
+            "id": 13,
+            "source": "mill",
+            "product_id": "BTC-USD",
+            "instrument": "BIP-20DEC30-CDE",
+            "side": "short",
+            "qty": 0.01,
+            "entry": 78305.0,
+            "stop_loss": 78629.22,
+            "take_profits_json": "[77254.43]",
+            "fill_type": "auto",
+            "opened_at": "2026-09-01T14:10:21Z",
+        }
+
+        def _open(source=None, **_kwargs):
+            return [mill_row] if source == "mill" else []
+
+        with patch("live_ledger.get_open_trades", side_effect=_open), patch(
+            "live_ledger.get_closed_trades", return_value=[]
+        ):
+            html = self.client.get("/").text
+        mill_card = html.split('id="mill-clip-card"', 1)[1].split("</section>", 1)[0]
+        self.assertIn('class="mill-clip-row"', mill_card)
+        self.assertIn("class=\"mill-clip-detail\"", mill_card)
+        self.assertIn("BIP-20DEC30-CDE", mill_card)
+        self.assertIn("R:R", mill_card)
+        self.assertNotIn('class="trade-card', mill_card)
+        self.assertNotIn("trade-summary", mill_card)
 
     def test_archived_journal_is_collapsed_with_v1_metrics(self) -> None:
         summary = {

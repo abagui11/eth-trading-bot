@@ -4,10 +4,59 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
   <title>Republic Technologies Intelligence</title>
-  <link rel="stylesheet" href="/static/style.css?v=mill3">
+  <link rel="stylesheet" href="/static/style.css?v=mill4">
 </head>
 <body>
-  {% from "_macros.html" import tip_badge, trade_card %}
+  {% macro mill_clip_detail(t, mode) -%}
+  <div class="mill-clip-detail">
+    <span>Entry <strong>${{ "%.2f"|format(t.entry) }}</strong></span>
+    {% if t.stop_loss is not none %}<span>SL <strong>${{ "%.2f"|format(t.stop_loss) }}</strong></span>{% endif %}
+    {% for r in (t.tp_progress or []) %}
+    <span>{{ r.label }} <strong>${{ "%.2f"|format(r.price) }}</strong></span>
+    {% endfor %}
+    {% if t.risk_reward is not none %}
+    <span>{{ 'Realized R' if t.risk_reward_kind == 'realized' else 'R:R' }} <strong>{{ "%.2f"|format(t.risk_reward) }}</strong></span>
+    {% endif %}
+    {% if t.size_usd is not none %}<span>Size <strong>${{ "%.0f"|format(t.size_usd) }}</strong></span>{% endif %}
+    {% if mode == 'open' and t.spot %}
+    <span>Mark <strong>${{ "%.2f"|format(t.spot) }}</strong></span>
+    {% endif %}
+    {% if mode == 'open' and t.unrealized_pnl_usd is not none %}
+    <span>Unrealized <strong class="{{ 'pos' if t.unrealized_pnl_usd >= 0 else 'neg' }}">{{ "%+.2f"|format(t.unrealized_pnl_usd) }}</strong></span>
+    {% endif %}
+  </div>
+  {%- endmacro %}
+
+  {% macro mill_open_rows(t) -%}
+  <tr class="mill-clip-row" aria-expanded="false">
+    <td>{{ (t.opened_at or '')[:16] }}</td>
+    <td>{{ t.instrument }}</td>
+    <td>{{ t.side }}</td>
+    <td>{{ "%.4f"|format(t.qty) }}</td>
+    <td>${{ "%.2f"|format(t.entry) }}</td>
+    <td>{% if t.stop_loss %}${{ "%.2f"|format(t.stop_loss) }}{% else %}—{% endif %}</td>
+  </tr>
+  <tr class="mill-clip-detail-row" hidden>
+    <td colspan="6">{{ mill_clip_detail(t, 'open') }}</td>
+  </tr>
+  {%- endmacro %}
+
+  {% macro mill_closed_rows(t) -%}
+  <tr class="mill-clip-row" aria-expanded="false">
+    <td>{{ (t.closed_at or '')[:16] }}</td>
+    <td>{{ t.instrument }}</td>
+    <td>{{ t.side }}</td>
+    <td>${{ "%.2f"|format(t.entry) }}</td>
+    <td>{% if t.exit %}${{ "%.2f"|format(t.exit) }}{% elif t.exit_price %}${{ "%.2f"|format(t.exit_price) }}{% else %}—{% endif %}</td>
+    <td class="{{ 'pos-row' if (t.pnl_usd or 0) >= 0 else 'neg-row' }}">{{ "%+.2f"|format(t.pnl_usd or 0) }}</td>
+    <td>{{ t.close_reason or '—' }}</td>
+  </tr>
+  <tr class="mill-clip-detail-row" hidden>
+    <td colspan="7">{{ mill_clip_detail(t, 'closed') }}</td>
+  </tr>
+  {%- endmacro %}
+
+  {% from "_macros.html" import trade_card %}
 
   {% macro bias_badge(side, pct, source) -%}
   {% set cls = 'badge-good' if side == 'bullish' else ('badge-bad' if side == 'bearish' else 'badge-none') %}
@@ -832,18 +881,33 @@
           </div>
         </div>
         <p class="sub news-section">Open mill clips</p>
+        <p class="sub mill-clip-hint">Click a row for TP, R:R, size, and mark.</p>
         <p class="sub" id="mill-live-open-empty"{% if mill_open %} hidden{% endif %}>No open mill clips.</p>
-        <div class="trade-list" id="mill-live-open"{% if not mill_open %} hidden{% endif %}>
-          {% for t in mill_open %}
-          {{ trade_card(t, 'open') }}
-          {% endfor %}
+        <div class="table-scroll" id="mill-live-open-table"{% if not mill_open %} hidden{% endif %}>
+          <table>
+            <thead>
+              <tr><th>Opened</th><th>Instrument</th><th>Side</th><th>Qty</th><th>Entry</th><th>Stop</th></tr>
+            </thead>
+            <tbody id="mill-live-open">
+              {% for t in mill_open %}
+              {{ mill_open_rows(t) }}
+              {% endfor %}
+            </tbody>
+          </table>
         </div>
         <p class="sub news-section">Closed mill clips</p>
         <p class="sub" id="mill-live-closed-empty"{% if mill_closed %} hidden{% endif %}>No closed mill clips yet. Fills appear here when the mill live path takes a nano ETH contract.</p>
-        <div class="trade-list" id="mill-live-closed"{% if not mill_closed %} hidden{% endif %}>
-          {% for t in mill_closed %}
-          {{ trade_card(t, 'closed') }}
-          {% endfor %}
+        <div class="table-scroll" id="mill-live-closed-table"{% if not mill_closed %} hidden{% endif %}>
+          <table>
+            <thead>
+              <tr><th>Closed</th><th>Instrument</th><th>Side</th><th>Entry</th><th>Exit</th><th>P&amp;L</th><th>Reason</th></tr>
+            </thead>
+            <tbody id="mill-live-closed">
+              {% for t in mill_closed %}
+              {{ mill_closed_rows(t) }}
+              {% endfor %}
+            </tbody>
+          </table>
         </div>
       </section>
 
@@ -1167,73 +1231,66 @@
         '</article>'
       );
     }
-    function millSetList(listId, emptyId, html, hasRows) {
-      var list = document.getElementById(listId);
+    function millTs(iso) {
+      return iso ? String(iso).slice(0, 16) : '';
+    }
+    function millSetTable(tbodyId, tableId, emptyId, html, hasRows) {
+      var tbody = document.getElementById(tbodyId);
+      var table = document.getElementById(tableId);
       var empty = document.getElementById(emptyId);
-      if (list) {
-        list.innerHTML = html;
-        list.hidden = !hasRows;
-        if (typeof initTradeCards === 'function') initTradeCards(list);
-      }
+      if (tbody) tbody.innerHTML = html;
+      if (table) table.hidden = !hasRows;
       if (empty) empty.hidden = hasRows;
+      if (tbody) initMillClipRows(tbody);
     }
-    function millBadge(text, cls) {
-      return '<span class="badge ' + (cls || 'badge-none') + '">' + millEsc(text) + '</span>';
-    }
-    function millLevel(label, value) {
-      return '<div class="level"><span class="label">' + millEsc(label) +
-        '</span><span class="value">' + value + '</span></div>';
-    }
-    function millClipCardHtml(t, mode) {
-      var open = mode === 'open';
-      var pnl = Number(t.pnl_usd || 0);
-      var label = t.product_label || t.product_id || '';
-      var side = String(t.side || '');
-      var tps = t.tp_progress || [];
-      var pips = tps.map(function (r) {
-        return '<span class="tp-pip' + (r.hit ? ' is-hit' : '') + '">' +
-          millEsc(r.label) + (r.hit ? ' ✓' : '') + '</span>';
-      }).join('');
-      var prices = open
-        ? millEsc(millPx(t.entry)) + (t.spot ? ' · mark ' + millEsc(millPx(t.spot)) : '')
-        : millEsc(millPx(t.entry)) + ' → ' + millEsc(millPx(t.exit || t.exit_price));
-      var levels = millLevel('Entry', millEsc(millPx(t.entry)));
-      if (open && t.spot) levels += millLevel('Current', millEsc(millPx(t.spot)));
-      if (open && t.unrealized_pnl_usd != null) {
-        var u = Number(t.unrealized_pnl_usd);
-        levels += millLevel('Unrealized',
-          '<span class="' + (u >= 0 ? 'pos' : 'neg') + '">' + fmtSigned(u) + '</span>');
-      }
-      if (t.stop_loss != null) levels += millLevel('SL', millEsc(millPx(t.stop_loss)));
-      tps.forEach(function (r) {
-        levels += millLevel(r.label, millEsc(millPx(r.price)));
+    function millClipDetailHtml(t, mode) {
+      var bits = [];
+      bits.push('<span>Entry <strong>' + millEsc(millPx(t.entry)) + '</strong></span>');
+      if (t.stop_loss != null) bits.push('<span>SL <strong>' + millEsc(millPx(t.stop_loss)) + '</strong></span>');
+      (t.tp_progress || []).forEach(function (r) {
+        bits.push('<span>' + millEsc(r.label) + ' <strong>' + millEsc(millPx(r.price)) + '</strong></span>');
       });
       if (t.risk_reward != null) {
         var rrLabel = t.risk_reward_kind === 'realized' ? 'Realized R' : 'R:R';
-        levels += millLevel(rrLabel, Number(t.risk_reward).toFixed(2));
+        bits.push('<span>' + millEsc(rrLabel) + ' <strong>' + Number(t.risk_reward).toFixed(2) + '</strong></span>');
       }
-      if (t.size_usd != null) levels += millLevel('Size', millEsc(millPx(t.size_usd)));
-      if (t.qty != null) {
-        levels += millLevel('Qty', Number(t.qty).toFixed(4) + ' ' + millEsc(label));
+      if (t.size_usd != null) bits.push('<span>Size <strong>' + millEsc(millPx(t.size_usd)) + '</strong></span>');
+      if (mode === 'open' && t.spot) {
+        bits.push('<span>Mark <strong>' + millEsc(millPx(t.spot)) + '</strong></span>');
+      }
+      if (mode === 'open' && t.unrealized_pnl_usd != null) {
+        var u = Number(t.unrealized_pnl_usd);
+        bits.push('<span>Unrealized <strong class="' + (u >= 0 ? 'pos' : 'neg') + '">' +
+          fmtSigned(u) + '</strong></span>');
+      }
+      return '<div class="mill-clip-detail">' + bits.join('') + '</div>';
+    }
+    function millClipRowHtml(t, mode) {
+      var open = mode === 'open';
+      var cells;
+      if (open) {
+        cells =
+          '<td>' + millEsc(millTs(t.opened_at)) + '</td>' +
+          '<td>' + millEsc(t.instrument || '') + '</td>' +
+          '<td>' + millEsc(t.side || '') + '</td>' +
+          '<td>' + (t.qty != null ? Number(t.qty).toFixed(4) : '—') + '</td>' +
+          '<td>' + millEsc(millPx(t.entry)) + '</td>' +
+          '<td>' + (t.stop_loss != null ? millEsc(millPx(t.stop_loss)) : '—') + '</td>';
+      } else {
+        var pnl = Number(t.pnl_usd || 0);
+        cells =
+          '<td>' + millEsc(millTs(t.closed_at)) + '</td>' +
+          '<td>' + millEsc(t.instrument || '') + '</td>' +
+          '<td>' + millEsc(t.side || '') + '</td>' +
+          '<td>' + millEsc(millPx(t.entry)) + '</td>' +
+          '<td>' + millEsc(millPx(t.exit != null ? t.exit : t.exit_price)) + '</td>' +
+          '<td class="' + (pnl >= 0 ? 'pos-row' : 'neg-row') + '">' + fmtSigned(pnl) + '</td>' +
+          '<td>' + millEsc(t.close_reason || '—') + '</td>';
       }
       return (
-        '<div class="trade-card' + (open ? ' trade-live' : '') + '">' +
-          '<button type="button" class="trade-summary" aria-expanded="false">' +
-            '<span class="trade-summary-main">' +
-              '<span class="trade-title"><span class="trade-chevron" aria-hidden="true">▸</span>' +
-              '<span class="trade-title-text">' + millEsc(side) + ' · ' + millEsc(label) + '</span></span>' +
-              '<span class="trade-badges">' + millBadge(label) +
-                millBadge(side, side === 'long' ? 'badge-good' : 'badge-bad') +
-                (open ? millBadge('LIVE', 'badge-live') : '') +
-              '</span>' +
-              (pips ? '<span class="tp-pips">' + pips + '</span>' : '') +
-              '<span class="trade-prices">' + prices + '</span>' +
-              '<span class="trade-pnl ' + (pnl >= 0 ? 'pos-row' : 'neg-row') + '">' +
-                fmtSigned(pnl) + '</span>' +
-            '</span>' +
-          '</button>' +
-          '<div class="trade-body" hidden><div class="levels-strip">' + levels + '</div></div>' +
-        '</div>'
+        '<tr class="mill-clip-row" aria-expanded="false">' + cells + '</tr>' +
+        '<tr class="mill-clip-detail-row" hidden><td colspan="' + (open ? 6 : 7) + '">' +
+          millClipDetailHtml(t, mode) + '</td></tr>'
       );
     }
     async function refreshMillClip() {
@@ -1263,13 +1320,13 @@
         closedEl.textContent = String(closedN) + wr;
       }
       var openHtml = (data.open || []).map(function (t) {
-        return millClipCardHtml(t, 'open');
+        return millClipRowHtml(t, 'open');
       }).join('');
-      millSetList('mill-live-open', 'mill-live-open-empty', openHtml, openN > 0);
+      millSetTable('mill-live-open', 'mill-live-open-table', 'mill-live-open-empty', openHtml, openN > 0);
       var closedHtml = (data.closed || []).map(function (t) {
-        return millClipCardHtml(t, 'closed');
+        return millClipRowHtml(t, 'closed');
       }).join('');
-      millSetList('mill-live-closed', 'mill-live-closed-empty', closedHtml, closedN > 0);
+      millSetTable('mill-live-closed', 'mill-live-closed-table', 'mill-live-closed-empty', closedHtml, closedN > 0);
     }
     async function refreshMillFunnel() {
       var res = await fetch('/api/ideas/funnel');
@@ -1506,6 +1563,30 @@
       });
     }
     initTradeCards();
+
+    function initMillClipRows(root) {
+      (root || document).querySelectorAll('tr.mill-clip-row').forEach(function (row) {
+        if (row.dataset.bound) return;
+        row.dataset.bound = '1';
+        row.tabIndex = 0;
+        function toggle() {
+          var detail = row.nextElementSibling;
+          if (!detail || !detail.classList.contains('mill-clip-detail-row')) return;
+          var open = detail.hidden;
+          detail.hidden = !open;
+          row.classList.toggle('is-open', open);
+          row.setAttribute('aria-expanded', open ? 'true' : 'false');
+        }
+        row.addEventListener('click', toggle);
+        row.addEventListener('keydown', function (ev) {
+          if (ev.key === 'Enter' || ev.key === ' ') {
+            ev.preventDefault();
+            toggle();
+          }
+        });
+      });
+    }
+    initMillClipRows();
 
     function initChartLightbox() {
       var box = document.getElementById('chart-lightbox');

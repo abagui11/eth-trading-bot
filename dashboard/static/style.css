@@ -235,6 +235,41 @@ th {
 .pos-row { color: var(--good); }
 .neg-row { color: var(--bad); }
 
+.mill-clip-hint {
+  margin: -4px 0 8px;
+  font-size: 0.75rem;
+}
+
+tr.mill-clip-row {
+  cursor: pointer;
+}
+
+tr.mill-clip-row:hover td {
+  background: rgba(255, 255, 255, 0.03);
+}
+
+tr.mill-clip-row.is-open td {
+  border-bottom-color: transparent;
+}
+
+tr.mill-clip-detail-row td {
+  background: rgba(255, 255, 255, 0.025);
+  padding: 8px 8px 12px;
+}
+
+.mill-clip-detail {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px 16px;
+  font-size: 0.78rem;
+  color: var(--muted);
+}
+
+.mill-clip-detail strong {
+  color: var(--text);
+  font-weight: 600;
+}
+
 footer {
   margin-top: 24px;
   font-size: 0.75rem;
