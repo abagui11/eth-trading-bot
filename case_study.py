@@ -23,6 +23,7 @@ import logging
 import re
 import textwrap
 import threading
+import time
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
@@ -103,10 +104,13 @@ Roles you will see (ids are 1-based, sequential, and already assigned):
   (order block, swept swing, plan). If stop_touched is false, say price never
   came back to it. If the stop later trailed, you may mention that in passing;
   the printed level is the opening stop.
-- kind=tp: a partial that paid. Name the fraction of the starting position
-  that closed (from facts.fraction_closed) and the R printed in the title.
-- kind=exit: the last remaining size. This is the "full exit" box. If
-  close_reason is stop_loss, it is a stop-out, not a target.
+- kind=tp: a partial that paid at a planned target. Only these slots paid.
+  take_profits in FACTS is the plan — do not claim a later target paid
+  unless it has a kind=tp slot of its own.
+- kind=exit: the last remaining size closed at a target. This is the
+  "full exit" box, not an extra take-profit.
+- kind=stopped: remaining size hit the (possibly trailed) stop. Treat it
+  as a stop-out even if the fill was still profitable versus entry.
 - kind=misc: ALWAYS the last id. This is the discretionary callout — the
   point of running an LLM. Look at post_exit. Typical patterns:
     * price continued then reversed, and the book was already flat
@@ -326,6 +330,31 @@ def _legs(row: dict[str, Any]) -> list[dict[str, Any]]:
     return exit_legs(row.get("exit_fills_json"))
 
 
+def _price_reached_tp(side: str, price: float, level: float) -> bool:
+    return price >= level if side == "long" else price <= level
+
+
+def _paid_tp_rungs(facts: dict[str, Any]) -> list[dict[str, Any]]:
+    """Scale-outs that actually matched a planned target, excluding the last close.
+
+    The last remaining fill is the exit/stop box — even when it tagged
+    ``take_profit`` because a trailed stop was still green versus entry.
+    """
+    final_ats = {
+        str(leg.get("at") or "")
+        for leg in facts.get("legs") or []
+        if leg.get("is_final")
+    }
+    paid: list[dict[str, Any]] = []
+    for rung in facts.get("tp_progress") or []:
+        if not rung.get("hit") or rung.get("pnl_usd") is None:
+            continue
+        if str(rung.get("at") or "") in final_ats:
+            continue
+        paid.append(rung)
+    return paid
+
+
 def build_facts(
     row: dict[str, Any],
     *,
@@ -352,11 +381,14 @@ def build_facts(
     order_block = story.get("order_block")
     if not isinstance(order_block, dict):
         order_block = None
+    from dashboard.data import build_tp_progress, ordered_take_profits, recover_opening_stop
+
     raw_initial = row.get("initial_stop_loss")
-    initial_stop = (
-        float(raw_initial)
-        if raw_initial is not None
-        else (float(story["stop_loss"]) if story.get("stop_loss") is not None else None)
+    initial_stop = recover_opening_stop(
+        side,
+        entry,
+        float(raw_initial) if raw_initial is not None else None,
+        story.get("stop_loss"),
     )
     if initial_stop is None and row.get("stop_loss") is not None:
         initial_stop = float(row["stop_loss"])
@@ -365,6 +397,8 @@ def build_facts(
         story.get("take_profits")
     )
     legs = _legs(row)
+    tp_progress = build_tp_progress(side, entry, tps, legs=legs)
+    ordered_tps = ordered_take_profits(side, tps, entry)
     notional = entry * qty if entry and qty else 0.0
     pnl = float(row.get("pnl_usd") or 0.0)
     pnl_pct = (pnl / notional * 100.0) if notional else 0.0
@@ -408,6 +442,20 @@ def build_facts(
             }
         )
 
+    # A profitable trailed stop is stored as take_profit. If the last print
+    # never reached a planned target, the chart must not call it TP3.
+    for leg in reversed(leg_facts):
+        if not leg.get("is_final"):
+            continue
+        reached = any(
+            _price_reached_tp(side, float(leg["price"]), level)
+            for level in ordered_tps
+        )
+        if str(leg.get("reason") or "") == "stop_loss" or not reached:
+            leg["reason"] = "stop_loss"
+            close_reason = "stop_loss"
+        break
+
     return {
         "trade_id": int(row["id"]),
         "source": str(row.get("source") or ""),
@@ -445,6 +493,7 @@ def build_facts(
         ),
         "stop_set_by": _stop_set_by(tags, order_block, side, initial_stop),
         "take_profits": tps,
+        "tp_progress": tp_progress,
         "legs": leg_facts,
         "risk_usd": (
             abs(entry - initial_stop) if initial_stop is not None else None
@@ -563,12 +612,12 @@ def build_slots(facts: dict[str, Any], *, copy: dict[str, Any] | None = None) ->
         )
         n += 1
 
-    tp_legs = [leg for leg in facts.get("legs") or [] if not leg.get("is_final")]
+    paid = _paid_tp_rungs(facts)
     final_legs = [leg for leg in facts.get("legs") or [] if leg.get("is_final")]
     # A single full close is the exit box, not a TP box.
-    for i, leg in enumerate(tp_legs):
-        r = _r_label(leg.get("r_multiple"))
-        frac = float(leg.get("fraction_closed") or 0)
+    for rung in paid:
+        r = _r_label(_r_multiple(entry, initial_stop, float(rung["price"])))
+        frac = (float(rung.get("qty") or 0) / float(facts.get("qty") or 1)) if facts.get("qty") else 0.0
         fallback = (
             f"Partial take-profit, {frac:.0%} of the starting position closed."
         )
@@ -576,10 +625,10 @@ def build_slots(facts: dict[str, Any], *, copy: dict[str, Any] | None = None) ->
             Slot(
                 n=n,
                 kind="tp",
-                title=f"{n} TP{i + 1} — {_fmt_px(float(leg['price']))}{r}",
+                title=f"{n} {rung['label']} — {_fmt_px(float(rung['price']))}{r}",
                 body=body_for(n, fallback),
-                price=float(leg["price"]),
-                ts=leg.get("at") or None,
+                price=float(rung["price"]),
+                ts=rung.get("at") or None,
                 place="left",
             )
         )
@@ -706,14 +755,18 @@ def fallback_copy(facts: dict[str, Any]) -> dict[str, Any]:
             )
         bodies[str(n)] = facts["stop_set_by"] + "." + extra
         n += 1
-    tp_legs = [leg for leg in facts.get("legs") or [] if not leg.get("is_final")]
+    paid = _paid_tp_rungs(facts)
     final_legs = [leg for leg in facts.get("legs") or [] if leg.get("is_final")]
-    for i, leg in enumerate(tp_legs):
-        frac = float(leg.get("fraction_closed") or 0)
-        r = leg.get("r_multiple")
+    for rung in paid:
+        frac = (float(rung.get("qty") or 0) / float(facts.get("qty") or 1)) if facts.get("qty") else 0.0
+        r = _r_multiple(
+            float(facts["entry"]),
+            facts.get("initial_stop"),
+            float(rung["price"]),
+        )
         r_bit = f", locking in {r:.1f}R" if r else ""
         bodies[str(n)] = (
-            f"Take-profit {i + 1}{r_bit}. {frac:.0%} of the starting position closed."
+            f"{rung['label']}{r_bit}. {frac:.0%} of the starting position closed."
         )
         n += 1
     for leg in final_legs:
@@ -796,6 +849,7 @@ def llm_copy(facts: dict[str, Any]) -> dict[str, Any] | None:
             "order_block",
             "legs",
             "take_profits",
+            "tp_progress",
             "post_exit",
         )
         if k in facts
@@ -854,9 +908,12 @@ def fetch_bars(facts: dict[str, Any]) -> tuple[list[dict[str, Any]], str]:
         raise ValueError("opened_at missing")
     seconds = {"ONE_MINUTE": 60, "FIVE_MINUTE": 300, "ONE_HOUR": 3600}[gran]
     pad_before = 12 * seconds
-    pad_after = 24 * seconds
+    pad_after = 8 * seconds
+    now_ts = int(time.time())
     start_ts = int(start.timestamp()) - pad_before
-    end_ts = int(end.timestamp()) + pad_after
+    end_ts = min(int(end.timestamp()) + pad_after, now_ts)
+    if start_ts >= end_ts:
+        start_ts = end_ts - max(pad_before + pad_after, 24 * seconds)
     bars = research.fetch_coinbase_candles_range(
         gran,
         start_ts,

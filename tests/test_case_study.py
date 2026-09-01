@@ -192,6 +192,63 @@ class CaseStudyRationaleTests(unittest.TestCase):
         self.assertIn("FULL EXIT", slots[-2].title)
         self.assertTrue(any(s.kind == "tp" for s in slots))
 
+    def test_runner_stopped_at_tp1_is_not_drawn_as_tp3(self) -> None:
+        """Eva #8: TP1/TP2 paid, remainder died at the trailed stop — not TP3."""
+        import case_study
+
+        row = _row(
+            side="long",
+            entry=2411.5,
+            stop_loss=2440.0,
+            initial_stop_loss=2440.0,
+            take_profits_json=json.dumps([2440.0, 2477.0, 2534.0]),
+            exit_price=2456.125,
+            close_reason="take_profit",
+            exit_fills_json=json.dumps(
+                {
+                    "a": {
+                        "qty": 0.1,
+                        "price": 2468.5,
+                        "pnl_usd": 5.7,
+                        "reason": "take_profit",
+                        "at": "2026-08-31T15:58:05Z",
+                    },
+                    "b": {
+                        "qty": 0.1,
+                        "price": 2477.0,
+                        "pnl_usd": 6.55,
+                        "reason": "take_profit",
+                        "at": "2026-08-31T16:55:27Z",
+                    },
+                    "c": {
+                        "qty": 0.2,
+                        "price": 2439.5,
+                        "pnl_usd": 5.6,
+                        "reason": "take_profit",
+                        "at": "2026-09-01T12:40:18Z",
+                    },
+                }
+            ),
+        )
+        story = _story(
+            action="deriv_buy",
+            stop_loss=2385.0,
+            take_profits=[2440.0, 2477.0, 2534.0],
+        )
+        facts = case_study.build_facts(row, story=story)
+        facts["stop_touched"] = False
+        facts["post_exit"] = {}
+        slots = case_study.build_slots(facts, copy=case_study.fallback_copy(facts))
+        titles = " ".join(s.title for s in slots)
+
+        self.assertEqual(facts["close_reason"], "stop_loss")
+        self.assertEqual(facts["initial_stop"], 2385.0)
+        self.assertIn("TP1", titles)
+        self.assertIn("TP2", titles)
+        self.assertNotIn("TP3", titles)
+        self.assertTrue(any(s.kind == "stopped" for s in slots))
+        self.assertFalse(any(s.kind == "exit" for s in slots))
+
 
 class CaseStudyGateTests(unittest.TestCase):
     def setUp(self) -> None:
@@ -405,6 +462,35 @@ class CaseStudyMacroTests(unittest.TestCase):
             )
         )
         self.assertNotIn("trade-case-study", html)
+
+
+class CandleWindowTests(unittest.TestCase):
+    def test_fetch_bars_does_not_ask_coinbase_for_the_future(self) -> None:
+        """A day-long trade plus H1 pad-after used to request candles past now."""
+        import case_study
+
+        facts = {
+            "opened_at": "2026-08-31T02:00:56Z",
+            "closed_at": "2026-09-01T12:40:18Z",
+            "product_id": "ETH-USD",
+        }
+        captured: dict[str, int | str] = {}
+
+        def fake_range(gran, start, end, product_id="ETH-USD"):
+            captured["gran"] = gran
+            captured["start"] = start
+            captured["end"] = end
+            return [{"ts": "2026-08-31T02:00:00Z", "o": 1, "h": 1, "l": 1, "c": 1, "v": 1}]
+
+        now = datetime(2026, 9, 1, 15, 20, tzinfo=timezone.utc).timestamp()
+        with (
+            patch.object(case_study.research, "fetch_coinbase_candles_range", fake_range),
+            patch.object(case_study.time, "time", return_value=now),
+        ):
+            case_study.fetch_bars(facts)
+
+        self.assertLessEqual(int(captured["end"]), int(now))
+        self.assertLess(int(captured["start"]), int(captured["end"]))
 
 
 if __name__ == "__main__":

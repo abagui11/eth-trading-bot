@@ -124,6 +124,12 @@ def fetch_coinbase_candles_range(
     product_id: str = PRODUCT_ID,
 ) -> list[dict[str, float | str]]:
     """Paginate Coinbase candles between unix start/end (inclusive window)."""
+    now = int(time.time())
+    if end_ts > now:
+        end_ts = now
+    if start_ts >= end_ts:
+        seconds = _GRANULARITY_SECONDS[granularity]
+        start_ts = end_ts - max(seconds * 24, 1)
     if start_ts >= end_ts:
         raise ValueError("start_ts must be before end_ts")
 

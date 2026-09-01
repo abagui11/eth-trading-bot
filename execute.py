@@ -79,6 +79,55 @@ def _tp_reached(side: str, price: float, level: float) -> bool:
     return price >= level if side == "long" else price <= level
 
 
+def _near_level(price: float, level: float, *, rel: float = 0.0025) -> bool:
+    band = max(1.0, abs(float(level)) * rel)
+    return abs(float(price) - float(level)) <= band
+
+
+def _bracket_triggers(order: dict[str, Any]) -> tuple[float | None, float | None]:
+    cfg = (order or {}).get("order_configuration") or {}
+    br = cfg.get("trigger_bracket_gtc") or {}
+    limit = float(br.get("limit_price") or 0) or None
+    stop = float(br.get("stop_trigger_price") or 0) or None
+    return limit, stop
+
+
+def _is_plain_stop_order(order: dict[str, Any]) -> bool:
+    cfg = (order or {}).get("order_configuration") or {}
+    return any("stop" in str(k).lower() and "bracket" not in str(k).lower() for k in cfg)
+
+
+def _classify_fill_reason(
+    order: dict[str, Any],
+    *,
+    side: str,
+    entry: float,
+    price: float,
+    take_profits: list[float] | None,
+    stop_loss: float | None,
+) -> str:
+    """Take-profit vs stop from the order that filled, not from P&L sign.
+
+    A stop that has trailed to breakeven or TP1 still books a profit. Tagging
+    that remainder as take_profit lit TP3 on the card and counted an extra
+    trail step, even though price never reached the last target.
+    """
+    limit, br_stop = _bracket_triggers(order)
+    if limit and br_stop:
+        if abs(price - br_stop) <= abs(price - limit):
+            return "stop_loss"
+        return "take_profit"
+    if _is_plain_stop_order(order):
+        return "stop_loss"
+    ordered = _ordered_tps(side, take_profits, entry)
+    if any(_near_level(price, level) for level in ordered):
+        return "take_profit"
+    if stop_loss is not None and _near_level(price, float(stop_loss)):
+        return "stop_loss"
+    direction = 1.0 if side == "long" else -1.0
+    return "take_profit" if (price - entry) * direction > 0 else "stop_loss"
+
+
 def arm_exits(
     gw: Any,
     *,
@@ -286,11 +335,44 @@ def _trailed_stop(
 
 
 def _tps_taken(trade: dict[str, Any]) -> int:
+    """How many ladder rungs price has actually reached.
+
+    Counting ``reason == take_profit`` legs is wrong once a profitable stop
+    (trailed to TP1) is mis-tagged — that looked like TP3 and the trail jumped
+    a level. Prefix-count of rungs the fill prices have reached matches what
+    the exchange did.
+    """
     try:
         fills = json.loads(trade.get("exit_fills_json") or "{}")
     except json.JSONDecodeError:
         return 0
-    return sum(1 for f in fills.values() if f.get("reason") == "take_profit")
+    side = str(trade.get("side") or "")
+    entry = float(trade.get("entry") or 0)
+    ordered = _ordered_tps(side, _as_tp_list(trade.get("take_profits_json")), entry)
+    prices: list[float] = []
+    reason_hits = 0
+    for fill in fills.values():
+        if not isinstance(fill, dict):
+            continue
+        if fill.get("reason") == "take_profit":
+            reason_hits += 1
+        if fill.get("reason") == "stop_loss":
+            continue
+        try:
+            px = float(fill.get("price") or 0)
+        except (TypeError, ValueError):
+            continue
+        if px > 0:
+            prices.append(px)
+    if ordered and prices:
+        count = 0
+        for level in ordered:
+            if any(_tp_reached(side, px, level) for px in prices):
+                count += 1
+            else:
+                break
+        return count
+    return reason_hits
 
 
 def _improves_stop(side: str, old: float | None, new: float) -> bool:
@@ -1070,7 +1152,14 @@ def _reconcile_trade(gw: Any, trade: dict[str, Any]) -> None:
         if qty <= 0 or price <= 0:
             continue
         pnl = (price - entry) * qty * direction
-        reason = "take_profit" if pnl > 0 else "stop_loss"
+        reason = _classify_fill_reason(
+            order,
+            side=str(trade["side"]),
+            entry=entry,
+            price=price,
+            take_profits=_as_tp_list(trade.get("take_profits_json")),
+            stop_loss=trade.get("stop_loss"),
+        )
         if live_ledger.record_partial_exit(
             trade_id,
             exit_qty=qty,

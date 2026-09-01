@@ -258,6 +258,21 @@ class InvestorPageTests(unittest.TestCase):
         self.assertEqual(series[-2]["value"], 2000.0)
         self.assertEqual(series[-1]["value"], 2025.7)
 
+    def test_daily_pct_is_of_position_notional_not_sleeve(self) -> None:
+        self.live_ledger.record_close(
+            self.trade_id, exit_price=2100.0, pnl_usd=210.0, close_reason="take_profit"
+        )
+        days = self.live_ledger.get_realized_by_day()
+
+        self.assertEqual(days[0]["position_notional_usd"], 4200.0)
+        self.assertEqual(days[0]["realized_pct_of_position"], 5.0)
+
+        html = self.client.get("/investors").text
+        self.assertIn("% of position", html)
+        self.assertNotIn("% of base", html)
+        self.assertNotIn(">Closed</th>", html)
+        self.assertNotIn(">Wins</th>", html)
+
 
 class InvestorAccessTests(unittest.TestCase):
     """The link is meant to be forwarded, so the token has to survive a share."""
@@ -398,6 +413,38 @@ class TpLadderTests(unittest.TestCase):
         self.assertTrue(rungs[0]["hit"])
         self.assertFalse(rungs[1]["hit"])
         self.assertIsNone(rungs[0]["pnl_usd"])
+
+    def test_a_profitable_stop_does_not_light_the_unreached_target(self) -> None:
+        """Eva #8: TP1 gap-through, TP2 filled, runner stopped at TP1 — not TP3."""
+        from dashboard.data import build_tp_progress
+
+        legs = [
+            {"reason": "take_profit", "price": 2468.5, "pnl_usd": 5.7, "qty": 0.1, "at": "a"},
+            {"reason": "take_profit", "price": 2477.0, "pnl_usd": 6.55, "qty": 0.1, "at": "b"},
+            {"reason": "take_profit", "price": 2439.5, "pnl_usd": 5.6, "qty": 0.2, "at": "c"},
+        ]
+        rungs = build_tp_progress(
+            "long", 2411.5, [2440.0, 2477.0, 2534.0], legs=legs
+        )
+
+        self.assertTrue(rungs[0]["hit"])
+        self.assertTrue(rungs[1]["hit"])
+        self.assertFalse(rungs[2]["hit"])
+        self.assertEqual(rungs[0]["pnl_usd"], 5.7)
+        self.assertEqual(rungs[1]["pnl_usd"], 6.55)
+
+    def test_opening_stop_above_entry_is_a_trailed_backfill(self) -> None:
+        from dashboard.data import recover_opening_stop
+
+        self.assertEqual(
+            recover_opening_stop("long", 2411.5, 2440.0, 2385.0), 2385.0
+        )
+        self.assertEqual(
+            recover_opening_stop("long", 2411.5, 2440.0, None), 2411.5
+        )
+        self.assertEqual(
+            recover_opening_stop("long", 2411.5, 2385.0, 2380.0), 2385.0
+        )
 
 
 if __name__ == "__main__":

@@ -84,11 +84,16 @@ def _daily_stats(days: list[dict[str, Any]], today: str) -> dict[str, Any]:
     green = [d for d in traded if d["realized_pnl_usd"] > 0]
     red = [d for d in traded if d["realized_pnl_usd"] < 0]
     today_row = next((d for d in days if d["date"] == today), None)
+    ytd_usd = round(sum(d["realized_pnl_usd"] for d in days), 2)
+    ytd_notional = sum(float(d.get("position_notional_usd") or 0.0) for d in days)
     return {
         "today_usd": round(float((today_row or {}).get("realized_pnl_usd") or 0.0), 2),
         "today_closed": int((today_row or {}).get("closed_n") or 0),
         "today_exits": int((today_row or {}).get("exits_n") or 0),
-        "ytd_usd": round(sum(d["realized_pnl_usd"] for d in days), 2),
+        "ytd_usd": ytd_usd,
+        "ytd_position_pct": (
+            round(ytd_usd / ytd_notional * 100.0, 2) if ytd_notional else None
+        ),
         "trading_days": len(traded),
         "green_days": len(green),
         "red_days": len(red),

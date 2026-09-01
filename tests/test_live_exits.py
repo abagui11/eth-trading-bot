@@ -307,6 +307,22 @@ class TrailedStopTests(unittest.TestCase):
         self.assertTrue(live_exec._improves_stop("short", 2450.0, 2411.5))
         self.assertFalse(live_exec._improves_stop("short", 2411.5, 2450.0))
 
+    def test_counts_rungs_price_actually_reached(self) -> None:
+        """A profitable stop at TP1 is not a third take-profit."""
+        trade = {
+            "side": "long",
+            "entry": 2411.5,
+            "take_profits_json": json.dumps([2440.0, 2477.0, 2534.0]),
+            "exit_fills_json": json.dumps(
+                {
+                    "a": {"reason": "take_profit", "price": 2468.5},
+                    "b": {"reason": "take_profit", "price": 2477.0},
+                    "c": {"reason": "take_profit", "price": 2439.5},
+                }
+            ),
+        }
+        self.assertEqual(live_exec._tps_taken(trade), 2)
+
     def test_counts_only_take_profit_legs(self) -> None:
         trade = {
             "exit_fills_json": json.dumps(
@@ -713,6 +729,43 @@ class ReconcileTests(LedgerDbTestCase):
         self.assertEqual(row["status"], "closed")
         self.assertEqual(row["close_reason"], "stop_loss")
         gw.cancel_orders.assert_any_call(["br-2440", "br-2534"])
+
+    def test_trailed_stop_fill_is_not_tagged_take_profit(self) -> None:
+        """P&L sign is the wrong signal once the stop has moved to TP1."""
+        tid = self._open_trade(exit_order_ids=["br-2534"])
+        live_ledger.record_partial_exit(
+            tid, exit_qty=0.1, exit_price=2468.5, pnl_usd=5.7,
+            order_id="br-2440", reason="take_profit",
+        )
+        live_ledger.record_partial_exit(
+            tid, exit_qty=0.1, exit_price=2477.0, pnl_usd=6.55,
+            order_id="br-2477", reason="take_profit",
+        )
+        live_ledger.set_stop_loss(tid, 2440.0)
+        gw = MagicMock()
+        gw.contract_size.return_value = 0.1
+        gw.get_position.return_value = {"size": 0.0, "mark_price": 2439.5}
+        gw.get_open_orders.return_value = []
+        gw.get_order.return_value = {
+            "status": "FILLED",
+            "filled_size": "2",
+            "average_filled_price": "2439.5",
+            "order_configuration": {
+                "trigger_bracket_gtc": {
+                    "base_size": "2",
+                    "limit_price": "2534",
+                    "stop_trigger_price": "2440",
+                }
+            },
+        }
+        with patch.object(live_exec, "get_gateway", return_value=gw):
+            live_exec.sync_live_positions()
+
+        row = live_ledger.get_trade(tid)
+        self.assertEqual(row["status"], "closed")
+        self.assertEqual(row["close_reason"], "stop_loss")
+        fills = json.loads(row["exit_fills_json"])
+        self.assertEqual(fills["br-2534"]["reason"], "stop_loss")
 
     def test_manual_flatten_closes_the_remainder_at_mark(self) -> None:
         tid = self._open_trade(exit_order_ids=["br-2440"])

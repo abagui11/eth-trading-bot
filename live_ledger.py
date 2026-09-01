@@ -432,10 +432,13 @@ def get_realized_by_day(
                 # when nothing closed, and "0 closed" next to a positive number
                 # reads like a bug.
                 "exits_n": 0,
+                "position_notional_usd": 0.0,
             },
         )
 
     for row in rows:
+        entry = float(row.get("entry") or 0)
+        qty = float(row.get("qty") or 0)
         if str(row.get("status")) == "closed":
             day = str(row.get("closed_at") or "")[:10]
             if not day:
@@ -445,6 +448,7 @@ def get_realized_by_day(
             bucket["realized_pnl_usd"] += pnl
             bucket["closed_n"] += 1
             bucket["exits_n"] += 1
+            bucket["position_notional_usd"] += abs(entry * qty)
             if pnl > 0:
                 bucket["wins"] += 1
             continue
@@ -463,12 +467,24 @@ def get_realized_by_day(
             bucket = _bucket(day)
             bucket["realized_pnl_usd"] += float(leg.get("pnl_usd") or 0.0)
             bucket["exits_n"] += 1
+            bucket["position_notional_usd"] += abs(entry * float(leg.get("qty") or 0))
 
-    out = [
-        {**d, "realized_pnl_usd": round(d["realized_pnl_usd"], 2)}
-        for d in days.values()
-        if year is None or d["date"][:4] == str(year)
-    ]
+    out = []
+    for d in days.values():
+        if year is not None and d["date"][:4] != str(year):
+            continue
+        notional = d["position_notional_usd"]
+        pnl = round(d["realized_pnl_usd"], 2)
+        out.append(
+            {
+                **d,
+                "realized_pnl_usd": pnl,
+                "position_notional_usd": round(notional, 2),
+                "realized_pct_of_position": (
+                    round(pnl / notional * 100.0, 2) if notional else None
+                ),
+            }
+        )
     out.sort(key=lambda d: d["date"], reverse=True)
     return out
 

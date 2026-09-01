@@ -540,13 +540,19 @@ def enrich_live_trades(
         # back to the originating suggestion, which is only the *planned* stop
         # (revalidation can re-anchor it at fill time) but is better than none.
         raw_initial = row.get("initial_stop_loss")
-        initial_stop = (
-            float(raw_initial) if raw_initial is not None else story.get("stop_loss")
-        )
         tps = _as_float_list(row.get("take_profits_json")) or _as_float_list(
             story.get("take_profits")
         )
         legs = exit_legs(row.get("exit_fills_json"))
+        # initial_stop_loss was backfilled from stop_loss for rows opened
+        # before the column existed. If that copy landed after a trail, the
+        # "opening" stop is already at TP1 and the card thinks nothing moved.
+        initial_stop = recover_opening_stop(
+            side,
+            entry,
+            float(raw_initial) if raw_initial is not None else None,
+            story.get("stop_loss"),
+        )
 
         if closed:
             exit_price = float(row.get("exit_price") or 0) or None
@@ -693,6 +699,35 @@ def _distance_to_tp_pct(side: str, spot: float, take_profits: list[float]) -> fl
     return abs(float(target) - spot) / spot * 100.0
 
 
+def _tp_price_reached(side: str, price: float, level: float) -> bool:
+    return price >= level if side == "long" else price <= level
+
+
+def recover_opening_stop(
+    side: str,
+    entry: float,
+    ledger_initial: float | None,
+    planned: float | None,
+) -> float | None:
+    """Prefer the planned stop when the ledger 'initial' is already a trail.
+
+    ``initial_stop_loss`` was backfilled from ``stop_loss`` for rows that
+    opened before the column existed. If that copy happened after a trail,
+    a long's opening stop sits *above* entry and the UI hides the SL pip.
+    """
+    if ledger_initial is None:
+        return float(planned) if planned is not None else None
+    initial = float(ledger_initial)
+    if not entry:
+        return initial
+    already_trailed = (side == "long" and initial > entry) or (
+        side == "short" and initial < entry
+    )
+    if already_trailed:
+        return float(planned) if planned is not None else float(entry)
+    return initial
+
+
 def ordered_take_profits(
     side: str, take_profits: list[float], entry: float
 ) -> list[float]:
@@ -753,25 +788,74 @@ def build_tp_progress(
     """Per-target ladder state: which rungs paid out, and for how much.
 
     The live book has no tp1/tp2/tp3 columns — a target hit is a booked exit
-    leg — so the count comes from the legs and the money comes with it. Paper
-    positions carry a plain ``tps_hit`` counter instead and have no per-leg
-    P&L, so those rungs show as hit with no amount.
+    leg — so which rungs paid is inferred from fill *prices*, not from how
+    many legs were tagged ``take_profit``. A profitable stop (trailed to TP1)
+    used to light TP3 because it was the third green fill. Paper positions
+    carry a plain ``tps_hit`` counter instead and have no per-leg P&L, so
+    those rungs show as hit with no amount.
     """
     ladder = ordered_take_profits(side, take_profits, entry)
     if not ladder:
         return []
-    tp_legs = [leg for leg in (legs or []) if leg.get("reason") == "take_profit"]
-    hit_count = len(tp_legs) if legs is not None else int(tps_hit or 0)
     direction = 1.0 if side == "long" else -1.0
+    assignments: list[dict[str, Any] | None] = [None] * len(ladder)
+    if legs is None:
+        hit_flags = [idx < int(tps_hit or 0) for idx in range(len(ladder))]
+    else:
+        prices: list[float] = []
+        for leg in legs:
+            if str(leg.get("reason") or "") == "stop_loss":
+                continue
+            try:
+                px = float(leg.get("price") or 0)
+            except (TypeError, ValueError):
+                continue
+            if px > 0:
+                prices.append(px)
+        if prices:
+            still_reaching = True
+            hit_flags = []
+            for level in ladder:
+                reached = still_reaching and any(
+                    _tp_price_reached(side, px, level) for px in prices
+                )
+                if not reached:
+                    still_reaching = False
+                hit_flags.append(reached)
+            for leg in legs:
+                if str(leg.get("reason") or "") == "stop_loss":
+                    continue
+                try:
+                    px = float(leg.get("price") or 0)
+                except (TypeError, ValueError):
+                    continue
+                if px <= 0:
+                    continue
+                best: int | None = None
+                for idx, level in enumerate(ladder):
+                    if assignments[idx] is not None:
+                        continue
+                    if _tp_price_reached(side, px, level):
+                        best = idx
+                    else:
+                        break
+                if best is not None:
+                    assignments[best] = leg
+        else:
+            tp_legs = [leg for leg in legs if leg.get("reason") == "take_profit"]
+            hit_flags = [idx < len(tp_legs) for idx in range(len(ladder))]
+            for idx, leg in enumerate(tp_legs):
+                if idx < len(assignments):
+                    assignments[idx] = leg
 
     rungs: list[dict[str, Any]] = []
     for idx, price in enumerate(ladder):
-        leg = tp_legs[idx] if idx < len(tp_legs) else None
+        leg = assignments[idx]
         rungs.append(
             {
                 "label": f"TP{idx + 1}",
                 "price": round(float(price), 2),
-                "hit": idx < hit_count,
+                "hit": hit_flags[idx],
                 "pnl_usd": round(leg["pnl_usd"], 2) if leg else None,
                 "qty": leg["qty"] if leg else None,
                 "at": leg["at"] if leg else None,
