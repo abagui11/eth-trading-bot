@@ -4,7 +4,7 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
   <title>Republic Technologies Intelligence</title>
-  <link rel="stylesheet" href="/static/style.css?v=mill4">
+  <link rel="stylesheet" href="/static/style.css?v=mill5">
 </head>
 <body>
   {% macro mill_clip_detail(t, mode) -%}
@@ -22,7 +22,10 @@
     <span>Mark <strong>${{ "%.2f"|format(t.spot) }}</strong></span>
     {% endif %}
     {% if mode == 'open' and t.unrealized_pnl_usd is not none %}
-    <span>Unrealized <strong class="{{ 'pos' if t.unrealized_pnl_usd >= 0 else 'neg' }}">{{ "%+.2f"|format(t.unrealized_pnl_usd) }}</strong></span>
+    <span>Unrealized <strong class="{{ 'pos' if t.unrealized_pnl_usd >= 0 else 'neg' }}">{{ "%+.2f"|format(t.unrealized_pnl_usd) }}{% if t.unrealized_pnl_pct is not none %} ({{ "%+.2f"|format(t.unrealized_pnl_pct) }}%){% endif %}</strong></span>
+    {% endif %}
+    {% if mode != 'open' and t.pnl_pct is not none %}
+    <span>P&amp;L <strong class="{{ 'pos' if (t.pnl_usd or 0) >= 0 else 'neg' }}">{{ "%+.2f"|format(t.pnl_usd or 0) }} ({{ "%+.2f"|format(t.pnl_pct) }}%)</strong></span>
     {% endif %}
   </div>
   {%- endmacro %}
@@ -35,9 +38,10 @@
     <td>{{ "%.4f"|format(t.qty) }}</td>
     <td>${{ "%.2f"|format(t.entry) }}</td>
     <td>{% if t.stop_loss %}${{ "%.2f"|format(t.stop_loss) }}{% else %}—{% endif %}</td>
+    <td class="{{ 'pos-row' if (t.pnl_usd or 0) >= 0 else 'neg-row' }}">{{ "%+.2f"|format(t.pnl_usd or 0) }} <span class="mill-pnl-pct">({{ "%+.2f"|format(t.pnl_pct or 0) }}%)</span></td>
   </tr>
   <tr class="mill-clip-detail-row" hidden>
-    <td colspan="6">{{ mill_clip_detail(t, 'open') }}</td>
+    <td colspan="7">{{ mill_clip_detail(t, 'open') }}</td>
   </tr>
   {%- endmacro %}
 
@@ -48,7 +52,7 @@
     <td>{{ t.side }}</td>
     <td>${{ "%.2f"|format(t.entry) }}</td>
     <td>{% if t.exit %}${{ "%.2f"|format(t.exit) }}{% elif t.exit_price %}${{ "%.2f"|format(t.exit_price) }}{% else %}—{% endif %}</td>
-    <td class="{{ 'pos-row' if (t.pnl_usd or 0) >= 0 else 'neg-row' }}">{{ "%+.2f"|format(t.pnl_usd or 0) }}</td>
+    <td class="{{ 'pos-row' if (t.pnl_usd or 0) >= 0 else 'neg-row' }}">{{ "%+.2f"|format(t.pnl_usd or 0) }} <span class="mill-pnl-pct">({{ "%+.2f"|format(t.pnl_pct or 0) }}%)</span></td>
     <td>{{ t.close_reason or '—' }}</td>
   </tr>
   <tr class="mill-clip-detail-row" hidden>
@@ -886,7 +890,7 @@
         <div class="table-scroll" id="mill-live-open-table"{% if not mill_open %} hidden{% endif %}>
           <table>
             <thead>
-              <tr><th>Opened</th><th>Instrument</th><th>Side</th><th>Qty</th><th>Entry</th><th>Stop</th></tr>
+              <tr><th>Opened</th><th>Instrument</th><th>Side</th><th>Qty</th><th>Entry</th><th>Stop</th><th>P&amp;L</th></tr>
             </thead>
             <tbody id="mill-live-open">
               {% for t in mill_open %}
@@ -1243,6 +1247,15 @@
       if (empty) empty.hidden = hasRows;
       if (tbody) initMillClipRows(tbody);
     }
+    function millPctOfSize(usd, pct) {
+      var n = Number(usd || 0);
+      var cls = n >= 0 ? 'pos-row' : 'neg-row';
+      var pctTxt = pct != null
+        ? ' <span class="mill-pnl-pct">(' + (Number(pct) >= 0 ? '+' : '') +
+          Number(pct).toFixed(2) + '%)</span>'
+        : '';
+      return '<td class="' + cls + '">' + fmtSigned(n) + pctTxt + '</td>';
+    }
     function millClipDetailHtml(t, mode) {
       var bits = [];
       bits.push('<span>Entry <strong>' + millEsc(millPx(t.entry)) + '</strong></span>');
@@ -1260,8 +1273,18 @@
       }
       if (mode === 'open' && t.unrealized_pnl_usd != null) {
         var u = Number(t.unrealized_pnl_usd);
+        var up = t.unrealized_pnl_pct != null
+          ? ' (' + (Number(t.unrealized_pnl_pct) >= 0 ? '+' : '') +
+            Number(t.unrealized_pnl_pct).toFixed(2) + '%)'
+          : '';
         bits.push('<span>Unrealized <strong class="' + (u >= 0 ? 'pos' : 'neg') + '">' +
-          fmtSigned(u) + '</strong></span>');
+          fmtSigned(u) + up + '</strong></span>');
+      }
+      if (mode !== 'open' && t.pnl_pct != null) {
+        var p = Number(t.pnl_usd || 0);
+        bits.push('<span>P&amp;L <strong class="' + (p >= 0 ? 'pos' : 'neg') + '">' +
+          fmtSigned(p) + ' (' + (Number(t.pnl_pct) >= 0 ? '+' : '') +
+          Number(t.pnl_pct).toFixed(2) + '%)</strong></span>');
       }
       return '<div class="mill-clip-detail">' + bits.join('') + '</div>';
     }
@@ -1275,21 +1298,21 @@
           '<td>' + millEsc(t.side || '') + '</td>' +
           '<td>' + (t.qty != null ? Number(t.qty).toFixed(4) : '—') + '</td>' +
           '<td>' + millEsc(millPx(t.entry)) + '</td>' +
-          '<td>' + (t.stop_loss != null ? millEsc(millPx(t.stop_loss)) : '—') + '</td>';
+          '<td>' + (t.stop_loss != null ? millEsc(millPx(t.stop_loss)) : '—') + '</td>' +
+          millPctOfSize(t.pnl_usd, t.pnl_pct);
       } else {
-        var pnl = Number(t.pnl_usd || 0);
         cells =
           '<td>' + millEsc(millTs(t.closed_at)) + '</td>' +
           '<td>' + millEsc(t.instrument || '') + '</td>' +
           '<td>' + millEsc(t.side || '') + '</td>' +
           '<td>' + millEsc(millPx(t.entry)) + '</td>' +
           '<td>' + millEsc(millPx(t.exit != null ? t.exit : t.exit_price)) + '</td>' +
-          '<td class="' + (pnl >= 0 ? 'pos-row' : 'neg-row') + '">' + fmtSigned(pnl) + '</td>' +
+          millPctOfSize(t.pnl_usd, t.pnl_pct) +
           '<td>' + millEsc(t.close_reason || '—') + '</td>';
       }
       return (
         '<tr class="mill-clip-row" aria-expanded="false">' + cells + '</tr>' +
-        '<tr class="mill-clip-detail-row" hidden><td colspan="' + (open ? 6 : 7) + '">' +
+        '<tr class="mill-clip-detail-row" hidden><td colspan="7">' +
           millClipDetailHtml(t, mode) + '</td></tr>'
       );
     }

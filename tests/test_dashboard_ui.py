@@ -275,6 +275,7 @@ class DashboardUiSmokeTests(unittest.TestCase):
         self.assertIn("cursor: zoom-in", css)
         self.assertIn("tr.mill-clip-row", css)
         self.assertIn(".mill-clip-detail", css)
+        self.assertIn(".mill-pnl-pct", css)
         self.assertNotIn("<details", self.client.get("/").text)
         html = self.client.get("/").text
         self.assertNotIn("macro-scroll", html)
@@ -341,8 +342,10 @@ class DashboardUiSmokeTests(unittest.TestCase):
         self.assertIn("id=\"mill-live-closed-table\"", mill_card)
         self.assertIn("<th>Opened</th>", mill_card)
         self.assertIn("<th>Closed</th>", mill_card)
+        self.assertIn("<th>P&amp;L</th>", mill_card)
         self.assertNotIn("trade-card", mill_card)
         self.assertIn("millClipRowHtml", html)
+        self.assertIn("millPctOfSize", html)
         self.assertIn("initMillClipRows", html)
 
     def test_mill_clips_render_as_expandable_table_rows(self) -> None:
@@ -360,11 +363,32 @@ class DashboardUiSmokeTests(unittest.TestCase):
             "opened_at": "2026-09-01T14:10:21Z",
         }
 
+        mill_closed = {
+            "id": 12,
+            "source": "mill",
+            "product_id": "BTC-USD",
+            "instrument": "BIP-20DEC30-CDE",
+            "side": "short",
+            "qty": 0.01,
+            "entry": 78305.0,
+            "exit_price": 77250.0,
+            "stop_loss": 78629.22,
+            "take_profits_json": "[77254.43]",
+            "fill_type": "auto",
+            "opened_at": "2026-09-01T14:10:21Z",
+            "closed_at": "2026-09-01T14:40:00Z",
+            "close_reason": "take_profit",
+            "pnl_usd": 10.55,
+        }
+
         def _open(source=None, **_kwargs):
             return [mill_row] if source == "mill" else []
 
+        def _closed(limit=20, source=None, **_kwargs):
+            return [mill_closed] if source == "mill" else []
+
         with patch("live_ledger.get_open_trades", side_effect=_open), patch(
-            "live_ledger.get_closed_trades", return_value=[]
+            "live_ledger.get_closed_trades", side_effect=_closed
         ):
             html = self.client.get("/").text
         mill_card = html.split('id="mill-clip-card"', 1)[1].split("</section>", 1)[0]
@@ -372,6 +396,10 @@ class DashboardUiSmokeTests(unittest.TestCase):
         self.assertIn("class=\"mill-clip-detail\"", mill_card)
         self.assertIn("BIP-20DEC30-CDE", mill_card)
         self.assertIn("R:R", mill_card)
+        self.assertIn("class=\"mill-pnl-pct\"", mill_card)
+        # 10.55 / (78305 * 0.01) = 1.347% of clip notional.
+        self.assertIn("+10.55", mill_card)
+        self.assertIn("(+1.35%)", mill_card)
         self.assertNotIn('class="trade-card', mill_card)
         self.assertNotIn("trade-summary", mill_card)
 
