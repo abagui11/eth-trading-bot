@@ -568,6 +568,21 @@ def create_app() -> FastAPI:
             raise HTTPException(status_code=404, detail="H4 chart not found")
         return FileResponse(path, media_type="image/png")
 
+    @app.get("/api/live-chart/{trade_id}")
+    async def api_live_chart(trade_id: int) -> FileResponse:
+        """Annotated Eva close chart. HQ closed trades only."""
+        row = live_ledger.get_trade(int(trade_id))
+        if (
+            not row
+            or str(row.get("source") or "") != "hq"
+            or str(row.get("status") or "") != "closed"
+        ):
+            raise HTTPException(status_code=404, detail="Chart not found")
+        path = resolve_chart_path(row.get("case_study_path"))
+        if path is None:
+            raise HTTPException(status_code=404, detail="Chart not found")
+        return FileResponse(path, media_type="image/png")
+
     @app.get("/api/chart/{cycle_id}")
     async def api_chart_cycle(
         cycle_id: str,

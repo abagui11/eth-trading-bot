@@ -46,6 +46,7 @@ _TIMEFRAME_CONFIG: dict[str, dict[str, Any]] = {
 STRATEGY_TIMEFRAMES = ("H4", "H1", "M5")
 
 _GRANULARITY_SECONDS = {
+    "ONE_MINUTE": 60,
     "FIVE_MINUTE": 300,
     "FIFTEEN_MINUTE": 900,
     "ONE_HOUR": 3600,

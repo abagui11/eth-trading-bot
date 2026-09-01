@@ -1145,6 +1145,13 @@ def _close_out(
         )
     if str(row.get("source") or "") == "mill":
         _refill_mill_sleeve()
+    elif str(row.get("source") or "") == "hq":
+        try:
+            import case_study
+
+            case_study.queue_generate(trade_id)
+        except Exception:
+            logger.exception("Case study queue failed for live trade #%s", trade_id)
 
 
 def _refill_mill_sleeve() -> None:

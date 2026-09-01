@@ -267,6 +267,7 @@ class DashboardUiSmokeTests(unittest.TestCase):
             self.assertNotIn(dead, css)
         self.assertIn(".trade-thumb-wrap", css)
         self.assertIn(".trade-chart .chart-img", css)
+        self.assertIn(".trade-case-study", css)
         self.assertIn("height: 200px", css)
         self.assertIn("gap: 20px", css)
         self.assertIn("display: flex", css)

@@ -24,6 +24,11 @@ INCLUDE_PATTERN_IMAGES = False
 # LLM rewrite of trade-card blurbs (else deterministic_setup_blurb).
 USE_LLM_DISPLAY_SUMMARY = False
 
+# Annotated close-chart for Eva (HQ) live trades. One Haiku call per close;
+# numbers always come from the ledger. Off skips generation entirely.
+CASE_STUDY_ENABLED = True
+USE_LLM_CASE_STUDY = True
+
 # Fixed-fraction position sizing: each trade deploys this fraction of live paper
 # equity as notional (cash + open positions marked to spot). R/R, stop, and
 # take-profit logic are unaffected — this only sets trade size.

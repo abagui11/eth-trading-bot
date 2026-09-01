@@ -483,6 +483,30 @@ a { color: var(--accent); }
   max-width: 100%;
 }
 
+.trade-case-study {
+  margin: 12px 0 8px;
+}
+
+.trade-case-study .chart-img {
+  width: 100%;
+  height: auto;
+  max-height: none;
+  object-fit: contain;
+  object-position: center top;
+  background: #131722;
+  border-radius: 8px;
+  border: 1px solid var(--border);
+}
+
+.trade-case-study figcaption {
+  font-size: 0.7rem;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  color: var(--muted);
+  margin-bottom: 6px;
+  font-weight: 600;
+}
+
 .trade-chart {
   margin: 0;
   min-width: 0;

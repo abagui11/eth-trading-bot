@@ -3,7 +3,7 @@
 > Single source of truth for architecture and status of the Telegram trading bot.
 > See **Documentation maintenance** below — update this file (and related deploy docs) whenever behaviour changes.
 
-**Last updated:** 2026-08-27
+**Last updated:** 2026-09-01
 
 ---
 
@@ -241,7 +241,7 @@ Writers → stores:
 | `audit_snapshots` | hourly cycle | dashboard, chat, monitor |
 | `audit_verdicts` | hourly monitor, chat audit | dashboard |
 | `chat_audits` | chat Q&A | — |
-| `charts/` PNGs | hourly/watchdog output charts; `paper` close → `{cycle}_H4|M5_outcome.png` | dashboard `/api/chart`, Telegram |
+| `charts/` PNGs | hourly/watchdog output charts; `paper` close → `{cycle}_H4|M5_outcome.png`; HQ live close → `case_study_hq_{id}.png` | dashboard `/api/chart`, `/api/live-chart/{id}`, Telegram |
 
 ---
 
@@ -275,7 +275,8 @@ Legend: ✅ done · 🟡 in progress · 🔧 needs work · ⬜ planned · ⚠️
 | Telegram beta UI | `bot.py`, `telegram_ui.py`, `display_summary.py` | ✅ | Open account / My Metrics / My book / Journal / Research; trade Yes/No/Join/See more; concise cards (deterministic blurb by default) |
 | Decision chart | `charts.build_decision_chart` | ✅ | clean candles + red SL / green TP1 bands with % annotations; source/SL/TP-reference-aware M5 history (up to 300 bars) |
 | Dashboard | `dashboard/` | ✅ | Intelligence hub: Brain (vision) · Eva Trades (HQ ICT live + paper) · Yield Generation · Trade mill (idea stream + nano-ETH live clip). Consumer `/feed` + `/me` |
-| Investor view | `dashboard/investor.py`, `templates/investors.html` | ✅ | Private `/investors` link: Eva portfolio value with week/month/year chart, realized day/YTD, unrealized, health factor, every open Eva position (size + liq price), per-day P&L. Token-gated via `INVESTOR_ACCESS_TOKEN`, `noindex`, unlinked from the hub |
+| Investor view | `dashboard/investor.py`, `templates/investors.html` | ✅ | Private `/investors` link: Eva portfolio value with week/month/year chart, realized day/YTD, unrealized, health factor, every open Eva position (size + liq price), per-day P&L, annotated case-study chart on closed cards. Token-gated via `INVESTOR_ACCESS_TOKEN`, `noindex`, unlinked from the hub |
+| Eva case study | `case_study.py` | ✅ | On HQ live close, render a dark TradingView-style annotated PNG (entry / stop / TPs / discretionary post-trade note). Original entry rationale is the first LLM input. Fail-soft; mill skipped. Shown in the closed-trade dropdown on Eva Trades and `/investors` |
 | Live execution | `execute.py` | ⬜ | shadow/live path not built |
 | OHLC history cache | `ohlc_cache.py` | ✅ | research/backfill; ETH+BTC H1/D1; not hot path |
 | Legacy scheduler | `scheduler.py` | ⚠️ | deprecated; use `main.py` |
@@ -299,6 +300,8 @@ Defaults from `bot_config.py` (non-secret tunables). Secrets and portfolio size 
 | `MAX_REFINE_PASSES` | `1` | audit retry budget before downgrade |
 | `INCLUDE_PATTERN_IMAGES` | `False` | attach Trading Guide reference PNGs to vision calls |
 | `USE_LLM_DISPLAY_SUMMARY` | `False` | LLM trade-card blurbs; else deterministic setup blurb |
+| `CASE_STUDY_ENABLED` | `True` | generate annotated close charts for Eva (HQ) live trades |
+| `USE_LLM_CASE_STUDY` | `True` | Haiku writes callout copy from the entry rationale + ledger facts; off = deterministic sentences |
 | `MAX_OPEN_TRADES` | `20` | paper FIFO cap |
 | `ENTRY_FIB_LOW` / `ENTRY_FIB_HIGH` | `0.25` / `0.50` | M5 OB entry band; watchdog tranches at each level |
 | `ADD_FIB_LEVEL` | `0.718` | scale-in adds another `TRADE_DEPLOY_PCT` (1.25× max base exposure) |
@@ -394,6 +397,7 @@ Defaults from `bot_config.py` (non-secret tunables). Secrets and portfolio size 
 
 | Date | Change |
 |---|---|
+| 2026-09-01 | **Eva closed-trade case-study charts.** When an HQ live trade fully closes, `case_study.py` renders a dark TradingView-style annotated PNG (entry, opening stop, each take-profit that paid, full exit, discretionary post-trade note) and stores `live_trades.case_study_path`. The original entry rationale is the first input to copy generation — Haiku condenses that thesis rather than inventing a new one; numbers stay on the ledger. Fail-soft and threaded so `_close_out` never waits. Mill clips are skipped. The figure appears only on closed-trade dropdowns (Eva Trades tab and `/investors`), via `/api/live-chart/{id}`. Watchdog backfills at most one missing chart per scan. Flags: `CASE_STUDY_ENABLED`, `USE_LLM_CASE_STUDY`. |
 | 2026-08-31 | **Investor page chart + no paper books.** Portfolio at a glance now opens with an Eva NAV sparkline (week / month / year). The series is the $2,000 sleeve plus realized P&L each UTC day; today's point includes the open mark. Dropped the v1/v2 paper journals from this page — they belong on the operator hub. |
 | 2026-08-31 | **Investor page is Eva-only and no longer mirrors Coinbase.** Dropped the exchange-account card (USD equity, buying power, Coinbase realized) — those numbers are a different book (mill + fees + USDC/USD wallets) and read as if Eva were wrong. Health factor no longer shows Coinbase's 1000% liquidation buffer. Open rows now show remaining size (ETH and $ notional) and liquidation price (`n/a` when Coinbase is not quoting one). |
 | 2026-08-31 | **Mill clips are always one nano contract.** Dropped `LIVE_MILL_NOTIONAL_USD` ($260 target / price, then round up). `_mill_clip` now sizes to `LIVE_PRODUCT_QTY_FLOORS` (0.1 ETH / 0.01 BTC); notional is qty × mark. Sleeve check still rejects a BTC contract that no longer fits. Telegram Accept replies say `1 contract (0.1)` rather than a pre-floor request like 0.104565. |

@@ -40,6 +40,7 @@ class ExecuteLiveTests(unittest.TestCase):
         self._patches = [
             patch.object(config, "LEDGER_DB", db),
             patch.object(config, "EXECUTION_MODE", "shadow"),
+            patch.object(bot_config, "CASE_STUDY_ENABLED", False),
             # halt_live notifies ops (Telegram/email) — keep unit tests offline.
             patch.object(execute, "_notify_ops"),
             # Instrument resolution hits the products API — keep tests offline.
@@ -308,6 +309,7 @@ class MillSleeveTests(unittest.TestCase):
         self._patches = [
             patch.object(config, "LEDGER_DB", db),
             patch.object(config, "EXECUTION_MODE", "shadow"),
+            patch.object(bot_config, "CASE_STUDY_ENABLED", False),
             patch.object(execute, "_notify_ops"),
             patch.object(
                 execute,

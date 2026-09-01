@@ -780,6 +780,13 @@ def run_watchdog() -> list[Suggestion] | None:
     except Exception:
         logger.exception("Live position sync failed")
 
+    try:
+        import case_study
+
+        case_study.backfill_missing(limit=1)
+    except Exception:
+        logger.exception("Case study backfill failed")
+
     # Keeping a clip open is the mill's whole objective, and closing one is not
     # the only way the sleeve empties (a flatten, or a close while the service
     # was down). Cheap when occupied: the sweep is skipped without a DB read.

@@ -84,7 +84,13 @@
     </span>
     {% endif %}
   </button>
-  <div class="trade-body" hidden>
+    <div class="trade-body" hidden>
+    {% if mode != 'open' and t.case_study_url %}
+    <figure class="trade-case-study">
+      <figcaption>Case study · {{ t.product_label or 'ETH' }}{% if t.opened_at %} · {{ t.opened_at|trade_date }}{% endif %}</figcaption>
+      <img class="chart-img zoomable" src="{{ t.case_study_url }}" alt="Eva trade case study" loading="lazy">
+    </figure>
+    {% endif %}
     {% if t.structure_chart_url or t.execution_chart_url %}
     <div class="trade-charts">
       {% if t.structure_chart_url %}

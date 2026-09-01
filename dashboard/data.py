@@ -12,7 +12,12 @@ import ledger
 import paper
 import research
 
-from dashboard.charts import h4_marked_path, latest_marked_h4_path, trade_chart_urls
+from dashboard.charts import (
+    h4_marked_path,
+    latest_marked_h4_path,
+    resolve_chart_path,
+    trade_chart_urls,
+)
 from dashboard.performance import build_performance, _score_badge, score_tooltip
 from dashboard.status import format_agent_status
 from macro.context import macro_payload_for_dashboard
@@ -612,6 +617,13 @@ def enrich_live_trades(
                     _distance_to_tp_pct(side, mark or 0, tps) if not closed else None
                 ),
                 "participation": _participation(cycle_id),
+                "case_study_url": (
+                    f"/api/live-chart/{int(row['id'])}"
+                    if closed
+                    and str(row.get("source") or "") == "hq"
+                    and resolve_chart_path(row.get("case_study_path")) is not None
+                    else None
+                ),
                 **charts,
             }
         )

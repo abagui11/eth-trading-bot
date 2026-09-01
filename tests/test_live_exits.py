@@ -16,6 +16,7 @@ from pathlib import Path
 from typing import Any
 from unittest.mock import MagicMock, patch
 
+import bot_config
 import config
 import execute as live_exec
 import live_ledger
@@ -408,9 +409,12 @@ class LedgerDbTestCase(unittest.TestCase):
         self._tmp = tempfile.TemporaryDirectory(ignore_cleanup_errors=True)
         db = Path(self._tmp.name) / "ledger.db"
         self._patch = patch.object(config, "LEDGER_DB", db)
+        self._cs = patch.object(bot_config, "CASE_STUDY_ENABLED", False)
         self._patch.start()
+        self._cs.start()
         live_ledger.init_db()
         self.addCleanup(self._patch.stop)
+        self.addCleanup(self._cs.stop)
         self.addCleanup(self._tmp.cleanup)
 
     def _open_trade(self, **over) -> int:

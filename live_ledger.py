@@ -41,7 +41,8 @@ CREATE TABLE IF NOT EXISTS live_trades (
     qty_open REAL,                                -- underlying still on the exchange
     realized_pnl_usd REAL NOT NULL DEFAULT 0,     -- banked from partial exits
     exit_fills_json TEXT,                         -- booked exit legs, keyed by order id
-    initial_stop_loss REAL                        -- stop armed at open; stop_loss trails
+    initial_stop_loss REAL,                       -- stop armed at open; stop_loss trails
+    case_study_path TEXT                          -- annotated PNG written on HQ close
 );
 
 CREATE TABLE IF NOT EXISTS live_meta (
@@ -115,6 +116,10 @@ def init_db() -> None:
                 "UPDATE live_trades SET initial_stop_loss = stop_loss "
                 "WHERE initial_stop_loss IS NULL"
             )
+        if "case_study_path" not in live_cols:
+            conn.execute(
+                "ALTER TABLE live_trades ADD COLUMN case_study_path TEXT"
+            )
         if "qty_open" not in live_cols:
             conn.execute("ALTER TABLE live_trades ADD COLUMN qty_open REAL")
             # Rows written before partial exits existed were all-or-nothing, so
@@ -179,6 +184,15 @@ def record_open(
             ),
         )
         return int(cur.lastrowid or 0)
+
+
+def set_case_study_path(trade_id: int, path: str) -> None:
+    """Attach the annotated close chart so the dashboard can serve it."""
+    with _connect() as conn:
+        conn.execute(
+            "UPDATE live_trades SET case_study_path = ? WHERE id = ?",
+            (path, trade_id),
+        )
 
 
 def set_stop_loss(trade_id: int, stop_loss: float) -> None:
