@@ -99,8 +99,9 @@ SCALE_IN_MIN_R = 0.5
 # All LIVE_* values are live-only. Paper sizing (TRADE_DEPLOY_PCT=0.25,
 # PRODUCT_QTY_CAPS) is untouched — never reuse paper equity for live size.
 LIVE_HQ_EQUITY_USD = 2000.0          # HQ ICT margin sleeve
-LIVE_TRADE_DEPLOY_PCT = 0.50         # 50% of the HQ sleeve per idea ($1,000)
+LIVE_TRADE_DEPLOY_PCT = 0.50         # fallback notional when no clip is set
 LIVE_MAX_OPEN_HQ = 2                 # skip new ideas when full (no FIFO kill)
+LIVE_MAX_PER_PRODUCT_HQ = 1          # concurrent positions in one product
 LIVE_DAILY_LOSS_LIMIT_USD = 160.0    # 8% of sleeve → halt until next UTC day
 LIVE_MAX_LEVERAGE = 1.0              # notional ≤ sleeve × 1 (1x; hard cap 2x)
 LIVE_SCALE_IN_ENABLED = False        # 0.718 adds are paper-only on live
@@ -110,6 +111,23 @@ LIVE_PRODUCT_QTY_FLOORS: dict[str, float] = {
     "ETH-USD": 0.1,
     "BTC-USD": 0.01,
 }
+# An HQ clip is however many whole nano contracts fit this much risk, measured
+# against the price the market order actually fills at rather than the planned
+# entry. Eva's entries are pullbacks into an M5 order block, so the fill
+# routinely sits away from an untouched stop; sizing off the plan let the clip
+# risk 1.39x what was intended (2.20x worst) across the first 15 HQ positions.
+#
+# Risk-based sizing is also what makes the stop study's numbers transferable.
+# At constant dollar risk a 1.5x stop is a 0.67x position, so widening a stop
+# costs upside rather than adding exposure. Size the clip any other way and a
+# wider stop is simply more risk, and the measured R-multiples do not carry
+# over. Levels are never moved to fit the budget; only the clip changes.
+#
+# 0.5% of the sleeve ($10) sizes an ETH clip at 1-4 nanos, median 2.5 across
+# the first 15 HQ positions when measured off actual fills. BTC is refused as
+# `risk_cap` whenever one nano — its smallest tradeable size — risks more than
+# the budget, which is 2 of its 5 recorded trades.
+LIVE_HQ_RISK_PCT: float = 0.005
 # Watchdog live execution is gated separately from paper execute.
 WATCHDOG_LIVE_ENABLED = False
 WATCHDOG_LIVE_META_KEY = "watchdog_live_enabled"

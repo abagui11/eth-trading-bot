@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import sqlite3
 import tempfile
 import unittest
 from pathlib import Path
@@ -413,7 +414,7 @@ class PaperPositionTests(unittest.TestCase):
         closed = paper.get_closed_trades(limit=1)
         self.assertEqual(closed[0]["close_reason"], "stop_loss")
 
-    def test_tp1_scales_out_one_third_and_trails_sl_to_tp1(self) -> None:
+    def test_tp1_scales_out_one_third_and_trails_sl_to_breakeven(self) -> None:
         paper.restore_open_position(
             action="spot_buy",
             entry=1803.0,
@@ -432,14 +433,14 @@ class PaperPositionTests(unittest.TestCase):
         positions = paper.get_open_positions(1831.62)
         self.assertEqual(len(positions), 1)
         self.assertAlmostEqual(positions[0]["eth_qty"], 0.50, places=4)
-        self.assertAlmostEqual(float(positions[0]["stop_loss"]), 1831.62, places=2)
+        self.assertAlmostEqual(float(positions[0]["stop_loss"]), 1803.0, places=2)
         self.assertEqual(int(positions[0]["tps_hit"]), 1)
         closed = paper.get_closed_trades(limit=1)
         self.assertEqual(closed[0]["close_reason"], "take_profit")
         self.assertAlmostEqual(closed[0]["eth_qty"], 0.25, places=4)
         self.assertAlmostEqual(closed[0]["exit"], 1831.62, places=2)
 
-    def test_tp2_scales_out_and_trails_sl_to_tp2(self) -> None:
+    def test_tp2_scales_out_and_trails_sl_to_tp1(self) -> None:
         paper.restore_open_position(
             action="spot_buy",
             entry=1803.0,
@@ -461,7 +462,7 @@ class PaperPositionTests(unittest.TestCase):
         positions = paper.get_open_positions(1844.67)
         self.assertEqual(len(positions), 1)
         self.assertAlmostEqual(positions[0]["eth_qty"], 0.25, places=4)
-        self.assertAlmostEqual(float(positions[0]["stop_loss"]), 1844.67, places=2)
+        self.assertAlmostEqual(float(positions[0]["stop_loss"]), 1831.62, places=2)
         self.assertEqual(int(positions[0]["tps_hit"]), 2)
 
     def test_tp3_closes_remaining_third(self) -> None:
@@ -824,6 +825,130 @@ class PairClosedTradesTests(unittest.TestCase):
         self.assertEqual(len(closed), 1)
         # blended entry 95 vs exit 95 → flat
         self.assertAlmostEqual(closed[0]["realized_pnl_usd"], 0.0)
+
+
+class PaperBarrierPathTests(unittest.TestCase):
+    """Barriers resolve on the M5 path between polls, not on spot at poll time.
+
+    The defect this closes: a stop breached between cycles left no trace, so
+    the position survived and booked a win when price later recovered to a
+    target. Three of Eva HQ's nine recorded winners were really stop-outs,
+    which is the gap between a reported +0.882R and a true +0.346R.
+    """
+
+    def setUp(self) -> None:
+        self._tmpdir = tempfile.TemporaryDirectory(ignore_cleanup_errors=True)
+        self._db_path = Path(self._tmpdir.name) / "test_ledger.db"
+        self._config_patch = patch.object(config, "LEDGER_DB", self._db_path)
+        self._config_patch.start()
+        self._portfolio_patch = patch.object(config, "PAPER_PORTFOLIO_VALUE", 5000.0)
+        self._portfolio_patch.start()
+        self._outcome_patch = patch.object(paper, "flush_pending_outcome_charts")
+        self._outcome_patch.start()
+        paper.init_db()
+        paper.restore_open_position(
+            action="spot_buy",
+            entry=1800.0,
+            eth_qty=0.75,
+            stop_loss=1780.0,
+            take_profits=[1830.0, 1860.0, 1890.0],
+            risk_reward=2.0,
+            suggested_size=0.75,
+            opened_at="2026-08-11T12:00:00Z",
+            open_cycle_id="cycle_path",
+            spot_price=1800.0,
+        )
+        self._set_walked_to("2026-08-11T13:00:00Z")
+
+    def tearDown(self) -> None:
+        self._outcome_patch.stop()
+        self._portfolio_patch.stop()
+        self._config_patch.stop()
+        self._tmpdir.cleanup()
+
+    def _set_walked_to(self, ts: str | None) -> None:
+        with sqlite3.connect(self._db_path) as conn:
+            conn.execute("UPDATE paper_positions SET path_checked_at = ?", (ts,))
+
+    def _walked_to(self) -> str | None:
+        with sqlite3.connect(self._db_path) as conn:
+            return conn.execute(
+                "SELECT path_checked_at FROM paper_positions"
+            ).fetchone()[0]
+
+    @staticmethod
+    def _bars(*low_high: tuple[float, float]) -> list[dict]:
+        return [
+            {
+                "ts": f"2026-08-11T13:{idx * 5:02d}:00Z",
+                "low": low,
+                "high": high,
+                "open": low,
+                "close": high,
+            }
+            for idx, (low, high) in enumerate(low_high)
+        ]
+
+    def _mark(self, spot: float, bars) -> None:
+        with patch("research.fetch_coinbase_candles_range", return_value=bars):
+            paper.update(Suggestion.no_trade("mark"), spot_price=spot, cycle_id="c2")
+
+    def test_a_stop_breached_between_polls_closes_at_the_stop(self) -> None:
+        """The exact defect: price dips through 1780, then recovers past TP1.
+
+        Spot at poll time sees only the recovery, so the old check booked a
+        take-profit on a trade that was already dead.
+        """
+        self._mark(1835.0, self._bars((1775.0, 1805.0), (1800.0, 1835.0)))
+
+        self.assertEqual(paper.get_open_positions(1835.0), [])
+        self.assertEqual(paper.get_closed_trades()[-1]["close_reason"], "stop_loss")
+
+    def test_a_bar_spanning_both_barriers_resolves_stop_first(self) -> None:
+        # One M5 bar covering 1775-1835 touches the stop and TP1. Which came
+        # first is unknowable at this resolution, so it is booked as the loss.
+        self._mark(1835.0, self._bars((1775.0, 1835.0)))
+
+        self.assertEqual(paper.get_closed_trades()[-1]["close_reason"], "stop_loss")
+
+    def test_a_target_touched_between_polls_still_scales_out(self) -> None:
+        # High reaches TP1 mid-window and spot falls back below it. The rung
+        # filled, so the ladder has to advance even though poll-time spot is
+        # nowhere near the level.
+        self._mark(1805.0, self._bars((1795.0, 1835.0)))
+
+        positions = paper.get_open_positions(1805.0)
+        self.assertEqual(len(positions), 1)
+        self.assertAlmostEqual(positions[0]["eth_qty"], 0.50, places=4)
+        self.assertAlmostEqual(float(positions[0]["stop_loss"]), 1800.0, places=2)
+
+    def test_a_position_with_no_recorded_window_checks_spot_only(self) -> None:
+        """Forward-only: rows that predate the fix are never walked backwards."""
+        self._set_walked_to(None)
+        with patch("research.fetch_coinbase_candles_range") as fetch:
+            paper.update(Suggestion.no_trade("mark"), spot_price=1805.0, cycle_id="c2")
+
+        fetch.assert_not_called()
+        self.assertEqual(len(paper.get_open_positions(1805.0)), 1)
+
+    def test_an_unavailable_candle_feed_falls_back_to_spot(self) -> None:
+        # A dead feed must not stall the cycle, but it does mean a stop can be
+        # missed, so it is logged rather than swallowed.
+        with patch(
+            "research.fetch_coinbase_candles_range",
+            side_effect=RuntimeError("offline"),
+        ):
+            with self.assertLogs("paper", level="WARNING"):
+                paper.update(
+                    Suggestion.no_trade("mark"), spot_price=1805.0, cycle_id="c2"
+                )
+
+        self.assertEqual(len(paper.get_open_positions(1805.0)), 1)
+
+    def test_a_surviving_position_advances_its_walk_marker(self) -> None:
+        self._mark(1805.0, [])
+
+        self.assertNotEqual(self._walked_to(), "2026-08-11T13:00:00Z")
 
 
 if __name__ == "__main__":

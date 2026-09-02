@@ -260,6 +260,11 @@ def _ensure_position_columns(conn: sqlite3.Connection) -> None:
         conn.execute("ALTER TABLE paper_positions ADD COLUMN mfe_pct REAL")
     if "mae_pct" not in cols:
         conn.execute("ALTER TABLE paper_positions ADD COLUMN mae_pct REAL")
+    # How far the M5 barrier walk has already got. NULL on every pre-existing
+    # row, which starts the walk at the next cycle rather than reaching back
+    # over closed history — the fix is forward-only by construction.
+    if "path_checked_at" not in cols:
+        conn.execute("ALTER TABLE paper_positions ADD COLUMN path_checked_at TEXT")
 
 
 def _ensure_position_archive_columns(conn: sqlite3.Connection) -> None:
@@ -1620,6 +1625,63 @@ def _sl_hit(side: str, spot: float, stop_loss: float) -> bool:
     return spot >= stop_loss
 
 
+def _m5_path(product_id: str, since: str | None) -> list[dict]:
+    """M5 bars between the last barrier walk and now, oldest first.
+
+    Returns empty when the window is unknown or the fetch fails, which
+    collapses the caller back to a spot-only check. A missing candle feed must
+    not stall the cycle, but it does mean a stop can still be missed, so the
+    failure is logged rather than swallowed silently.
+    """
+    if not since:
+        return []
+    try:
+        start = int(
+            datetime.fromisoformat(str(since).replace("Z", "+00:00")).timestamp()
+        )
+    except ValueError:
+        return []
+    end = int(datetime.now(timezone.utc).timestamp())
+    if start >= end:
+        return []
+    try:
+        import research
+
+        return research.fetch_coinbase_candles_range(
+            "FIVE_MINUTE", start, end, product_id=product_id
+        )
+    except Exception:
+        logger.warning(
+            "paper: M5 path unavailable for %s since %s; "
+            "falling back to spot-only barriers",
+            product_id,
+            since,
+            exc_info=True,
+        )
+        return []
+
+
+def _barrier_probes(
+    side: str, product_id: str, since: str | None, spot: float
+) -> list[tuple[float, float]]:
+    """(adverse, favourable) prices to test in order, oldest bar first.
+
+    Each M5 bar contributes its two extremes and the live spot closes the
+    sequence. The caller tests the adverse price first, which is what makes a
+    bar that spans both barriers resolve stop-first.
+    """
+    probes: list[tuple[float, float]] = []
+    for bar in _m5_path(product_id, since):
+        try:
+            low = float(bar["low"])
+            high = float(bar["high"])
+        except (KeyError, TypeError, ValueError):
+            continue
+        probes.append((low, high) if side == "long" else (high, low))
+    probes.append((spot, spot))
+    return probes
+
+
 def _ordered_take_profits(side: str, take_profits: list[float]) -> list[float]:
     """Nearest-first TP ladder (long: ascending, short: descending)."""
     if side == "long":
@@ -1639,10 +1701,14 @@ def _sl_after_tp_hit(
     ordered_tps: list[float],
     tps_hit_after: int,
 ) -> float:
-    """Trail SL to the last filled target: after TP1 → TP1; after TP2 → TP2."""
-    if tps_hit_after <= 0 or not ordered_tps:
+    """Trail one rung behind: after TP1 → breakeven; after TP2 → TP1.
+
+    Matches ``execute._trailed_stop`` so the two books remain comparable, and
+    matches the exit rule the stop study measures Eva under.
+    """
+    if tps_hit_after <= 0 or not ordered_tps or tps_hit_after == 1:
         return float(avg_entry)
-    idx = min(tps_hit_after - 1, len(ordered_tps) - 1)
+    idx = min(tps_hit_after - 2, len(ordered_tps) - 1)
     return float(ordered_tps[idx])
 
 
@@ -1744,90 +1810,137 @@ def _check_sl_tp_closes(
     spots: dict[str, float],
     cycle_id: str | None,
 ) -> float:
-    """SL full exit; staged TP scale-out (1/N remaining levels) with SL trail."""
+    """SL full exit; staged TP scale-out (1/N remaining levels) with SL trail.
+
+    Barriers resolve on the M5 path walked since the previous cycle, not on
+    spot at poll time. Sampling spot alone let a position survive a stop that
+    traded through between polls and book as a win when price later recovered
+    to a target — three of Eva HQ's nine recorded winners, which is the
+    difference between a reported +0.882R and a true +0.346R. Live brackets
+    fill intrabar; this makes paper answer the same question.
+    """
+    now = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
     for position in list(_fetch_open_positions(conn)):
         side = str(position["side"])
+        pos_id = int(position["id"])
         product_id = _pos_product(position)
         spot = _spot_for(product_id, spots)
         if spot <= 0:
             continue
         _update_excursions(conn, position, spot)
-        sl = float(position["stop_loss"])
-        if _sl_hit(side, spot, sl):
-            cash = _close_position_at_market(
-                conn, cash, position, sl, cycle_id, "stop_loss", spots=spots
-            )
-            continue
 
-        ordered_tps = _ordered_take_profits(side, position.get("take_profits") or [])
-        if not ordered_tps:
-            continue
-
-        tps_hit = int(position.get("tps_hit") or 0)
-        pos_id = int(position["id"])
-        avg_entry = float(position["avg_entry"])
-
-        # Gap-through: fill every reached TP in order on this tick.
-        while tps_hit < len(ordered_tps):
-            # Re-read qty/SL in case a prior partial updated the row.
-            live = next(
-                (p for p in _fetch_open_positions(conn) if int(p["id"]) == pos_id),
-                None,
-            )
-            if live is None:
+        probes = _barrier_probes(
+            side, product_id, position.get("path_checked_at"), spot
+        )
+        closed = False
+        for adverse, favourable in probes:
+            if position is None:
+                closed = True
                 break
-            position = live
-            eth_qty = _pos_qty(position)
-            if eth_qty <= 0:
-                break
-
-            tp_price = ordered_tps[tps_hit]
-            if not _tp_level_hit(side, spot, tp_price):
-                break
-
-            remaining_levels = len(ordered_tps) - tps_hit
-            if remaining_levels <= 1:
+            # Re-read: a rung filled on an earlier bar trails the stop.
+            sl = float(position["stop_loss"])
+            if _sl_hit(side, adverse, sl):
                 cash = _close_position_at_market(
-                    conn,
-                    cash,
-                    position,
-                    tp_price,
-                    cycle_id,
-                    "take_profit",
-                    spots=spots,
+                    conn, cash, position, sl, cycle_id, "stop_loss", spots=spots
                 )
+                closed = True
+                break
+            cash, position, closed = _fill_reached_targets(
+                conn, cash, position, favourable, cycle_id, spots
+            )
+            if closed:
                 break
 
-            close_qty = eth_qty / remaining_levels
-            cash = _reduce_position(
-                conn,
-                cash,
-                position,
-                close_qty,
-                tp_price,
-                cycle_id,
-                "take_profit",
-                spots=spots,
-                allow_dust=True,
-            )
-            live = next(
-                (p for p in _fetch_open_positions(conn) if int(p["id"]) == pos_id),
-                None,
-            )
-            if live is None:
-                break
-
-            tps_hit += 1
-            new_sl = _tighter_stop(
-                side,
-                float(live["stop_loss"]),
-                _sl_after_tp_hit(side, avg_entry, ordered_tps, tps_hit),
-            )
+        if not closed:
             conn.execute(
-                "UPDATE paper_positions SET stop_loss = ?, tps_hit = ? WHERE id = ?",
-                (new_sl, tps_hit, pos_id),
+                "UPDATE paper_positions SET path_checked_at = ? WHERE id = ?",
+                (now, pos_id),
             )
     return cash
+
+
+def _fill_reached_targets(
+    conn: sqlite3.Connection,
+    cash: float,
+    position: dict,
+    price: float,
+    cycle_id: str | None,
+    spots: dict[str, float],
+) -> tuple[float, dict | None, bool]:
+    """Fill every ladder rung ``price`` has reached, trailing the stop behind.
+
+    Gap-through: one bar can clear several rungs, so this drains the ladder
+    rather than advancing a single step. Returns the refreshed position and
+    whether the remainder is now out.
+    """
+    side = str(position["side"])
+    ordered_tps = _ordered_take_profits(side, position.get("take_profits") or [])
+    if not ordered_tps:
+        return cash, position, False
+
+    pos_id = int(position["id"])
+    avg_entry = float(position["avg_entry"])
+    tps_hit = int(position.get("tps_hit") or 0)
+
+    while tps_hit < len(ordered_tps):
+        # Re-read qty/SL in case a prior partial updated the row.
+        live = next(
+            (p for p in _fetch_open_positions(conn) if int(p["id"]) == pos_id),
+            None,
+        )
+        if live is None:
+            return cash, None, True
+        position = live
+        eth_qty = _pos_qty(position)
+        if eth_qty <= 0:
+            return cash, position, False
+
+        tp_price = ordered_tps[tps_hit]
+        if not _tp_level_hit(side, price, tp_price):
+            return cash, position, False
+
+        remaining_levels = len(ordered_tps) - tps_hit
+        if remaining_levels <= 1:
+            cash = _close_position_at_market(
+                conn, cash, position, tp_price, cycle_id, "take_profit", spots=spots
+            )
+            return cash, None, True
+
+        close_qty = eth_qty / remaining_levels
+        cash = _reduce_position(
+            conn,
+            cash,
+            position,
+            close_qty,
+            tp_price,
+            cycle_id,
+            "take_profit",
+            spots=spots,
+            allow_dust=True,
+        )
+        live = next(
+            (p for p in _fetch_open_positions(conn) if int(p["id"]) == pos_id),
+            None,
+        )
+        if live is None:
+            return cash, None, True
+
+        tps_hit += 1
+        new_sl = _tighter_stop(
+            side,
+            float(live["stop_loss"]),
+            _sl_after_tp_hit(side, avg_entry, ordered_tps, tps_hit),
+        )
+        conn.execute(
+            "UPDATE paper_positions SET stop_loss = ?, tps_hit = ? WHERE id = ?",
+            (new_sl, tps_hit, pos_id),
+        )
+        position = next(
+            (p for p in _fetch_open_positions(conn) if int(p["id"]) == pos_id),
+            position,
+        )
+
+    return cash, position, False
 
 
 def _open_position(

@@ -48,14 +48,86 @@ class VaultTests(unittest.TestCase):
         self.assertEqual(p.deploy_pct, bot_config.LIVE_TRADE_DEPLOY_PCT)
         pub = vault.policy_public(p)
         self.assertEqual(pub["notional_per_name_usd"], 1000.0)
+        self.assertEqual(pub["risk_per_name_usd"], 10.0)
         self.assertTrue(pub["mill_excluded"])
         self.assertEqual(pub["hold_horizon"], "swing")
 
-    def test_admits_eth_at_half_nav(self) -> None:
-        decision = vault.propose(_sug(), open_rows=[])
+    def test_clip_is_sized_to_the_risk_budget(self) -> None:
+        # $10 (0.5% of a $2,000 sleeve) against a 25-point stop: each nano
+        # risks $2.50, so 4 fit. Notional follows from that, not the reverse.
+        decision = vault.propose(
+            _sug(entry=2400.0, stop_loss=2375.0, take_profits=[2450.0]),
+            open_rows=[],
+        )
         self.assertTrue(decision["admitted"])
-        self.assertAlmostEqual(decision["notional_usd"], 1000.0)
-        self.assertAlmostEqual(decision["qty"], 0.5)
+        self.assertAlmostEqual(decision["qty"], 0.4)
+        self.assertAlmostEqual(decision["risk_usd"], 10.0)
+        self.assertAlmostEqual(decision["notional_usd"], 960.0)
+
+    def test_a_wider_stop_buys_a_smaller_clip_not_more_risk(self) -> None:
+        """The premise the stop study's R-multiples rest on.
+
+        At constant dollar risk a 2x stop is a 0.5x position, so widening a
+        stop costs upside rather than adding exposure. Size any other way and
+        the measured R-multiples do not carry over to live.
+        """
+        tight = vault.propose(
+            _sug(entry=2400.0, stop_loss=2375.0, take_profits=[2450.0]),
+            open_rows=[],
+        )
+        wide = vault.propose(
+            _sug(entry=2400.0, stop_loss=2350.0, take_profits=[2450.0]),
+            open_rows=[],
+        )
+        self.assertAlmostEqual(tight["qty"], 0.4)
+        self.assertAlmostEqual(wide["qty"], 0.2)
+        self.assertAlmostEqual(tight["risk_usd"], wide["risk_usd"])
+
+    def test_risk_is_measured_off_the_fill_not_the_plan(self) -> None:
+        # Plan risks 25 points, but the market order fills 25 above it, so the
+        # real distance to the untouched stop is 50 and the clip halves.
+        decision = vault.propose(
+            _sug(entry=2400.0, stop_loss=2375.0, take_profits=[2450.0]),
+            spot=2425.0,
+            open_rows=[],
+        )
+        self.assertTrue(decision["admitted"])
+        self.assertAlmostEqual(decision["qty"], 0.2)
+        self.assertAlmostEqual(decision["risk_usd"], 10.0)
+
+    def test_btc_admits_one_contract_when_the_stop_is_tight_enough(self) -> None:
+        decision = vault.propose(
+            _sug(product_id="BTC-USD", entry=80000.0, stop_loss=79200.0,
+                 take_profits=[81000.0]),
+            open_rows=[],
+        )
+        self.assertTrue(decision["admitted"])
+        self.assertAlmostEqual(decision["qty"], 0.01)
+        self.assertAlmostEqual(decision["notional_usd"], 800.0)
+
+    def test_refuses_when_one_contract_exceeds_the_budget(self) -> None:
+        # BTC's smallest tradeable size is one nano. When that alone risks more
+        # than the budget there is no clip small enough, so the idea is dropped
+        # rather than taken at the wrong size.
+        decision = vault.propose(
+            _sug(product_id="BTC-USD", entry=80000.0, stop_loss=78900.0,
+                 take_profits=[81000.0]),
+            open_rows=[],
+        )
+        self.assertFalse(decision["admitted"])
+        self.assertIn("risk_cap", decision["skip_reason"])
+
+    def test_clip_trims_to_sleeve_headroom_instead_of_refusing(self) -> None:
+        # A stop tight enough to afford 20 nanos still has to fit the sleeve.
+        # Trimming keeps the idea tradeable where a flat heat cap refused it.
+        opens = [{"cycle_id": "c0", "product_id": "BTC-USD", "notional_usd": 1600.0}]
+        decision = vault.propose(
+            _sug(entry=2400.0, stop_loss=2395.0, take_profits=[2450.0]),
+            open_rows=opens,
+        )
+        self.assertTrue(decision["admitted"])
+        self.assertAlmostEqual(decision["qty"], 0.1)
+        self.assertLessEqual(decision["notional_usd"], 400.0)
 
     def test_no_trade_and_scale_in_skipped(self) -> None:
         self.assertFalse(vault.propose(_sug(action="no_trade"), open_rows=[])["admitted"])
@@ -90,7 +162,7 @@ class VaultTests(unittest.TestCase):
         feed = vault.stream()
         self.assertEqual(len(feed["ideas"]), 1)
         self.assertEqual(feed["ideas"][0]["rail"], "hq")
-        self.assertEqual(feed["ideas"][0]["notional_usd"], 1000.0)
+        self.assertEqual(feed["ideas"][0]["notional_usd"], 200.0)
         self.assertTrue(feed["ideas"][0]["followable"])
 
     def test_follow_while_open_then_duplicate(self) -> None:

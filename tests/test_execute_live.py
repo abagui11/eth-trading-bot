@@ -49,6 +49,12 @@ class ExecuteLiveTests(unittest.TestCase):
                 "INSTRUMENT_MAP",
                 {"ETH-USD": "ETP-20DEC30-CDE", "BTC-USD": "BIP-20DEC30-CDE"},
             ),
+            # Nothing in a unit test may reach Coinbase. Raising here means a
+            # gateway call added to this path later fails loudly offline
+            # instead of quietly hitting the live venue.
+            patch.object(
+                execute, "get_gateway", side_effect=RuntimeError("offline test")
+            ),
         ]
         for p in self._patches:
             p.start()
@@ -82,16 +88,19 @@ class ExecuteLiveTests(unittest.TestCase):
 
     # -- sizing ---------------------------------------------------------------
 
-    def test_shadow_hq_sizing_is_half_sleeve(self) -> None:
+    def test_shadow_hq_clip_is_sized_to_the_risk_budget(self) -> None:
         result = execute.maybe_execute_live(
             _hq_suggestion(entry=2000.0), 2000.0, cycle_id="c1", source="hq"
         )
         self.assertIsNotNone(result)
         self.assertEqual(result["mode"], "shadow")
-        # $2,000 sleeve × 50% = $1,000 notional → 0.5 ETH at $2,000.
-        self.assertAlmostEqual(result["notional_usd"], 1000.0)
-        self.assertAlmostEqual(result["qty"], 0.5)
+        # A 60-point stop risks $6 per nano, so one fits the $10 budget.
+        # $200 notional is what that costs at $2,000, not a notional target
+        # the qty was solved backwards from.
+        self.assertAlmostEqual(result["qty"], 0.1)
+        self.assertAlmostEqual(result["notional_usd"], 200.0)
         self.assertEqual(result["instrument"], "ETP-20DEC30-CDE")
+
 
     def test_mill_clip_is_always_one_contract(self) -> None:
         # BTC mill clips are 0.01 regardless of spot; the sleeve check is

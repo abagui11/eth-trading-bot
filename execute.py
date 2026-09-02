@@ -75,6 +75,26 @@ def _tp_ladder(contracts: int, levels: list[float]) -> list[tuple[float, int]]:
     ]
 
 
+def _armable_tps(
+    product_id: str,
+    side: str,
+    qty: float,
+    entry: float,
+    take_profits: list[float] | None,
+) -> list[float]:
+    """The targets this clip can actually arm, in ladder order.
+
+    Derived from ``_tp_ladder`` so the recorded plan cannot drift from what
+    gets placed. A one-contract BTC clip is one rung, so recording all three
+    targets would show a scale-out that never happens.
+    """
+    ordered = _ordered_tps(side, list(take_profits or []), entry)
+    floor = bot_config.LIVE_PRODUCT_QTY_FLOORS.get(product_id)
+    if not floor or not ordered:
+        return ordered
+    return [price for price, _ in _tp_ladder(int(round(qty / floor)), ordered)]
+
+
 def _tp_reached(side: str, price: float, level: float) -> bool:
     return price >= level if side == "long" else price <= level
 
@@ -321,12 +341,13 @@ def revalidate_levels(
 def _trailed_stop(
     entry: float, ordered_tps: list[float], tps_hit: int
 ) -> float | None:
-    """Lock the last filled target on the runner.
+    """Trail one rung behind: after TP1 breakeven, after TP2 TP1.
 
-    After TP1 the stop sits at TP1; after TP2 it sits at TP2. Trailing one
-    rung behind (breakeven / previous TP) handed the runner's last-target
-    profit back on a normal retrace — Eva #8's remaining 0.2 died at TP1
-    for $5.60 instead of locking TP2 for ~$13.
+    This is the rule the stop study measures Eva under (``ladder_walk``,
+    PREREGISTRATION deviation 2), and its +0.346R baseline describes this
+    exit and no other. Locking the last filled target instead was adopted
+    from a single trade (Eva #8) and never measured; re-measuring it on the
+    recorded book was a wash, so live runs the rule the analysis describes.
 
     Returns None while no target has filled, so an untouched trade keeps the
     structural stop the thesis chose. ``entry`` is the fallback when the
@@ -334,9 +355,9 @@ def _trailed_stop(
     """
     if tps_hit <= 0:
         return None
-    if not ordered_tps:
+    if not ordered_tps or tps_hit == 1:
         return float(entry)
-    idx = min(tps_hit - 1, len(ordered_tps) - 1)
+    idx = min(tps_hit - 2, len(ordered_tps) - 1)
     return float(ordered_tps[idx])
 
 
@@ -806,7 +827,9 @@ def _execute(
         qty=qty,
         entry=fill_price,
         stop_loss=float(suggestion.stop_loss),
-        take_profits_json=json.dumps(suggestion.take_profits or []),
+        take_profits_json=json.dumps(
+            _armable_tps(product_id, side, qty, fill_price, suggestion.take_profits)
+        ),
         order_id=order_id or None,
         stop_order_id=stop_order_id or None,
         notes=f"ob:{ob_ref}" if ob_ref else None,

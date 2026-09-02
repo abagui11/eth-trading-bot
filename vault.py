@@ -76,6 +76,7 @@ class VaultPolicy:
     hold_horizon: str
     premium_gated: bool
     qty_floors: dict[str, float]
+    risk_pct: float
 
 
 def policy() -> VaultPolicy:
@@ -85,13 +86,14 @@ def policy() -> VaultPolicy:
         deploy_pct=float(bot_config.LIVE_TRADE_DEPLOY_PCT),
         max_open=int(bot_config.LIVE_MAX_OPEN_HQ),
         max_leverage=float(bot_config.LIVE_MAX_LEVERAGE),
-        max_per_product=1,
+        max_per_product=int(bot_config.LIVE_MAX_PER_PRODUCT_HQ),
         daily_loss_limit_usd=float(bot_config.LIVE_DAILY_LOSS_LIMIT_USD),
         scale_ins_allowed=bool(bot_config.LIVE_SCALE_IN_ENABLED),
         allowed_products=tuple(bot_config.TRADED_PRODUCTS),
         hold_horizon="swing",
         premium_gated=bool(bot_config.HQ_IDEAS_INTERNAL_ONLY),
         qty_floors=dict(bot_config.LIVE_PRODUCT_QTY_FLOORS),
+        risk_pct=float(bot_config.LIVE_HQ_RISK_PCT),
     )
 
 
@@ -100,7 +102,12 @@ def policy_public(p: VaultPolicy | None = None) -> dict[str, Any]:
     return {
         "nav_usd": p.nav_usd,
         "deploy_pct": p.deploy_pct,
+        # Reference only: clips are sized to `risk_pct` of NAV, so notional
+        # varies with stop distance. This is the fallback for a product with no
+        # qty floor. Total exposure is bounded by max_leverage.
         "notional_per_name_usd": round(p.nav_usd * p.deploy_pct, 2),
+        "risk_per_name_usd": round(p.nav_usd * p.risk_pct, 2),
+        "risk_pct": p.risk_pct,
         "max_open": p.max_open,
         "max_leverage": p.max_leverage,
         "max_per_product": p.max_per_product,
@@ -293,17 +300,39 @@ def propose(
     if len(same) >= p.max_per_product:
         return skip(f"product_open:{product_id}")
 
-    notional = p.nav_usd * p.deploy_pct
     open_notional = sum(float(r.get("notional_usd") or 0) for r in opens)
-    if open_notional + notional > p.nav_usd * p.max_leverage + 1e-9:
-        return skip("heat_cap")
-
-    qty = notional / float(entry)
     floor = p.qty_floors.get(product_id)
-    if floor is not None and qty < floor:
-        return skip(f"qty_floor:{qty:.6f}<{floor}")
+    # Risk is measured against the price the market order actually fills at,
+    # not the planned entry: the stop stays where the chart read put it, so a
+    # fill that drifts away from it risks more than the plan sized for.
+    fill_ref = float(spot) if spot and float(spot) > 0 else float(entry)
+    risk_per_unit = abs(fill_ref - float(stop))
+    budget = p.nav_usd * p.risk_pct
+    headroom = p.nav_usd * p.max_leverage - open_notional
 
-    risk_per_unit = abs(float(entry) - float(stop))
+    if not floor or risk_per_unit <= 0 or budget <= 0:
+        # No contract granularity to size in — fall back to a notional target.
+        qty = (p.nav_usd * p.deploy_pct) / float(entry)
+        if floor is not None and qty < floor:
+            return skip(f"qty_floor:{qty:.6f}<{floor}")
+        notional = qty * fill_ref
+        if notional > headroom + 1e-9:
+            return skip("heat_cap")
+    else:
+        # The clip is however many whole contracts fit the risk budget, so a
+        # wider stop buys a smaller position rather than more exposure. Levels
+        # are never moved to fit — only the clip changes.
+        contracts = int(budget / (risk_per_unit * floor))
+        if contracts < 1:
+            return skip(f"risk_cap:{risk_per_unit * floor:.2f}>{budget:.2f}")
+        # Trim to the sleeve's remaining notional rather than refusing: a clip
+        # that fits at a smaller size is still a tradeable idea.
+        contracts = min(contracts, int(headroom / (floor * fill_ref)))
+        if contracts < 1:
+            return skip("heat_cap")
+        qty = floor * contracts
+        notional = qty * fill_ref
+
     risk_usd = risk_per_unit * qty
     heat_after = (open_notional + notional) / p.nav_usd if p.nav_usd else 0.0
     return {
