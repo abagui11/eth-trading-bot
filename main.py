@@ -170,7 +170,20 @@ def main() -> None:
         first=first_hourly,
         name="hourly_cycle",
     )
-    app.job_queue.run_once(hourly_job, when=FIRST_RUN_DELAY_SEC, name="bootstrap_cycle")
+    # The bootstrap exists so a restart does not idle until the next slot. When
+    # the restart already lands just before one, running it would fire two
+    # cycles in the same second: both derive their id from the clock, so they
+    # collide on one cycle id and one set of chart paths, and the cycle that
+    # reads a half-written PNG dies. Deploying near :00 or :30 is the normal
+    # case, so this has to be guarded rather than left to luck.
+    if first_hourly > FIRST_RUN_DELAY_SEC * 2:
+        app.job_queue.run_once(
+            hourly_job, when=FIRST_RUN_DELAY_SEC, name="bootstrap_cycle"
+        )
+    else:
+        logger.info(
+            "Bootstrap cycle skipped — aligned cycle is %.0fs away", first_hourly
+        )
 
     if bot_config.FUNDING_ENABLED:
         app.job_queue.run_repeating(
