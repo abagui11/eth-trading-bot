@@ -951,5 +951,136 @@ class PaperBarrierPathTests(unittest.TestCase):
         self.assertNotEqual(self._walked_to(), "2026-08-11T13:00:00Z")
 
 
+class PaperPendingEntryTests(unittest.TestCase):
+    """Paper opens at the planned entry only once price trades there.
+
+    The defect this closes, seen live on BTC cycle 20260902T181231Z: Eva
+    planned a long limit at 76,652 while spot was 77,387, and paper booked it
+    instantly. Because the plan's TP1 (77,369) also sat below spot, the
+    position scaled out a third within seven seconds — a fabricated win on a
+    fill the market never offered.
+    """
+
+    def setUp(self) -> None:
+        self._tmpdir = tempfile.TemporaryDirectory(ignore_cleanup_errors=True)
+        self._db_path = Path(self._tmpdir.name) / "test_ledger.db"
+        self._config_patch = patch.object(config, "LEDGER_DB", self._db_path)
+        self._config_patch.start()
+        self._portfolio_patch = patch.object(config, "PAPER_PORTFOLIO_VALUE", 5000.0)
+        self._portfolio_patch.start()
+        self._outcome_patch = patch.object(paper, "flush_pending_outcome_charts")
+        self._outcome_patch.start()
+        paper.init_db()
+
+    def tearDown(self) -> None:
+        self._outcome_patch.stop()
+        self._portfolio_patch.stop()
+        self._config_patch.stop()
+        self._tmpdir.cleanup()
+
+    @staticmethod
+    def _long(entry: float, stop: float, tps: list[float]) -> Suggestion:
+        return Suggestion(
+            action="spot_buy",
+            size=1000.0,
+            entry=entry,
+            stop_loss=stop,
+            take_profits=tps,
+            risk_reward=2.0,
+            rationale="pullback limit into the M5 block",
+        )
+
+    def _pending(self) -> list[tuple]:
+        with sqlite3.connect(self._db_path) as conn:
+            return conn.execute(
+                "SELECT product_id, side, avg_entry FROM paper_positions"
+                " WHERE status = 'pending'"
+            ).fetchall()
+
+    def _run(self, sug: Suggestion, spot: float, bars=None, cycle="c1") -> None:
+        with patch("research.fetch_coinbase_candles_range", return_value=bars or []):
+            paper.update(sug, spot_price=spot, cycle_id=cycle)
+
+    def _backdate_walk(self, ts: str = "2026-08-11T12:00:00Z") -> None:
+        """Open the walk window. A pending created this second has none yet."""
+        with sqlite3.connect(self._db_path) as conn:
+            conn.execute(
+                "UPDATE paper_positions SET path_checked_at = ? WHERE status = 'pending'",
+                (ts,),
+            )
+
+    def test_a_limit_below_spot_does_not_open(self) -> None:
+        before = paper.get_state()["cash_usd"]
+        self._run(self._long(1800.0, 1780.0, [1830.0]), spot=1850.0)
+
+        self.assertEqual(paper.get_open_positions(1850.0), [])
+        self.assertEqual(len(self._pending()), 1)
+        self.assertEqual(paper.get_state()["cash_usd"], before)
+
+    def test_a_limit_at_or_through_spot_still_opens_immediately(self) -> None:
+        # Price is already at the level, so the limit is marketable. Nothing
+        # about the honest model should delay a fill the market is offering.
+        self._run(self._long(1800.0, 1780.0, [1830.0]), spot=1795.0)
+
+        positions = paper.get_open_positions(1795.0)
+        self.assertEqual(len(positions), 1)
+        self.assertAlmostEqual(float(positions[0]["avg_entry"]), 1800.0)
+        self.assertEqual(self._pending(), [])
+
+    def test_a_target_already_behind_spot_cannot_book_an_instant_win(self) -> None:
+        """The BTC case in miniature: entry and TP1 both below spot."""
+        self._run(self._long(1800.0, 1780.0, [1840.0]), spot=1850.0)
+
+        self.assertEqual(paper.get_open_positions(1850.0), [])
+        self.assertEqual(paper.get_closed_trades(), [])
+
+    def test_a_pending_fills_when_price_trades_to_it(self) -> None:
+        self._run(self._long(1800.0, 1780.0, [1830.0]), spot=1850.0)
+        self._backdate_walk()
+        bars = [
+            {"ts": "2026-08-11T13:00:00Z", "low": 1798.0, "high": 1845.0,
+             "open": 1845.0, "close": 1805.0}
+        ]
+        self._run(Suggestion.no_trade("mark"), spot=1805.0, bars=bars, cycle="c2")
+
+        positions = paper.get_open_positions(1805.0)
+        self.assertEqual(len(positions), 1)
+        self.assertAlmostEqual(float(positions[0]["avg_entry"]), 1800.0)
+        self.assertEqual(self._pending(), [])
+
+    def test_a_pending_that_price_never_reaches_stays_pending(self) -> None:
+        self._run(self._long(1800.0, 1780.0, [1830.0]), spot=1850.0)
+        self._backdate_walk()
+        bars = [
+            {"ts": "2026-08-11T13:00:00Z", "low": 1842.0, "high": 1860.0,
+             "open": 1850.0, "close": 1855.0}
+        ]
+        self._run(Suggestion.no_trade("mark"), spot=1855.0, bars=bars, cycle="c2")
+
+        self.assertEqual(paper.get_open_positions(1855.0), [])
+        self.assertEqual(len(self._pending()), 1)
+
+    def test_a_stale_pending_expires_rather_than_filling_days_later(self) -> None:
+        self._run(self._long(1800.0, 1780.0, [1830.0]), spot=1850.0)
+        with sqlite3.connect(self._db_path) as conn:
+            conn.execute(
+                "UPDATE paper_positions SET opened_at = ? WHERE status = 'pending'",
+                ("2026-08-01T00:00:00Z",),
+            )
+
+        self._run(Suggestion.no_trade("mark"), spot=1855.0, cycle="c2")
+
+        self.assertEqual(self._pending(), [])
+        self.assertEqual(paper.get_open_positions(1855.0), [])
+
+    def test_a_fresh_plan_supersedes_the_one_still_waiting(self) -> None:
+        self._run(self._long(1800.0, 1780.0, [1830.0]), spot=1850.0)
+        self._run(self._long(1810.0, 1790.0, [1840.0]), spot=1850.0, cycle="c2")
+
+        pending = self._pending()
+        self.assertEqual(len(pending), 1)
+        self.assertAlmostEqual(pending[0][2], 1810.0)
+
+
 if __name__ == "__main__":
     unittest.main()

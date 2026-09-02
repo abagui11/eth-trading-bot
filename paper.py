@@ -1661,6 +1661,35 @@ def _m5_path(product_id: str, since: str | None) -> list[dict]:
         return []
 
 
+def _entry_is_fillable(side: str, entry: float, price: float) -> bool:
+    """Whether a resting limit at ``entry`` would fill at ``price``.
+
+    Eva's entries are pullback limits into an M5 order block, routinely a
+    percent below a long's current price. Booking one before price gets there
+    invents a fill the market never offered, and when the plan's first target
+    also sits behind spot the position banks an instant win it never earned —
+    which is exactly what BTC cycle 20260902T181231Z did.
+    """
+    if entry <= 0 or price <= 0:
+        return True
+    return price <= entry if side == "long" else price >= entry
+
+
+def _entry_touched(
+    side: str, entry: float, product_id: str, since: str | None, spot: float
+) -> bool:
+    """Did price trade to a resting limit since the last check?
+
+    A long limit fills on the way down and a short's on the way up, which is
+    the same extreme the stop watches, so the probe's adverse leg is already
+    the right price to test.
+    """
+    return any(
+        _entry_is_fillable(side, entry, adverse)
+        for adverse, _ in _barrier_probes(side, product_id, since, spot)
+    )
+
+
 def _barrier_probes(
     side: str, product_id: str, since: str | None, spot: float
 ) -> list[tuple[float, float]]:
@@ -1943,6 +1972,160 @@ def _fill_reached_targets(
     return cash, position, False
 
 
+def _record_pending_entry(
+    conn: sqlite3.Connection,
+    suggestion: Suggestion,
+    eth_qty: float,
+    cycle_id: str | None,
+    product_id: str,
+    side: str,
+    now: str,
+) -> None:
+    """Park a plan whose limit price has not been reached.
+
+    Held as a ``pending`` row rather than a separate table so it carries the
+    whole plan and stays invisible to every reader — they all filter on
+    ``status = 'open'``. No cash moves until it fills.
+    """
+    tranches = _merge_entry_tranches([], suggestion.entry_tranche)
+    conn.execute(
+        """
+        INSERT INTO paper_positions (
+            open_cycle_id, opened_at, side, action, eth_qty, qty, product_id, avg_entry,
+            stop_loss, take_profits, risk_reward, suggested_size, status,
+            order_block_ref, entry_tranches, path_checked_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending', ?, ?, ?)
+        """,
+        (
+            cycle_id,
+            now,
+            side,
+            suggestion.action,
+            eth_qty,
+            eth_qty,
+            product_id,
+            float(suggestion.entry),  # type: ignore[arg-type]
+            float(suggestion.stop_loss),  # type: ignore[arg-type]
+            json.dumps(suggestion.take_profits),
+            suggestion.risk_reward,
+            suggestion.size,
+            suggestion.order_block_ref,
+            json.dumps(tranches) if tranches else None,
+            now,
+        ),
+    )
+
+
+def _fetch_pending_positions(conn: sqlite3.Connection) -> list[dict]:
+    rows = conn.execute(
+        """
+        SELECT * FROM paper_positions
+        WHERE status = 'pending'
+        ORDER BY opened_at ASC, id ASC
+        """
+    ).fetchall()
+    return [_row_to_position(row) for row in rows]
+
+
+def _fill_pending_entry(
+    conn: sqlite3.Connection,
+    cash: float,
+    position: dict,
+    cycle_id: str | None,
+    spots: dict[str, float],
+    now: str,
+) -> float:
+    """Turn a touched plan into a real position at its limit price."""
+    pos_id = int(position["id"])
+    qty = _pos_qty(position)
+    entry = float(position["avg_entry"])
+    notional = qty * entry
+    if qty <= 0 or entry <= 0 or notional > cash:
+        conn.execute("DELETE FROM paper_positions WHERE id = ?", (pos_id,))
+        return cash
+
+    cash -= notional
+    # The barrier walk starts at the fill, not at the plan: bars before the
+    # entry was touched belong to a position that did not exist yet.
+    conn.execute(
+        """
+        UPDATE paper_positions
+        SET status = 'open', opened_at = ?, path_checked_at = ?
+        WHERE id = ?
+        """,
+        (now, now, pos_id),
+    )
+    equity = _equity(cash, _fetch_open_positions(conn), spots)
+    _log_trade(
+        conn,
+        "open",
+        cycle_id,
+        str(position["side"]),
+        qty,
+        entry,
+        cash,
+        equity,
+        pos_id,
+        None,
+        product_id=_pos_product(position),
+    )
+    return cash
+
+
+def _fill_pending_entries(
+    conn: sqlite3.Connection,
+    cash: float,
+    spots: dict[str, float],
+    cycle_id: str | None,
+) -> float:
+    """Open plans whose entry price traded, and drop the ones that went stale."""
+    now_dt = datetime.now(timezone.utc)
+    now = now_dt.strftime("%Y-%m-%dT%H:%M:%SZ")
+    ttl_hours = max(float(bot_config.PAPER_PENDING_EXPIRY_HOURS or 0), 0.0)
+
+    for position in _fetch_pending_positions(conn):
+        pos_id = int(position["id"])
+        side = str(position["side"])
+        product_id = _pos_product(position)
+        entry = float(position["avg_entry"])
+        spot = _spot_for(product_id, spots)
+        if spot <= 0:
+            continue
+
+        if _entry_touched(
+            side, entry, product_id, position.get("path_checked_at"), spot
+        ):
+            cash = _fill_pending_entry(conn, cash, position, cycle_id, spots, now)
+            continue
+
+        if ttl_hours and _hours_since(position.get("opened_at"), now_dt) >= ttl_hours:
+            conn.execute("DELETE FROM paper_positions WHERE id = ?", (pos_id,))
+            logger.info(
+                "paper: %s %s limit %.2f expired unfilled after %.1fh",
+                product_id,
+                side,
+                entry,
+                ttl_hours,
+            )
+            continue
+
+        conn.execute(
+            "UPDATE paper_positions SET path_checked_at = ? WHERE id = ?",
+            (now, pos_id),
+        )
+    return cash
+
+
+def _hours_since(ts: str | None, now: datetime) -> float:
+    if not ts:
+        return 0.0
+    try:
+        started = datetime.fromisoformat(str(ts).replace("Z", "+00:00"))
+    except ValueError:
+        return 0.0
+    return (now - started).total_seconds() / 3600.0
+
+
 def _open_position(
     conn: sqlite3.Connection,
     cash: float,
@@ -1973,11 +2156,23 @@ def _open_position(
     elif eth_qty <= 0:
         return cash
 
-    notional = eth_qty * entry
-    cash -= notional
     side = "long" if suggestion.action in LONG_ACTIONS else "short"
     opened_at = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
     tranches = _merge_entry_tranches([], suggestion.entry_tranche)
+    # One live plan per product: a fresh suggestion replaces whatever was still
+    # waiting for its pullback, filled or not.
+    conn.execute(
+        "DELETE FROM paper_positions WHERE status = 'pending' AND product_id = ?",
+        (product_id,),
+    )
+    if not _entry_is_fillable(side, entry, float(spot)):
+        _record_pending_entry(
+            conn, suggestion, eth_qty, cycle_id, product_id, side, opened_at
+        )
+        return cash
+
+    notional = eth_qty * entry
+    cash -= notional
     cursor = conn.execute(
         """
         INSERT INTO paper_positions (
@@ -2041,6 +2236,9 @@ def update(
             state = dict(conn.execute("SELECT * FROM paper_state WHERE id = 1").fetchone())
             cash = float(state["cash_usd"])
 
+            # Fill first, then resolve barriers: a plan touched this window is
+            # a position by the time its stop and targets are checked.
+            cash = _fill_pending_entries(conn, cash, resolved, cycle_id)
             cash = _check_sl_tp_closes(conn, cash, resolved, cycle_id)
 
             if suggestion.action in TRADE_ACTIONS:

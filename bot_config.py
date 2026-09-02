@@ -89,6 +89,14 @@ PAPER_EPOCH_LABEL = "5k_usd"
 # hour. Keep at or above IDEA_EXPIRY_MINUTES so a card cannot outlive its cycle.
 CYCLE_INTERVAL_SEC = 1800  # 30 minutes
 
+# How long an untouched paper entry waits for its pullback before being
+# dropped. Eva plans limits into an M5 order block, so a plan is only valid
+# while the structure that justified it is; a level that has not been traded in
+# this long is stale, not patient. A fresh suggestion for the same product
+# supersedes the pending one regardless, so this is a backstop for products
+# that stop being suggested at all.
+PAPER_PENDING_EXPIRY_HOURS: float = 4.0
+
 # Sub-hourly programmatic entry scanner (charts + no LLM).
 WATCHDOG_ENABLED = True
 WATCHDOG_INTERVAL_SEC = 60  # 1 minute (valid range: 60–300)
@@ -135,11 +143,16 @@ LIVE_PRODUCT_QTY_FLOORS: dict[str, float] = {
 # wider stop is simply more risk, and the measured R-multiples do not carry
 # over. Levels are never moved to fit the budget; only the clip changes.
 #
-# 0.5% of the sleeve ($10) sizes an ETH clip at 1-4 nanos, median 2.5 across
-# the first 15 HQ positions when measured off actual fills. BTC is refused as
-# `risk_cap` whenever one nano — its smallest tradeable size — risks more than
-# the budget, which is 2 of its 5 recorded trades.
-LIVE_HQ_RISK_PCT: float = 0.005
+# 0.7% of the sleeve ($14) sizes an ETH clip at roughly 2-6 nanos depending on
+# stop distance. Raised from 0.5% on 2026-09-02 because one BTC nano — its
+# smallest tradeable size — risks $5.33-$15.43 across the recorded book, so a
+# $10 budget refused BTC as `risk_cap` whenever its stop ran wider than 1,000
+# points. At $14 only the 1,543-point outlier is still refused.
+#
+# This treats a symptom. The cause is that one BTC nano is ~39% of sleeve
+# notional and cannot ladder, so BTC's risk granularity is coarser than a
+# $2,000 sleeve can express. See section 10 of PROJECT_STATE.
+LIVE_HQ_RISK_PCT: float = 0.007
 # Watchdog live execution is gated separately from paper execute.
 WATCHDOG_LIVE_ENABLED = False
 WATCHDOG_LIVE_META_KEY = "watchdog_live_enabled"

@@ -48,17 +48,19 @@ class VaultTests(unittest.TestCase):
         self.assertEqual(p.deploy_pct, bot_config.LIVE_TRADE_DEPLOY_PCT)
         pub = vault.policy_public(p)
         self.assertEqual(pub["notional_per_name_usd"], 1000.0)
-        self.assertEqual(pub["risk_per_name_usd"], 10.0)
+        self.assertEqual(pub["risk_per_name_usd"], 14.0)
         self.assertTrue(pub["mill_excluded"])
         self.assertEqual(pub["hold_horizon"], "swing")
 
     def test_clip_is_sized_to_the_risk_budget(self) -> None:
-        # $10 (0.5% of a $2,000 sleeve) against a 25-point stop: each nano
-        # risks $2.50, so 4 fit. Notional follows from that, not the reverse.
-        decision = vault.propose(
-            _sug(entry=2400.0, stop_loss=2375.0, take_profits=[2450.0]),
-            open_rows=[],
-        )
+        # Budget pinned so the arithmetic stays readable and the test survives
+        # retuning: $10 against a 25-point stop is $2.50 a nano, so 4 fit.
+        # Notional follows from that, not the reverse.
+        with patch.object(bot_config, "LIVE_HQ_RISK_PCT", 0.005):
+            decision = vault.propose(
+                _sug(entry=2400.0, stop_loss=2375.0, take_profits=[2450.0]),
+                open_rows=[],
+            )
         self.assertTrue(decision["admitted"])
         self.assertAlmostEqual(decision["qty"], 0.4)
         self.assertAlmostEqual(decision["risk_usd"], 10.0)
@@ -71,14 +73,15 @@ class VaultTests(unittest.TestCase):
         stop costs upside rather than adding exposure. Size any other way and
         the measured R-multiples do not carry over to live.
         """
-        tight = vault.propose(
-            _sug(entry=2400.0, stop_loss=2375.0, take_profits=[2450.0]),
-            open_rows=[],
-        )
-        wide = vault.propose(
-            _sug(entry=2400.0, stop_loss=2350.0, take_profits=[2450.0]),
-            open_rows=[],
-        )
+        with patch.object(bot_config, "LIVE_HQ_RISK_PCT", 0.005):
+            tight = vault.propose(
+                _sug(entry=2400.0, stop_loss=2375.0, take_profits=[2450.0]),
+                open_rows=[],
+            )
+            wide = vault.propose(
+                _sug(entry=2400.0, stop_loss=2350.0, take_profits=[2450.0]),
+                open_rows=[],
+            )
         self.assertAlmostEqual(tight["qty"], 0.4)
         self.assertAlmostEqual(wide["qty"], 0.2)
         self.assertAlmostEqual(tight["risk_usd"], wide["risk_usd"])
@@ -86,11 +89,12 @@ class VaultTests(unittest.TestCase):
     def test_risk_is_measured_off_the_fill_not_the_plan(self) -> None:
         # Plan risks 25 points, but the market order fills 25 above it, so the
         # real distance to the untouched stop is 50 and the clip halves.
-        decision = vault.propose(
-            _sug(entry=2400.0, stop_loss=2375.0, take_profits=[2450.0]),
-            spot=2425.0,
-            open_rows=[],
-        )
+        with patch.object(bot_config, "LIVE_HQ_RISK_PCT", 0.005):
+            decision = vault.propose(
+                _sug(entry=2400.0, stop_loss=2375.0, take_profits=[2450.0]),
+                spot=2425.0,
+                open_rows=[],
+            )
         self.assertTrue(decision["admitted"])
         self.assertAlmostEqual(decision["qty"], 0.2)
         self.assertAlmostEqual(decision["risk_usd"], 10.0)
@@ -109,13 +113,33 @@ class VaultTests(unittest.TestCase):
         # BTC's smallest tradeable size is one nano. When that alone risks more
         # than the budget there is no clip small enough, so the idea is dropped
         # rather than taken at the wrong size.
-        decision = vault.propose(
-            _sug(product_id="BTC-USD", entry=80000.0, stop_loss=78900.0,
-                 take_profits=[81000.0]),
-            open_rows=[],
-        )
+        with patch.object(bot_config, "LIVE_HQ_RISK_PCT", 0.005):
+            decision = vault.propose(
+                _sug(product_id="BTC-USD", entry=80000.0, stop_loss=78900.0,
+                     take_profits=[81000.0]),
+                open_rows=[],
+            )
         self.assertFalse(decision["admitted"])
         self.assertIn("risk_cap", decision["skip_reason"])
+
+    def test_shipped_budget_admits_the_btc_stop_that_prompted_the_raise(self) -> None:
+        """Cycle 20260902T181231Z: spot 77,387 against a stop at 76,027.
+
+        One nano risked $13.60 there and $10 refused it. The raise to 0.7%
+        exists to admit that trade, so it is asserted against the shipped
+        config rather than a pinned one.
+        """
+        decision = vault.propose(
+            _sug(product_id="BTC-USD", entry=76652.0, stop_loss=76027.0,
+                 take_profits=[77369.59]),
+            spot=77387.44,
+            open_rows=[],
+        )
+        self.assertTrue(decision["admitted"], decision.get("skip_reason"))
+        self.assertAlmostEqual(decision["qty"], 0.01)
+        # The whole point of the raise: this nano fits $14 and did not fit $10.
+        self.assertGreater(decision["risk_usd"], 10.0)
+        self.assertLessEqual(decision["risk_usd"], 14.0)
 
     def test_clip_trims_to_sleeve_headroom_instead_of_refusing(self) -> None:
         # A stop tight enough to afford 20 nanos still has to fit the sleeve.
@@ -164,9 +188,10 @@ class VaultTests(unittest.TestCase):
         self.assertIn(decision["skip_reason"], ("sleeve_full", "heat_cap", "product_open:ETH-USD"))
 
     def test_take_is_idempotent_and_streams(self) -> None:
-        first = vault.take(_sug(), cycle_id="20260827T120000Z_ETH", title="High Quality · ETH")
-        self.assertTrue(first["admitted"])
-        second = vault.take(_sug(), cycle_id="20260827T120000Z_ETH")
+        with patch.object(bot_config, "LIVE_HQ_RISK_PCT", 0.005):
+            first = vault.take(_sug(), cycle_id="20260827T120000Z_ETH", title="High Quality · ETH")
+            self.assertTrue(first["admitted"])
+            second = vault.take(_sug(), cycle_id="20260827T120000Z_ETH")
         self.assertEqual(first["id"], second["id"])
         feed = vault.stream()
         self.assertEqual(len(feed["ideas"]), 1)

@@ -89,14 +89,15 @@ class ExecuteLiveTests(unittest.TestCase):
     # -- sizing ---------------------------------------------------------------
 
     def test_shadow_hq_clip_is_sized_to_the_risk_budget(self) -> None:
-        result = execute.maybe_execute_live(
-            _hq_suggestion(entry=2000.0), 2000.0, cycle_id="c1", source="hq"
-        )
+        # Budget pinned so the clip stays legible: a 60-point stop risks $6 a
+        # nano, so exactly one fits $10. $200 notional is what that costs at
+        # $2,000, not a notional target the qty was solved backwards from.
+        with patch.object(bot_config, "LIVE_HQ_RISK_PCT", 0.005):
+            result = execute.maybe_execute_live(
+                _hq_suggestion(entry=2000.0), 2000.0, cycle_id="c1", source="hq"
+            )
         self.assertIsNotNone(result)
         self.assertEqual(result["mode"], "shadow")
-        # A 60-point stop risks $6 per nano, so one fits the $10 budget.
-        # $200 notional is what that costs at $2,000, not a notional target
-        # the qty was solved backwards from.
         self.assertAlmostEqual(result["qty"], 0.1)
         self.assertAlmostEqual(result["notional_usd"], 200.0)
         self.assertEqual(result["instrument"], "ETP-20DEC30-CDE")
