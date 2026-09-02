@@ -882,11 +882,22 @@ def _match_position_for_add(
     same_side: list[dict],
     suggestion: Suggestion,
     spot: float | None = None,
-) -> dict | None:
-    """Only scale into a position that shares the same order_block_ref and is in profit."""
+) -> tuple[dict | None, bool]:
+    """Pick the position to scale into, and say whether one was refused.
+
+    Returns ``(position, refused)``. Two unrelated answers used to share the
+    ``None`` slot: *no position holds this order block*, a genuinely new idea
+    that should open its own position with its own stop; and *a position holds
+    it but is underwater*, a scale-in ``SCALE_IN_MIN_R`` declines. The caller
+    has to tell them apart, because opening a parallel clip on a refused add is
+    the averaging-down the guard exists to prevent — and it lands with the
+    newer, wider stop, so it adds size to a loser at worse risk than the leg
+    already on.
+    """
     ref = suggestion.order_block_ref
     if not ref:
-        return same_side[0] if same_side else None
+        return (same_side[0] if same_side else None), False
+    refused = False
     for pos in same_side:
         if str(pos.get("order_block_ref") or "") != ref:
             continue
@@ -894,13 +905,15 @@ def _match_position_for_add(
             unrealized_r = _unrealized_r(pos, float(spot))
             if unrealized_r is None or unrealized_r < bot_config.SCALE_IN_MIN_R:
                 logger.info(
-                    "Paper: scale-in blocked underwater pos=%s R=%.2f",
+                    "Paper: scale-in refused, pos=%s underwater R=%.2f need >= %.2f",
                     pos.get("id"),
                     unrealized_r if unrealized_r is not None else float("nan"),
+                    bot_config.SCALE_IN_MIN_R,
                 )
+                refused = True
                 continue
-        return pos
-    return None
+        return pos, False
+    return None, refused
 
 
 def _unrealized_r(pos: dict, spot: float) -> float | None:
@@ -989,7 +1002,14 @@ def _apply_trade_with_netting(
                 eth_qty_override=abs(target_signed),
                 spots=resolved,
             )
-        target_pos = _match_position_for_add(same_side, suggestion, spot=spot)
+        target_pos, refused = _match_position_for_add(
+            same_side, suggestion, spot=spot
+        )
+        if refused:
+            # The guard declined this add. Opening a parallel clip instead would
+            # add the same size to the same losing idea at a wider stop, which
+            # is what the guard is for.
+            return cash
         if target_pos is None:
             # Different OB / new idea — open a separate position with its own SL.
             return _open_position(

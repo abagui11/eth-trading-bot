@@ -585,41 +585,64 @@ class PaperPositionTests(unittest.TestCase):
         state = paper.get_state()
         self.assertAlmostEqual(state["eth_qty"], suggestion.size / 1576.0, places=4)
 
-    def test_same_ob_add_does_not_widen_stop(self) -> None:
-        first = Suggestion(
+    @staticmethod
+    def _ob_short(entry: float, stop: float, tranche: str) -> Suggestion:
+        return Suggestion(
             action="deriv_sell",
             size=0.3,
-            entry=1863.0,
-            stop_loss=1878.0,
+            entry=entry,
+            stop_loss=stop,
             take_profits=[1800.0],
             risk_reward=2.0,
-            rationale="tranche 0.25",
-            entry_tranche="0.25",
+            rationale=f"tranche {tranche}",
+            entry_tranche=tranche,
             order_block_ref="bearish:ob-a",
         )
+
+    def test_same_ob_add_does_not_widen_stop(self) -> None:
+        """A scale-in merges into the leg already on and keeps the tighter stop.
+
+        Entry 1863 against a 1878 stop is 1R = 15, so spot 1850 puts the first
+        leg 0.87R up and clears ``SCALE_IN_MIN_R``. Without that the guard
+        declines the add and there is nothing to merge.
+        """
+        first = self._ob_short(1863.0, 1878.0, "0.25")
         validate.validate_trade_risk(first, portfolio_value=5000.0)
         paper.update(first, spot_price=1863.0, cycle_id="wd_a1")
 
-        second = Suggestion(
-            action="deriv_sell",
-            size=0.3,
-            entry=1870.0,
-            stop_loss=1885.0,  # wider stop — must not replace 1878
-            take_profits=[1800.0],
-            risk_reward=2.0,
-            rationale="competing fill",
-            entry_tranche="0.50",
-            order_block_ref="bearish:ob-a",
-        )
+        second = self._ob_short(1850.0, 1885.0, "0.50")  # wider stop, must not win
+        validate.validate_trade_risk(second, portfolio_value=5000.0)
+        paper.update(second, spot_price=1850.0, cycle_id="wd_a2")
+
+        positions = paper.get_open_positions(1850.0)
+        self.assertEqual(len(positions), 1)
+        self.assertEqual(positions[0]["stop_loss"], 1878.0)
+        self.assertIn("0.25", positions[0]["entry_tranches"])
+        self.assertIn("0.50", positions[0]["entry_tranches"])
+        self.assertGreater(positions[0]["eth_qty"], first.size / 1863.0)
+
+    def test_underwater_same_ob_add_is_refused_not_duplicated(self) -> None:
+        """A declined scale-in must not come back as a second position.
+
+        Spot 1870 puts the 1863 short 0.47R down, under ``SCALE_IN_MIN_R``, so
+        the add is refused. It used to fall through to opening a parallel clip
+        carrying the newer 1885 stop — more size on the same losing idea at
+        worse risk, which is exactly what the guard is meant to stop.
+        """
+        first = self._ob_short(1863.0, 1878.0, "0.25")
+        validate.validate_trade_risk(first, portfolio_value=5000.0)
+        paper.update(first, spot_price=1863.0, cycle_id="wd_a1")
+        opened_qty = paper.get_open_positions(1863.0)[0]["eth_qty"]
+
+        second = self._ob_short(1870.0, 1885.0, "0.50")
         validate.validate_trade_risk(second, portfolio_value=5000.0)
         paper.update(second, spot_price=1870.0, cycle_id="wd_a2")
 
         positions = paper.get_open_positions(1870.0)
         self.assertEqual(len(positions), 1)
         self.assertEqual(positions[0]["stop_loss"], 1878.0)
-        self.assertIn("0.25", positions[0]["entry_tranches"])
-        self.assertIn("0.50", positions[0]["entry_tranches"])
-        self.assertGreater(positions[0]["eth_qty"], first.size / 1863.0)
+        self.assertNotIn("0.50", positions[0]["entry_tranches"] or "")
+        self.assertAlmostEqual(positions[0]["eth_qty"], opened_qty, places=6)
 
     def test_different_ob_opens_separate_position(self) -> None:
         first = Suggestion(
