@@ -772,6 +772,18 @@ def run_watchdog() -> list[Suggestion] | None:
     macro_snap = decision_macro_snapshot(posture)
     execute = bot_config.watchdog_execute_enabled()
 
+    # Send any plan whose entry price has arrived. This runs on the scan
+    # cadence rather than the trade cycle's because the fills that matter land
+    # within minutes of the plan being written; waiting for the next boundary
+    # would miss most of them. ``spots`` above is already fresh, so the check
+    # costs nothing extra.
+    try:
+        import live_pending
+
+        live_pending.sweep(spots)
+    except Exception:
+        logger.exception("Live pending entry sweep failed")
+
     # Reconcile exchange-side closes (stop fills / manual flattens) each scan.
     try:
         import execute as live_exec

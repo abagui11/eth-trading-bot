@@ -188,6 +188,13 @@ def run_cycle() -> list[tuple[Suggestion, list[str]]] | None:
                 cycle_id=product_cycle_id,
                 spots=spots,
             )
+            # A fresh read of the same chart that finds nothing retires any
+            # plan still waiting on it: silence would leave a resting order
+            # Eva would no longer write.
+            if suggestion.action == "no_trade":
+                import live_pending
+
+                live_pending.cancel(product_id)
             # Live mirror (EXECUTION_MODE=shadow|live). Never blocks the
             # paper path — failures log + halt inside execute.
             offer_id = None
@@ -208,19 +215,39 @@ def run_cycle() -> list[tuple[Suggestion, list[str]]] | None:
                 hq_title = display_summary.friendly_title(suggestion)
                 if not display_summary.is_watchdog_suggestion(suggestion):
                     hq_title = f"High Quality · {hq_title}"
+                import live_pending
+
+                # Eva's entry is a pullback into an M5 block, so the market is
+                # usually not there yet. Waiting for it beats buying the mark:
+                # the stop does not move, so every point of chase both widens
+                # the risk and shortens the run to the first target.
+                spot_now = spots.get(product_id, price)
+                waits = bot_config.LIVE_PENDING_ENTRIES_ENABLED and not (
+                    live_pending.is_fillable(
+                        live_pending.side_of(suggestion.action),
+                        suggestion.entry,
+                        spot_now,
+                    )
+                )
+                # A waiting plan fills at its own entry, so that is the price
+                # the clip has to be sized against — sizing it off today's mark
+                # would risk the wrong amount by the width of the gap.
                 vault.take(
                     suggestion,
                     cycle_id=product_cycle_id,
-                    spot=spots.get(product_id, price),
+                    spot=float(suggestion.entry) if waits else spot_now,
                     title=hq_title,
                     blurb=card_summary,
                 )
-                execute.maybe_execute_live(
-                    suggestion,
-                    spots.get(product_id, price),
-                    cycle_id=product_cycle_id,
-                    source="hq",
-                )
+                if waits:
+                    live_pending.record(suggestion, cycle_id=product_cycle_id)
+                else:
+                    execute.maybe_execute_live(
+                        suggestion,
+                        spot_now,
+                        cycle_id=product_cycle_id,
+                        source="hq",
+                    )
                 house_pos_id = user_books.find_house_position_id_for_cycle(
                     product_cycle_id
                 )

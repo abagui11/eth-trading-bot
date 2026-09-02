@@ -98,6 +98,22 @@ CYCLE_INTERVAL_SEC = 1800  # 30 minutes
 # level picked off that curve is noise.
 PAPER_PENDING_EXPIRY_HOURS: float = 4.0
 
+# Live waits for its entry too, rather than buying the mark the moment a plan
+# is minted. Over the 15 HQ plans of the current epoch the plans whose entry
+# had not traded were worth +0.317R at Eva's price and -0.352R at the price
+# live paid, and price never returned to those levels — so the choice was
+# never "fill better", it was "fill worse or pass". See analysis/
+# run_fill_study.py in the trade_ideas repo. The effect is not significant on
+# 15 trades (p = 0.269); this ships because an entry that has not traded is a
+# premise that has not been confirmed, not because of the P&L.
+LIVE_PENDING_ENTRIES_ENABLED: bool = True
+# Backstop only, same argument as PAPER_PENDING_EXPIRY_HOURS above: what really
+# retires a live plan is the next cycle either replacing it or declining the
+# product. This clock only matters if a product stops being evaluated at all.
+# Do not tune it against P&L — per-trade R falls monotonically as the window
+# widens, so any interior optimum is noise.
+LIVE_PENDING_EXPIRY_HOURS: float = 4.0
+
 # Sub-hourly programmatic entry scanner (charts + no LLM).
 WATCHDOG_ENABLED = True
 WATCHDOG_INTERVAL_SEC = 60  # 1 minute (valid range: 60–300)
