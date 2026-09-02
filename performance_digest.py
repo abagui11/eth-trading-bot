@@ -1,9 +1,9 @@
 """Once-daily performance digest: "you'd be up X%" + winning-trade breakdown.
 
-Built from the house paper book (true equity vs starting capital) via
-dashboard.performance.build_performance, with winner rationales pulled from
-the ledger by open cycle id. Posted as an X thread and mirrored to Telegram
-subscribers as plain text.
+Built from the mill volume paper book (every sized idea sent to subscribers),
+not Eva HQ paper and not the internal live mill clip. Rows opened before
+``MILL_PAPER_EPOCH_START`` are ignored so the restart is a clean mill epoch.
+Posted as an X thread and mirrored to Telegram subscribers as plain text.
 """
 
 from __future__ import annotations
@@ -13,65 +13,81 @@ import re
 from typing import Any
 
 import bot_config
-import ledger
-import paper
+import trade_ideas_bridge
 import twitter_post
-from dashboard.performance import build_performance
 
 logger = logging.getLogger(__name__)
 
 _MAX_WINNERS = 3
 _RATIONALE_ONE_LINER_CHARS = 90
+_CLOSED = frozenset({"hit_tp", "hit_sl"})
 
 
-def _rationale_one_liner(open_cycle_id: str | None) -> str:
-    """First sentence of the ledger thesis for a cycle, tightly truncated."""
-    if not open_cycle_id:
+def _rationale_one_liner(raw: str) -> str:
+    text = str(raw or "").strip()
+    if not text:
         return ""
-    try:
-        row = ledger.get_suggestion_by_cycle_id(str(open_cycle_id))
-    except Exception:
-        logger.exception("Ledger lookup failed for cycle %s", open_cycle_id)
-        return ""
-    raw = str((row or {}).get("rationale") or "").strip()
-    if not raw:
-        return ""
-    # Drop watchdog/source prefixes like "[Watchdog — m5_ob_fib_long]".
-    raw = re.sub(r"^\[[^\]]*\]\s*", "", raw)
-    first = re.split(r"(?<=[.!?])\s", raw, maxsplit=1)[0].strip()
+    text = re.sub(r"^\[[^\]]*\]\s*", "", text)
+    first = re.split(r"(?<=[.!?])\s", text, maxsplit=1)[0].strip()
     if len(first) > _RATIONALE_ONE_LINER_CHARS:
         first = first[: _RATIONALE_ONE_LINER_CHARS - 1].rstrip() + "…"
     return first
 
 
+def _unrealized_pct(direction: str, entry: float, spot: float) -> float:
+    if direction == "long":
+        return (spot - entry) / entry * 100.0
+    if direction == "short":
+        return (entry - spot) / entry * 100.0
+    return 0.0
+
+
 def build_digest(spots: dict[str, float] | None = None) -> dict[str, Any]:
-    """Aggregate house-book performance + recent winners with rationale."""
-    perf = build_performance(spots=spots)
-    # Same scope as the headline P&L (whole epoch) — a windowed win rate next
-    # to all-time P&L reads as a contradiction when the window differs.
-    closed = paper.get_closed_trades(limit=500)
+    """Aggregate mill volume-paper performance + recent TP winners."""
+    since = str(bot_config.MILL_PAPER_EPOCH_START or "").strip()
+    trades = trade_ideas_bridge.mill_paper_trades_since(since)
+    closed = [t for t in trades if str(t.get("status") or "") in _CLOSED]
+    opens = [t for t in trades if str(t.get("status") or "") == "open"]
+    wins = [t for t in closed if str(t.get("status") or "") == "hit_tp"]
+    losses = [t for t in closed if str(t.get("status") or "") == "hit_sl"]
 
-    wins = [t for t in closed if float(t.get("realized_pnl_usd") or 0) > 0]
-    losses = [t for t in closed if float(t.get("realized_pnl_usd") or 0) <= 0]
+    realized = sum(float(t.get("pnl_pct") or 0) for t in closed)
+    unrealized = 0.0
+    for trade in opens:
+        product = str(trade.get("product_id") or "")
+        entry = trade.get("entry")
+        direction = str(trade.get("direction") or "")
+        spot = (spots or {}).get(product)
+        if entry is None or spot is None or direction not in ("long", "short"):
+            continue
+        unrealized += _unrealized_pct(direction, float(entry), float(spot))
 
+    wins_sorted = sorted(
+        wins,
+        key=lambda t: str(t.get("closed_at") or ""),
+        reverse=True,
+    )
     winners: list[dict[str, Any]] = []
-    for trade in wins[:_MAX_WINNERS]:
+    for trade in wins_sorted[:_MAX_WINNERS]:
         product_id = str(trade.get("product_id") or "ETH-USD")
         winners.append(
             {
                 "product_label": bot_config.product_label(product_id),
-                "side": str(trade.get("side") or ""),
-                "pnl_pct": float(trade.get("realized_pnl_pct") or 0.0),
-                "pnl_usd": float(trade.get("realized_pnl_usd") or 0.0),
-                "rationale": _rationale_one_liner(trade.get("open_cycle_id")),
+                "side": str(trade.get("direction") or ""),
+                "pnl_pct": float(trade.get("pnl_pct") or 0.0),
+                "rationale": _rationale_one_liner(
+                    str(trade.get("blurb") or trade.get("title") or "")
+                ),
             }
         )
 
     total = len(wins) + len(losses)
+    total_pnl_pct = realized + unrealized
     return {
-        "total_pnl_pct": float(perf.get("total_pnl_pct") or 0.0),
-        "equity_usd": float(perf.get("equity_usd") or 0.0),
-        "starting_usd": float(perf.get("starting_usd") or 0.0),
+        "total_pnl_pct": round(total_pnl_pct, 2),
+        "realized_pnl_pct": round(realized, 2),
+        "unrealized_pnl_pct": round(unrealized, 2),
+        "since": since,
         "wins": len(wins),
         "losses": len(losses),
         "win_rate_pct": round(len(wins) / total * 100, 1) if total else 0.0,
@@ -146,12 +162,12 @@ def run_daily_digest() -> None:
 
         spots = research.get_spot_prices()
     except Exception:
-        logger.exception("Spot fetch failed for daily digest — marking at entry")
+        logger.exception("Spot fetch failed for daily digest — marking closed only")
         spots = None
 
     digest = build_digest(spots)
     if digest["wins"] + digest["losses"] == 0:
-        logger.info("Daily digest skipped — no closed trades yet")
+        logger.info("Daily digest skipped — no closed mill trades in this epoch")
         return
 
     tweet_ids = twitter_post.post_thread(format_digest_tweets(digest))

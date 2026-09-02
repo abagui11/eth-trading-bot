@@ -186,3 +186,63 @@ def test_digest_text_breakdown():
     text = performance_digest.format_digest_text(_digest())
     assert "Wins: 8 · Losses: 3" in text
     assert "H4 order block held after the sweep." in text
+
+
+def test_build_digest_uses_mill_epoch_not_eva_paper(monkeypatch):
+    rows = [
+        {
+            "status": "hit_sl",
+            "product_id": "ETH-USD",
+            "direction": "short",
+            "pnl_pct": -1.15,
+            "opened_at": "2026-09-02T12:00:00Z",
+            "closed_at": "2026-09-02T13:44:47Z",
+            "blurb": "New York open: ETH session setup",
+            "entry": 2400.0,
+        },
+        {
+            "status": "hit_tp",
+            "product_id": "ETH-USD",
+            "direction": "short",
+            "pnl_pct": 1.52,
+            "opened_at": "2026-09-02T09:00:00Z",
+            "closed_at": "2026-09-02T10:33:57Z",
+            "blurb": "BTC flipped bearish — ETH follow-on.",
+            "entry": 2410.0,
+        },
+        {
+            "status": "hit_tp",
+            "product_id": "BTC-USD",
+            "direction": "short",
+            "pnl_pct": 1.31,
+            "opened_at": "2026-09-01T08:00:00Z",
+            "closed_at": "2026-09-02T09:37:30Z",
+            "blurb": "London open: BTC session setup",
+            "entry": 77000.0,
+        },
+        {
+            "status": "open",
+            "product_id": "ETH-USD",
+            "direction": "short",
+            "pnl_pct": None,
+            "opened_at": "2026-09-02T14:00:00Z",
+            "closed_at": None,
+            "blurb": "still open",
+            "entry": 2400.0,
+        },
+    ]
+    monkeypatch.setattr(performance_digest.bot_config, "MILL_PAPER_EPOCH_START", "2026-09-01")
+    monkeypatch.setattr(
+        performance_digest.trade_ideas_bridge, "mill_paper_trades_since", lambda since: rows
+    )
+    digest = performance_digest.build_digest(spots={"ETH-USD": 2376.0})
+    assert digest["wins"] == 2
+    assert digest["losses"] == 1
+    assert digest["win_rate_pct"] == 66.7
+    # closed +1.52+1.31-1.15 = +1.68; open short 2400→2376 = +1.0
+    assert abs(digest["total_pnl_pct"] - 2.68) < 0.02
+    assert digest["winners"][0]["pnl_pct"] == 1.52
+    assert "ETH follow-on" in digest["winners"][0]["rationale"]
+    text = performance_digest.format_digest_text(digest)
+    assert "ETH short +1.5%" in text
+    assert "Asset preference" not in text

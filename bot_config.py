@@ -225,8 +225,12 @@ LONG_THESIS_INTERVAL_SEC = 24 * 3600
 # Once-daily performance digest ("you'd be up X%" + winner breakdown),
 # posted as an X thread and mirrored to Telegram subscribers. X posting
 # additionally requires TWITTER_ENABLED + keys in .env.
+# Source is the mill volume paper book (ideas subscribers actually follow),
+# not Eva HQ paper. MILL_PAPER_EPOCH_START cuts off the pre-restart mill.
 DAILY_PERFORMANCE_POST_ENABLED = True
 DAILY_DIGEST_HOUR_UTC = 21  # 21:00 UTC ≈ 5pm ET
+DAILY_DIGEST_SOURCE = "mill"
+MILL_PAPER_EPOCH_START = "2026-09-01"  # UTC; volume paper opened_at >= this
 
 
 def qty_caps(product_id: str) -> tuple[float, float]:

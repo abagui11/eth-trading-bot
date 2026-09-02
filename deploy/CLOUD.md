@@ -251,6 +251,21 @@ sudo -u ethagent /opt/eth-trading-agent/.venv/bin/python \
 
 **Back up first:** `cp /opt/eth-trading-agent/ledger.db ~/ledger-backup-$(date +%Y%m%d).db`
 
+### Restart the mill volume paper epoch (daily digest)
+
+The 5pm ET "you'd be up X%" post is the **mill volume paper book** from `MILL_PAPER_EPOCH_START` (default `2026-09-01`), not Eva HQ paper and not the live mill clip. To drop pre-epoch mill paper from `/volume` as well:
+
+```bash
+cp /opt/trade-ideas/ideas.db ~/ideas-backup-$(date +%Y%m%d).db
+sudo -u ethagent /opt/eth-trading-agent/.venv/bin/python \
+  /opt/eth-trading-agent/deploy/reset_mill_paper_epoch.py --dry-run
+sudo -u ethagent /opt/eth-trading-agent/.venv/bin/python \
+  /opt/eth-trading-agent/deploy/reset_mill_paper_epoch.py --yes
+sudo systemctl restart eth-dashboard
+```
+
+Rows opened before the cutoff move to `paper_trades_archive`. Personal `/me` books are unchanged.
+
 ### Re-score macro headlines after a keyword change
 
 Keyword edits (e.g. promoting CLARITY Act / legislative catalysts in `macro/keywords.py`) only affect headlines ingested **after** the change. Headlines already stored as `ignored` keep their old score and are skipped by the 7-day URL-hash dedup, so they never resurface. After deploying a keyword change, backfill the recent window so already-captured headlines get promoted:

@@ -76,6 +76,29 @@ _HUB_COLUMNS = (
     ("live_filled_by", "INTEGER"),
 )
 
+_PAPER_ARCHIVE_SCHEMA = """
+CREATE TABLE IF NOT EXISTS paper_trades_archive (
+    id INTEGER PRIMARY KEY,
+    idea_id INTEGER NOT NULL,
+    product_id TEXT NOT NULL,
+    direction TEXT NOT NULL,
+    entry REAL,
+    stop_loss REAL,
+    take_profit REAL,
+    take_profits_json TEXT,
+    status TEXT NOT NULL,
+    exit_price REAL,
+    pnl_pct REAL,
+    opened_at TEXT NOT NULL,
+    closed_at TEXT,
+    archived_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_paper_archive_opened
+    ON paper_trades_archive(opened_at);
+"""
+
+_MILL_PAPER_EPOCH_META = "mill_paper_epoch_start"
+
 
 def _ensure_hub_columns(conn: sqlite3.Connection) -> None:
     try:
@@ -588,6 +611,117 @@ def format_decision_reply(status: DecisionStatus, decision: str, idea_id: int) -
     if status == "unknown_idea":
         return f"Idea #{idea_id} is no longer available."
     return "Idea decisions are unavailable right now — try again shortly."
+
+
+def mill_paper_trades_since(since: str) -> list[dict[str, Any]]:
+    """Volume paper rows opened on/after ``since`` (UTC date or ISO prefix)."""
+    conn = _connect()
+    if conn is None:
+        return []
+    cutoff = str(since or "").strip()
+    if not cutoff:
+        return []
+    try:
+        with conn:
+            tables = {
+                str(r[0])
+                for r in conn.execute(
+                    "SELECT name FROM sqlite_master WHERE type='table'"
+                ).fetchall()
+            }
+            if "paper_trades" not in tables:
+                return []
+            rows = conn.execute(
+                """
+                SELECT p.*, i.title, i.source, i.confidence, i.status AS idea_status,
+                       i.sent_at, i.blurb
+                FROM paper_trades p
+                LEFT JOIN ideas i ON i.id = p.idea_id
+                WHERE p.opened_at >= ?
+                ORDER BY p.id DESC
+                """,
+                (cutoff,),
+            ).fetchall()
+        return [dict(r) for r in rows]
+    except sqlite3.Error:
+        logger.exception("mill paper epoch read failed")
+        return []
+    finally:
+        conn.close()
+
+
+def archive_mill_paper_before(since: str) -> dict[str, Any]:
+    """Move volume paper rows opened before ``since`` into paper_trades_archive.
+
+    The live mill book (and the daily digest) then only see the restarted epoch.
+    Personal ``user_paper_trades`` are left alone.
+    """
+    cutoff = str(since or "").strip()
+    if not cutoff:
+        raise ValueError("since is required")
+    conn = _connect()
+    if conn is None:
+        raise RuntimeError("IDEAS_DB is unavailable")
+    now = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    try:
+        with conn:
+            conn.executescript(_PAPER_ARCHIVE_SCHEMA)
+            tables = {
+                str(r[0])
+                for r in conn.execute(
+                    "SELECT name FROM sqlite_master WHERE type='table'"
+                ).fetchall()
+            }
+            if "paper_trades" not in tables:
+                return {"archived": 0, "remaining": 0, "since": cutoff}
+            to_move = conn.execute(
+                "SELECT COUNT(*) FROM paper_trades WHERE opened_at < ?",
+                (cutoff,),
+            ).fetchone()[0]
+            conn.execute(
+                """
+                INSERT OR IGNORE INTO paper_trades_archive (
+                    id, idea_id, product_id, direction, entry, stop_loss,
+                    take_profit, take_profits_json, status, exit_price,
+                    pnl_pct, opened_at, closed_at, archived_at
+                )
+                SELECT id, idea_id, product_id, direction, entry, stop_loss,
+                       take_profit, take_profits_json, status, exit_price,
+                       pnl_pct, opened_at, closed_at, ?
+                FROM paper_trades
+                WHERE opened_at < ?
+                """,
+                (now, cutoff),
+            )
+            conn.execute(
+                "DELETE FROM paper_trades WHERE opened_at < ?",
+                (cutoff,),
+            )
+            remaining = conn.execute(
+                "SELECT COUNT(*) FROM paper_trades"
+            ).fetchone()[0]
+            conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS meta (
+                    key TEXT PRIMARY KEY,
+                    value TEXT
+                )
+                """
+            )
+            conn.execute(
+                """
+                INSERT INTO meta (key, value) VALUES (?, ?)
+                ON CONFLICT(key) DO UPDATE SET value = excluded.value
+                """,
+                (_MILL_PAPER_EPOCH_META, cutoff),
+            )
+        return {
+            "archived": int(to_move),
+            "remaining": int(remaining),
+            "since": cutoff,
+        }
+    finally:
+        conn.close()
 
 
 def volume_book_payload(*, limit: int = 100) -> dict[str, Any] | None:

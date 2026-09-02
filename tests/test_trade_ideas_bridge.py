@@ -443,6 +443,50 @@ class TradeIdeasBridgeTests(unittest.TestCase):
             trade_ideas_bridge.format_close_reply("closed", closed),
         )
 
+    def test_archive_mill_paper_keeps_epoch_rows(self) -> None:
+        conn = sqlite3.connect(self.db_path)
+        conn.executescript(
+            """
+            CREATE TABLE paper_trades (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                idea_id INTEGER NOT NULL UNIQUE,
+                product_id TEXT NOT NULL,
+                direction TEXT NOT NULL,
+                entry REAL,
+                stop_loss REAL,
+                take_profit REAL,
+                take_profits_json TEXT,
+                status TEXT NOT NULL DEFAULT 'open',
+                exit_price REAL,
+                pnl_pct REAL,
+                opened_at TEXT NOT NULL,
+                closed_at TEXT
+            );
+            INSERT INTO ideas (id, source, product_id, direction, title, blurb,
+                signal_key, created_at)
+            VALUES (6, 'news', 'BTC-USD', 'short', 'Old', 'old', 'news:2',
+                '2026-08-10T00:00:00Z');
+            INSERT INTO paper_trades
+                (idea_id, product_id, direction, entry, stop_loss, take_profit,
+                 status, pnl_pct, opened_at, closed_at)
+            VALUES
+                (5, 'ETH-USD', 'long', 100, 95, 110, 'hit_sl', -1.0,
+                 '2026-08-28T00:00:00Z', '2026-08-28T01:00:00Z'),
+                (6, 'BTC-USD', 'short', 80000, 81000, 78000, 'hit_tp', 1.5,
+                 '2026-09-01T12:00:00Z', '2026-09-01T18:00:00Z');
+            """
+        )
+        conn.commit()
+        conn.close()
+
+        summary = trade_ideas_bridge.archive_mill_paper_before("2026-09-01")
+        self.assertEqual(summary["archived"], 1)
+        self.assertEqual(summary["remaining"], 1)
+        kept = trade_ideas_bridge.mill_paper_trades_since("2026-09-01")
+        self.assertEqual(len(kept), 1)
+        self.assertEqual(kept[0]["idea_id"], 6)
+        self.assertEqual(kept[0]["pnl_pct"], 1.5)
+
 
 if __name__ == "__main__":
     unittest.main()
