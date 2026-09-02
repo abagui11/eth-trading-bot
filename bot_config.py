@@ -89,12 +89,13 @@ PAPER_EPOCH_LABEL = "5k_usd"
 # hour. Keep at or above IDEA_EXPIRY_MINUTES so a card cannot outlive its cycle.
 CYCLE_INTERVAL_SEC = 1800  # 30 minutes
 
-# How long an untouched paper entry waits for its pullback before being
-# dropped. Eva plans limits into an M5 order block, so a plan is only valid
-# while the structure that justified it is; a level that has not been traded in
-# this long is stale, not patient. A fresh suggestion for the same product
-# supersedes the pending one regardless, so this is a backstop for products
-# that stop being suggested at all.
+# Backstop only. What actually bounds a pending paper entry is re-evaluation:
+# a fresh plan for the product supersedes it and a `no_trade` verdict cancels
+# it, which at a 30-minute cadence retires the median plan in ~1.4h. This clock
+# exists for the case where a product stops being evaluated at all — a skipped
+# cycle, a dead candle feed, a config change to TRADED_PRODUCTS. Do not tune it
+# against P&L; the limit-fill sweep is non-monotonic across expiries and any
+# level picked off that curve is noise.
 PAPER_PENDING_EXPIRY_HOURS: float = 4.0
 
 # Sub-hourly programmatic entry scanner (charts + no LLM).

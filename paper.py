@@ -2016,6 +2016,33 @@ def _record_pending_entry(
     )
 
 
+def _cancel_pending_entry(conn: sqlite3.Connection, product_id: str) -> None:
+    """Drop a waiting plan once Eva re-reads the chart and declines it.
+
+    A plan is only valid while the structure that justified it is. Every cycle
+    evaluates every traded product, so a ``no_trade`` is a fresh verdict on the
+    same chart rather than silence — resting the old limit through it would
+    hold an order Eva would no longer write.
+
+    This, not the fixed clock, is what actually bounds a pending's life. Eva
+    re-issues a plan for a given product about 65% of the time (n=855
+    suggestions since 2026-08-15, all lanes), so a plan survives ~2.9 cycles on
+    average, roughly 1.4h at a 30-minute cadence. That lands in the region the
+    limit-fill sweep measured as least adverse without being tuned to it: the
+    sweep's P&L is non-monotonic across expiries and must not be fitted, but
+    its fill rate rises monotonically with the window, so short is defensible
+    on the mechanism alone.
+    """
+    cur = conn.execute(
+        "DELETE FROM paper_positions WHERE status = 'pending' AND product_id = ?",
+        (product_id,),
+    )
+    if cur.rowcount:
+        logger.info(
+            "paper: %s pending entry cancelled — no setup this cycle", product_id
+        )
+
+
 def _fetch_pending_positions(conn: sqlite3.Connection) -> list[dict]:
     rows = conn.execute(
         """
@@ -2245,6 +2272,8 @@ def update(
                 cash = _apply_trade_with_netting(
                     conn, cash, suggestion, trade_spot, cycle_id, spots=resolved
                 )
+            else:
+                _cancel_pending_entry(conn, product_id)
 
             conn.execute(
                 """

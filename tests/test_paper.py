@@ -1001,6 +1001,19 @@ class PaperPendingEntryTests(unittest.TestCase):
         with patch("research.fetch_coinbase_candles_range", return_value=bars or []):
             paper.update(sug, spot_price=spot, cycle_id=cycle)
 
+    def _tick(self, spot: float, bars=None, cycle="c2") -> None:
+        """Advance a cycle without a verdict on ETH.
+
+        Declining ETH would cancel its pending, so a test that wants to observe
+        the fill path has to tick on the other product.
+        """
+        self._run(
+            Suggestion.no_trade("mark", product_id="BTC-USD"),
+            spot=spot,
+            bars=bars,
+            cycle=cycle,
+        )
+
     def _backdate_walk(self, ts: str = "2026-08-11T12:00:00Z") -> None:
         """Open the walk window. A pending created this second has none yet."""
         with sqlite3.connect(self._db_path) as conn:
@@ -1041,7 +1054,7 @@ class PaperPendingEntryTests(unittest.TestCase):
             {"ts": "2026-08-11T13:00:00Z", "low": 1798.0, "high": 1845.0,
              "open": 1845.0, "close": 1805.0}
         ]
-        self._run(Suggestion.no_trade("mark"), spot=1805.0, bars=bars, cycle="c2")
+        self._tick(spot=1805.0, bars=bars)
 
         positions = paper.get_open_positions(1805.0)
         self.assertEqual(len(positions), 1)
@@ -1055,7 +1068,7 @@ class PaperPendingEntryTests(unittest.TestCase):
             {"ts": "2026-08-11T13:00:00Z", "low": 1842.0, "high": 1860.0,
              "open": 1850.0, "close": 1855.0}
         ]
-        self._run(Suggestion.no_trade("mark"), spot=1855.0, bars=bars, cycle="c2")
+        self._tick(spot=1855.0, bars=bars)
 
         self.assertEqual(paper.get_open_positions(1855.0), [])
         self.assertEqual(len(self._pending()), 1)
@@ -1068,7 +1081,9 @@ class PaperPendingEntryTests(unittest.TestCase):
                 ("2026-08-01T00:00:00Z",),
             )
 
-        self._run(Suggestion.no_trade("mark"), spot=1855.0, cycle="c2")
+        # Tick on the other product: the clock has to retire this, not the
+        # decline path, or the test proves nothing about expiry.
+        self._tick(spot=1855.0)
 
         self.assertEqual(self._pending(), [])
         self.assertEqual(paper.get_open_positions(1855.0), [])
@@ -1080,6 +1095,43 @@ class PaperPendingEntryTests(unittest.TestCase):
         pending = self._pending()
         self.assertEqual(len(pending), 1)
         self.assertAlmostEqual(pending[0][2], 1810.0)
+
+    def test_a_decline_cancels_the_plan_still_waiting(self) -> None:
+        """Eva re-read the chart and found no setup, so the limit comes off.
+
+        This is what actually bounds a pending's life; the expiry clock is a
+        backstop for products that stop being evaluated at all.
+        """
+        self._run(self._long(1800.0, 1780.0, [1830.0]), spot=1850.0)
+        self.assertEqual(len(self._pending()), 1)
+
+        self._run(Suggestion.no_trade("no setup"), spot=1850.0, cycle="c2")
+
+        self.assertEqual(self._pending(), [])
+
+    def test_a_decline_on_one_product_leaves_the_other_waiting(self) -> None:
+        self._run(self._long(1800.0, 1780.0, [1830.0]), spot=1850.0)
+        self._run(
+            Suggestion.no_trade("no setup", product_id="BTC-USD"),
+            spot=1850.0,
+            cycle="c2",
+        )
+
+        self.assertEqual(len(self._pending()), 1)
+
+    def test_a_plan_that_filled_this_window_survives_a_later_decline(self) -> None:
+        """The fill already happened, so a verdict written after it cannot undo it."""
+        self._run(self._long(1800.0, 1780.0, [1830.0]), spot=1850.0)
+        self._backdate_walk()
+        bars = [
+            {"ts": "2026-08-11T13:00:00Z", "low": 1798.0, "high": 1845.0,
+             "open": 1845.0, "close": 1805.0}
+        ]
+        self._run(Suggestion.no_trade("no setup"), spot=1805.0, bars=bars, cycle="c2")
+
+        positions = paper.get_open_positions(1805.0)
+        self.assertEqual(len(positions), 1)
+        self.assertAlmostEqual(float(positions[0]["avg_entry"]), 1800.0)
 
 
 if __name__ == "__main__":
