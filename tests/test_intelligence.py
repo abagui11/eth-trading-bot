@@ -29,7 +29,7 @@ from intelligence.stance import (
     run_stance_cycle,
 )
 import main
-from main import seconds_until_next_hour
+from main import seconds_until_next_slot
 
 
 def _bars(closes: list[float], volume: float = 100.0) -> list[dict]:
@@ -359,16 +359,25 @@ class TestHourlyJobOrdering(unittest.TestCase):
 
 class TestWallClockScheduling(unittest.TestCase):
     def test_seconds_until_next_hour(self) -> None:
-        # 15:30:00 UTC -> 1800s to 16:00.
         ts = 1_754_838_600  # arbitrary epoch at :30 boundary check below
         remainder = ts % 3600
         expected = 3600 - remainder
-        self.assertAlmostEqual(seconds_until_next_hour(ts), max(expected, 10.0))
+        self.assertAlmostEqual(seconds_until_next_slot(3600, ts), max(expected, 10.0))
 
     def test_minimum_guard(self) -> None:
         # 1 second before the hour -> guard kicks in.
         ts = 3600 * 1000 - 1
-        self.assertEqual(seconds_until_next_hour(ts), 10.0)
+        self.assertEqual(seconds_until_next_slot(3600, ts), 10.0)
+
+    def test_half_hour_cadence_fires_on_the_half(self) -> None:
+        # A 30-minute cadence has to land on :00 and :30, not drift from start.
+        on_the_hour = 3600 * 1000
+        self.assertEqual(seconds_until_next_slot(1800, on_the_hour + 60), 1740.0)
+        self.assertEqual(seconds_until_next_slot(1800, on_the_hour + 1860), 1740.0)
+
+    def test_interval_floor_rejects_a_runaway_cadence(self) -> None:
+        # A misconfigured 0 would otherwise divide by zero and hammer the LLM.
+        self.assertEqual(seconds_until_next_slot(0, 3600 * 1000 + 30), 30.0)
 
 
 class TestInternalGate(unittest.TestCase):

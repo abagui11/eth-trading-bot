@@ -82,6 +82,13 @@ PRODUCT_OB_MIN_WIDTH_PCT: dict[str, float] = {
 # Label for the current paper epoch (shown on dashboard after reset).
 PAPER_EPOCH_LABEL = "5k_usd"
 
+# How often the full LLM trade cycle runs. Slots are wall-clock aligned, so
+# 1800 fires on :00 and :30. Halving this doubles idea flow and LLM spend; how
+# many of those ideas can be *held* is bounded by LIVE_MAX_OPEN_HQ, so the
+# practical effect is that a freed slot refills within 30 minutes instead of an
+# hour. Keep at or above IDEA_EXPIRY_MINUTES so a card cannot outlive its cycle.
+CYCLE_INTERVAL_SEC = 1800  # 30 minutes
+
 # Sub-hourly programmatic entry scanner (charts + no LLM).
 WATCHDOG_ENABLED = True
 WATCHDOG_INTERVAL_SEC = 60  # 1 minute (valid range: 60–300)
@@ -100,10 +107,15 @@ SCALE_IN_MIN_R = 0.5
 # PRODUCT_QTY_CAPS) is untouched — never reuse paper equity for live size.
 LIVE_HQ_EQUITY_USD = 2000.0          # HQ ICT margin sleeve
 LIVE_TRADE_DEPLOY_PCT = 0.50         # fallback notional when no clip is set
-LIVE_MAX_OPEN_HQ = 2                 # skip new ideas when full (no FIFO kill)
-LIVE_MAX_PER_PRODUCT_HQ = 1          # concurrent positions in one product
+LIVE_MAX_OPEN_HQ = 4                 # skip new ideas when full (no FIFO kill)
+LIVE_MAX_PER_PRODUCT_HQ = 2          # concurrent positions in one product
 LIVE_DAILY_LOSS_LIMIT_USD = 160.0    # 8% of sleeve → halt until next UTC day
-LIVE_MAX_LEVERAGE = 1.0              # notional ≤ sleeve × 1 (1x; hard cap 2x)
+# Notional ceiling, not a risk ceiling — per-trade risk is bounded by
+# LIVE_HQ_RISK_PCT. Four concurrent clips at their widest (two tight-stop ETH
+# at 4 nanos, ~$960 each, plus two BTC at ~$800) is ~$3,520, which needs 1.76x.
+# Below that the clip is trimmed to fit rather than refused, so too low a value
+# shows up as undersized clips rather than skips. 2x stays the hard cap.
+LIVE_MAX_LEVERAGE = 1.8              # notional ≤ sleeve × this (hard cap 2x)
 LIVE_SCALE_IN_ENABLED = False        # 0.718 adds are paper-only on live
 # Live qty floors per product = one CDE nano contract (orders are whole
 # contracts; anything smaller cannot execute). ETH 0.1 ≈ $250, BTC 0.01 ≈ $800.

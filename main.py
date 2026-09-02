@@ -17,15 +17,20 @@ from zmove import run_zmove_scan
 
 logger = logging.getLogger(__name__)
 
-HOURLY_INTERVAL_SEC = 3600
 FIRST_RUN_DELAY_SEC = 10
 
 
-def seconds_until_next_hour(now: float | None = None) -> float:
-    """Delay until the next wall-clock top of hour (minimum 10s guard)."""
+def seconds_until_next_slot(
+    interval_sec: int = 3600, now: float | None = None
+) -> float:
+    """Delay until the next wall-clock slot boundary (minimum 10s guard).
+
+    Slots are multiples of ``interval_sec`` from the epoch, so an hourly
+    cadence fires on the hour and a half-hourly one on :00 and :30.
+    """
     ts = now if now is not None else time.time()
-    remainder = ts % 3600
-    delay = 3600 - remainder
+    interval = max(int(interval_sec), 60)
+    delay = interval - (ts % interval)
     return max(delay, 10.0)
 
 
@@ -155,12 +160,13 @@ def main() -> None:
     if app.job_queue is None:
         raise RuntimeError("JobQueue unavailable — install python-telegram-bot[job-queue]")
 
-    # Wall-clock alignment: first hourly run fires at the next top of hour, and
+    # Wall-clock alignment: the first run fires at the next slot boundary, and
     # a bootstrap run fires shortly after start so restarts don't leave a gap.
-    first_hourly = seconds_until_next_hour()
+    cycle_interval = max(int(bot_config.CYCLE_INTERVAL_SEC), 60)
+    first_hourly = seconds_until_next_slot(cycle_interval)
     app.job_queue.run_repeating(
         hourly_job,
-        interval=HOURLY_INTERVAL_SEC,
+        interval=cycle_interval,
         first=first_hourly,
         name="hourly_cycle",
     )
@@ -226,7 +232,8 @@ def main() -> None:
         logger.info("Z-Move scan enabled — every %ss", zmove_interval)
 
     logger.info(
-        "Starting ETH trading agent (polling + hourly cycle on the hour, next in %.0fs)",
+        "Starting ETH trading agent (polling + trade cycle every %ss, next in %.0fs)",
+        cycle_interval,
         first_hourly,
     )
     app.run_polling(drop_pending_updates=True)

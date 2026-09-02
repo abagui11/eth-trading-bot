@@ -112,7 +112,7 @@ sudo systemctl status eth-agent
 sudo journalctl -u eth-agent -f    # live logs — Ctrl+C to exit
 ```
 
-First hourly cycle runs ~10 seconds after start, then every hour.
+First trade cycle runs ~10 seconds after start, then on the wall-clock slot set by `CYCLE_INTERVAL_SEC` (1800 = every 30 minutes, on :00 and :30).
 
 ### 7. Verify
 

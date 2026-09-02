@@ -117,12 +117,13 @@ class ExecuteLiveTests(unittest.TestCase):
 
     def test_mill_clip_too_large_for_sleeve_is_skipped(self) -> None:
         # One BTC contract at $200k is $2,000 > the $1,400 sleeve at 1x.
-        result = execute.maybe_execute_live(
-            _hq_suggestion(product_id="BTC-USD", entry=200000.0, stop_loss=196000.0),
-            200000.0,
-            cycle_id="c1",
-            source="mill",
-        )
+        with patch.object(bot_config, "LIVE_MAX_LEVERAGE", 1.0):
+            result = execute.maybe_execute_live(
+                _hq_suggestion(product_id="BTC-USD", entry=200000.0, stop_loss=196000.0),
+                200000.0,
+                cycle_id="c1",
+                source="mill",
+            )
         self.assertIsNone(result)
 
     def test_mill_eth_clip_survives_a_high_eth_price(self) -> None:
@@ -237,15 +238,17 @@ class ExecuteLiveTests(unittest.TestCase):
         self.assertIsNotNone(execute.is_halted())
         self.assertTrue(execute.is_halted().startswith("daily_loss:hq"))
 
-    def test_exposure_cap_1x(self) -> None:
-        # One open $1,600 position; a new $1,000 clip would exceed $2,000 × 1x.
+    def test_exposure_cap_refuses_when_not_even_one_contract_fits(self) -> None:
+        # $1,950 already open against a $2,000 ceiling leaves $50 of headroom,
+        # short of the $200 a single ETH nano costs — so there is nothing to
+        # trim down to and the idea is refused rather than sized to zero.
         live_ledger.record_open(
             cycle_id="c1",
             source="hq",
             product_id="ETH-USD",
             instrument="ETH_USDC-PERPETUAL",
             side="long",
-            qty=0.8,
+            qty=0.975,
             entry=2000.0,
             stop_loss=1940.0,
             take_profits_json="[]",
@@ -253,12 +256,13 @@ class ExecuteLiveTests(unittest.TestCase):
             stop_order_id=None,
             notes="ob:ob-0",
         )
-        result = execute.maybe_execute_live(
-            _hq_suggestion(order_block_ref="ob-2"),
-            2000.0,
-            cycle_id="c2",
-            source="hq",
-        )
+        with patch.object(bot_config, "LIVE_MAX_LEVERAGE", 1.0):
+            result = execute.maybe_execute_live(
+                _hq_suggestion(order_block_ref="ob-2"),
+                2000.0,
+                cycle_id="c2",
+                source="hq",
+            )
         self.assertIsNone(result)
 
     def test_mill_daily_fill_cap_off_by_default(self) -> None:

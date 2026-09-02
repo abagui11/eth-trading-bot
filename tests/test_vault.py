@@ -121,10 +121,11 @@ class VaultTests(unittest.TestCase):
         # A stop tight enough to afford 20 nanos still has to fit the sleeve.
         # Trimming keeps the idea tradeable where a flat heat cap refused it.
         opens = [{"cycle_id": "c0", "product_id": "BTC-USD", "notional_usd": 1600.0}]
-        decision = vault.propose(
-            _sug(entry=2400.0, stop_loss=2395.0, take_profits=[2450.0]),
-            open_rows=opens,
-        )
+        with patch.object(bot_config, "LIVE_MAX_LEVERAGE", 1.0):
+            decision = vault.propose(
+                _sug(entry=2400.0, stop_loss=2395.0, take_profits=[2450.0]),
+                open_rows=opens,
+            )
         self.assertTrue(decision["admitted"])
         self.assertAlmostEqual(decision["qty"], 0.1)
         self.assertLessEqual(decision["notional_usd"], 400.0)
@@ -139,18 +140,26 @@ class VaultTests(unittest.TestCase):
             "scale_in",
         )
 
-    def test_one_name_per_product(self) -> None:
+    def test_per_product_cap_blocks_the_next_clip(self) -> None:
         open_eth = [{"cycle_id": "c0", "product_id": "ETH-USD", "notional_usd": 1000.0}]
-        decision = vault.propose(_sug(), open_rows=open_eth)
+        with patch.object(bot_config, "LIVE_MAX_PER_PRODUCT_HQ", 1):
+            decision = vault.propose(_sug(), open_rows=open_eth)
         self.assertFalse(decision["admitted"])
         self.assertIn("product_open", decision["skip_reason"])
+
+    def test_per_product_cap_admits_up_to_its_limit(self) -> None:
+        open_eth = [{"cycle_id": "c0", "product_id": "ETH-USD", "notional_usd": 200.0}]
+        with patch.object(bot_config, "LIVE_MAX_PER_PRODUCT_HQ", 2):
+            decision = vault.propose(_sug(), open_rows=open_eth)
+        self.assertTrue(decision["admitted"])
 
     def test_heat_cap(self) -> None:
         opens = [
             {"cycle_id": "c0", "product_id": "ETH-USD", "notional_usd": 1000.0},
             {"cycle_id": "c1", "product_id": "BTC-USD", "notional_usd": 1000.0},
         ]
-        decision = vault.propose(_sug(product_id="ETH-USD"), open_rows=opens)
+        with patch.object(bot_config, "LIVE_MAX_LEVERAGE", 1.0):
+            decision = vault.propose(_sug(product_id="ETH-USD"), open_rows=opens)
         self.assertFalse(decision["admitted"])
         self.assertIn(decision["skip_reason"], ("sleeve_full", "heat_cap", "product_open:ETH-USD"))
 
