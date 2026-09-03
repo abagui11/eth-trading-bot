@@ -20,14 +20,20 @@
     <div class="inv-kicker-row">
       <p class="inv-kicker"><span class="feed-live"></span> Private link · not indexed · please do not redistribute</p>
       <span class="inv-acct-health band-{{ ah.band }}" id="inv-acct-health"
-            title="Coinbase CDE Cross Margin ratio: maintenance ÷ funds for margin. Liquidation begins at 100%. Whole futures account, mill included.">
+            title="Coinbase CDE Cross Margin ratio (maintenance ÷ funds for margin). Maintenance (liquidation threshold) = {{ ah.liquidation_threshold_usd|usd }}. Funds for margin = unused buying power (available funds {{ ah.available_funds_usd|usd }}) + posted initial margin {{ ah.initial_margin_usd|usd }} = {{ ah.funds_for_margin_usd|usd }}. Liquidation begins at 100%. Whole futures account, mill included.">
         <span class="inv-acct-dot"></span>
         margin <strong id="inv-acct-health-pct">{% if ah.usage_pct is not none %}{{ ah.usage_pct|pct(decimals=1, sign=False) }}{% else %}n/a{% endif %}</strong>
       </span>
     </div>
     <h1>Eva — live trading performance</h1>
     <p class="sub">
-      Eva ICT book only — mill clips are not included.
+      Eva's trades only — mill clips are not included.
+      {% if inv.conviction_stat %}
+        In recorded fills, {{ inv.conviction_stat.high_n }} of {{ inv.conviction_stat.total_n }} had high-conviction chart-read score (≥ {{ inv.conviction_stat.threshold_score }}/100), i.e. {{ inv.conviction_stat.high_pct }}%.
+        {% if inv.conviction_stat.low_n and inv.conviction_stat.low_n > 0 %}
+          {{ inv.conviction_stat.low_n }} had lower scores.
+        {% endif %}
+      {% endif %}
       Marks refresh automatically · snapshot <span id="inv-updated">{{ inv.generated_at }}</span>
     </p>
   </header>

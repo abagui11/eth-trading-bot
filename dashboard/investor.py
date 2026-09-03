@@ -13,6 +13,7 @@ from datetime import datetime, timedelta, timezone
 from typing import Any
 
 import bot_config
+import audit
 import live_ledger
 
 from dashboard import data
@@ -23,6 +24,12 @@ NAV_LOOKBACK_DAYS = 365
 _SOURCE = "hq"
 SLEEVE_LABELS = {"hq": "Eva"}
 SLEEVE_CAPITAL = {"hq": float(bot_config.LIVE_HQ_EQUITY_USD)}
+
+#
+# "High conviction" for this page is the chart-read quality score assigned
+# by the hourly critic (see `dashboard/performance.py` score badges).
+#
+_HIGH_CONVICTION_SCORE = 80
 
 
 def _now_iso() -> str:
@@ -192,6 +199,46 @@ def _attach_liquidation(trades: list[dict[str, Any]]) -> None:
         trade["liquidation_price"] = found.get(inst)
 
 
+def _conviction_stat_for_closed_trades(
+    *, limit: int = 250, threshold_score: int = _HIGH_CONVICTION_SCORE
+) -> dict[str, Any] | None:
+    """How often recorded fills met the high-conviction chart-read score.
+
+    This is based on audit verdicts keyed by `cycle_id`.
+    """
+    closed_rows = live_ledger.get_closed_trades(limit=limit, source=_SOURCE)
+    high_n = 0
+    low_n = 0
+    missing_score_n = 0
+
+    for row in closed_rows:
+        cycle_id = row.get("cycle_id")
+        if not cycle_id:
+            continue
+        verdict = audit.get_verdict_by_cycle_id(str(cycle_id))
+        score = (verdict or {}).get("score")
+        if score is None:
+            missing_score_n += 1
+            continue
+        if int(score) >= int(threshold_score):
+            high_n += 1
+        else:
+            low_n += 1
+
+    observed_n = high_n + low_n
+    if observed_n == 0:
+        return None
+
+    return {
+        "threshold_score": int(threshold_score),
+        "high_n": int(high_n),
+        "low_n": int(low_n),
+        "missing_score_n": int(missing_score_n),
+        "total_n": int(observed_n),
+        "high_pct": round(high_n / observed_n * 100.0, 1),
+    }
+
+
 def build_investor_payload(
     *,
     closed_limit: int = 40,
@@ -238,6 +285,7 @@ def build_investor_payload(
         unrealized=unrealized,
         today=today,
     )
+    conviction_stat = _conviction_stat_for_closed_trades()
 
     return {
         "generated_at": _now_iso(),
@@ -245,6 +293,7 @@ def build_investor_payload(
         "health": health,
         "account_health": account_health,
         "exposure": exposure,
+        "conviction_stat": conviction_stat,
         "portfolio": {
             "value_usd": round(portfolio_value, 2),
             "value_source": "eva_sleeve",
