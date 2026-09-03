@@ -1,7 +1,7 @@
 """Public brain payload for the Intelligence Hub dashboard (no service token).
 
-Reads local intel + macro stores so the HTML dashboard can show what the
-Republic Technologies brain is ingesting without exposing gated HQ ideas.
+Reads local intel + macro stores so the HTML dashboard can show what Eva
+is ingesting without exposing gated HQ ideas.
 """
 
 from __future__ import annotations

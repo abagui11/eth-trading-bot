@@ -189,7 +189,7 @@ def render_cycle_chart(
     return str(path)
 
 
-_THESIS_PROMPT = """You are the Republic Technologies long-horizon desk. Write the
+_THESIS_PROMPT = """You are the Eva long-horizon desk. Write the
 four-year-cycle thesis. BTC leads the cycle; ETH is a higher-beta directional
 conduit that follows BTC with lag and amplitude. Gold ratios are nuance, not a
 signal. Horizon: months to years — this is NOT a trade call.

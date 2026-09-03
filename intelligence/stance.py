@@ -248,7 +248,7 @@ def _features_block(features: dict[str, dict[str, dict[str, Any]]]) -> str:
     return "\n".join(lines)
 
 
-_STANCE_PROMPT = """You are the Republic Technologies intelligence desk. Produce short-horizon
+_STANCE_PROMPT = """You are the Eva intelligence desk. Produce short-horizon
 market stances for BTC-USD and ETH-USD on H4, H1, and M15.
 
 Rules:
