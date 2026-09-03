@@ -920,6 +920,101 @@ def _mill_clip(product_id: str, price: float) -> tuple[float, float] | None:
     return qty, qty * price
 
 
+def _clear_opposing_mill(
+    gw: Any,
+    *,
+    product_id: str,
+    instrument: str,
+    hq_side: str,
+) -> None:
+    """Flatten mill clips that would block an HQ entry on this contract.
+
+    HQ and mill share one CDE position. Mill's resting brackets reserve its
+    entire size, so an HQ order that needs to sell into a mill long (or buy
+    into a mill short) is rejected
+    ``PREVIEW_ORDER_SIZE_EXCEEDS_BRACKETED_POSITION`` — which is what killed
+    the 2026-09-03 HQ BTC short at 81,010.97.
+
+    Temporary testing priority (``LIVE_HQ_CLEARS_MILL``): opposite mill on the
+    product is closed first, its refill sweep is skipped so it cannot
+    immediately re-open into the same conflict, and same-direction mill is
+    left alone.
+    """
+    opposing = [
+        t
+        for t in live_ledger.get_open_trades(source="mill")
+        if str(t.get("product_id") or "") == product_id
+        and str(t.get("side") or "") != hq_side
+    ]
+    if not opposing:
+        return
+    for trade in opposing:
+        _force_close_mill_for_hq(gw, trade, instrument)
+
+
+def _force_close_mill_for_hq(gw: Any, trade: dict[str, Any], instrument: str) -> None:
+    """Cancel mill exits, flatten its size, book the close — no sleeve refill."""
+    trade_id = int(trade["id"])
+    qty_open = _qty_open(trade)
+    if qty_open <= 0:
+        return
+    side = str(trade["side"])
+    closing = "sell" if side == "long" else "buy"
+    entry = float(trade["entry"])
+    direction = 1.0 if side == "long" else -1.0
+
+    logger.warning(
+        "HQ priority: closing mill #%s %s %s %.4f so HQ can take the opposite side",
+        trade_id, trade.get("product_id"), side, qty_open,
+    )
+
+    # Brackets must be gone before the flatten, or the venue rejects the close
+    # with the same EXCEEDS_BRACKETED_POSITION that blocked HQ.
+    for oid in _exit_order_ids(trade):
+        try:
+            gw.cancel_orders([oid])
+        except GatewayError:
+            logger.exception(
+                "HQ priority: cancel of mill exit %s failed — aborting clear", oid
+            )
+            raise
+        settled = _await_cancel(gw, oid)
+        if settled not in ("CANCELLED", "EXPIRED", "FILLED"):
+            logger.warning(
+                "HQ priority: mill exit %s cancel unconfirmed (%s) — closing anyway",
+                oid, settled,
+            )
+
+    order = gw.place_market_order(
+        instrument=instrument,
+        side=closing,
+        amount=qty_open,
+        label=f"mill-hq-yield:{trade_id}",
+    )
+    info = (order or {}).get("order") or {}
+    fill_qty = float(info.get("filled_qty") or qty_open)
+    fill_price = float(info.get("average_price") or entry)
+    order_id = str(info.get("order_id") or f"hq-yield:{trade_id}")
+    pnl = (fill_price - entry) * fill_qty * direction
+
+    live_ledger.record_partial_exit(
+        trade_id,
+        exit_qty=fill_qty,
+        exit_price=fill_price,
+        pnl_usd=pnl,
+        order_id=order_id,
+        reason="hq_priority",
+    )
+    row = live_ledger.get_trade(trade_id) or {}
+    _close_out(gw, trade_id, row, reason="hq_priority", refill_mill=False)
+    if bot_config.LIVE_FILL_ALERTS_ENABLED:
+        _notify_ops(
+            f"MILL YIELDED #{trade_id} — hq_priority\n"
+            f"{trade.get('product_id')} {side} {fill_qty:.4f} @ {fill_price:,.2f}\n"
+            f"P&L {pnl:+,.2f} — cleared for HQ"
+        )
+
+
 # ---------------------------------------------------------------------------
 # Core entry
 # ---------------------------------------------------------------------------
@@ -1070,6 +1165,20 @@ def _execute(
 
     # ---- live ----
     gw = get_gateway()
+    if source == "hq" and bot_config.LIVE_HQ_CLEARS_MILL:
+        try:
+            _clear_opposing_mill(
+                gw,
+                product_id=product_id,
+                instrument=instrument,
+                hq_side=side,
+            )
+        except GatewayError as exc:
+            logger.error(
+                "Live skip: could not clear opposing mill for HQ %s: %s",
+                product_id, exc,
+            )
+            return None
     try:
         order = gw.place_market_order(
             instrument=instrument,
@@ -1532,7 +1641,12 @@ def _reconcile_trade(gw: Any, trade: dict[str, Any]) -> None:
 
 
 def _close_out(
-    gw: Any, trade_id: int, row: dict[str, Any], *, reason: str
+    gw: Any,
+    trade_id: int,
+    row: dict[str, Any],
+    *,
+    reason: str,
+    refill_mill: bool = True,
 ) -> None:
     """Finalise a fully-exited trade and cancel whatever is still resting."""
     fills = json.loads(row.get("exit_fills_json") or "{}")
@@ -1551,14 +1665,15 @@ def _close_out(
         "Live trade #%s closed (%s) avg exit %.2f, pnl %.2f",
         trade_id, reason, avg_exit, total,
     )
-    if bot_config.LIVE_FILL_ALERTS_ENABLED:
+    if bot_config.LIVE_FILL_ALERTS_ENABLED and reason != "hq_priority":
+        # hq_priority already notified from the force-close path.
         _notify_ops(
             f"LIVE CLOSE #{trade_id} — {row.get('source')}\n"
             f"{row.get('product_id')} {row.get('side')} {float(row.get('qty') or 0):.4f}\n"
             f"entry {float(row.get('entry') or 0):,.2f} -> avg exit {avg_exit:,.2f}\n"
             f"P&L {total:+,.2f} ({reason})"
         )
-    if str(row.get("source") or "") == "mill":
+    if str(row.get("source") or "") == "mill" and refill_mill:
         _refill_mill_sleeve()
     elif str(row.get("source") or "") == "hq":
         try:

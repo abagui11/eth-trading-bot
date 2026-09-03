@@ -185,6 +185,16 @@ LIVE_MILL_MAX_OPEN = 3
 LIVE_MILL_MAX_FILLS_PER_DAY = 0      # 0 = no daily fill cap
 LIVE_MILL_DAILY_LOSS_LIMIT_USD = 112.0  # 8% of sleeve, same ratio as HQ
 
+# Temporary testing priority: before an HQ live entry, flatten any open mill
+# clip on the same product that is the *opposite* direction. HQ and mill share
+# one CDE contract, and mill's resting brackets reserve its whole size, so an
+# HQ short into a mill long (or the reverse) is rejected
+# PREVIEW_ORDER_SIZE_EXCEEDS_BRACKETED_POSITION — that is what killed the
+# 2026-09-03 HQ BTC short at 81,010.97. Same-direction mill is left alone.
+# Mill refill is skipped on these closes so it cannot immediately re-open into
+# the same conflict. Turn this off once HQ testing no longer needs the lane.
+LIVE_HQ_CLEARS_MILL: bool = True
+
 # Objective: keep a mill clip open at all times. When the sleeve is EMPTY the
 # next sized idea at or above this confidence self-fills (FIFO — the first
 # qualifying mint wins the slot). Once one clip is open the remaining slots

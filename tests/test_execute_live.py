@@ -516,5 +516,179 @@ class LiveAlertRoutingTests(unittest.TestCase):
         self.assertEqual(sent, ["999", "222"])
 
 
+class HqClearsMillTests(unittest.TestCase):
+    """Opposite mill must yield before HQ can share the contract."""
+
+    def setUp(self) -> None:
+        self._tmpdir = tempfile.TemporaryDirectory(ignore_cleanup_errors=True)
+        db = Path(self._tmpdir.name) / "test_ledger.db"
+        self._patches = [
+            patch.object(config, "LEDGER_DB", db),
+            patch.object(config, "EXECUTION_MODE", "live"),
+            patch.object(bot_config, "CASE_STUDY_ENABLED", False),
+            patch.object(bot_config, "LIVE_HQ_CLEARS_MILL", True),
+            patch.object(bot_config, "LIVE_FILL_ALERTS_ENABLED", False),
+            patch.object(execute, "_notify_ops"),
+            patch.object(execute, "_SETTLE_SLEEP", 0),
+            patch.object(
+                execute,
+                "INSTRUMENT_MAP",
+                {"ETH-USD": "ETP-20DEC30-CDE", "BTC-USD": "BIP-20DEC30-CDE"},
+            ),
+        ]
+        for p in self._patches:
+            p.start()
+        live_ledger.init_db()
+        self.addCleanup(self._tmpdir.cleanup)
+        for p in self._patches:
+            self.addCleanup(p.stop)
+
+    def _open_mill(self, **over) -> int:
+        kwargs = dict(
+            cycle_id="mill-1",
+            source="mill",
+            product_id="BTC-USD",
+            instrument="BIP-20DEC30-CDE",
+            side="long",
+            qty=0.01,
+            entry=81180.0,
+            stop_loss=80437.0,
+            take_profits_json="[82000]",
+            order_id="mill-entry",
+            stop_order_id=None,
+            exit_order_ids=["mill-bracket"],
+        )
+        kwargs.update(over)
+        return live_ledger.record_open(**kwargs)
+
+    def _gateway(self, *, mark: float = 81030.0) -> MagicMock:
+        gw = MagicMock()
+        gw.contract_size.return_value = 0.01
+        gw.get_position.return_value = {"size": 0.0, "mark_price": mark}
+        cancelled: set[str] = set()
+
+        def get_order(oid: str) -> dict:
+            if oid in cancelled:
+                return {"status": "CANCELLED"}
+            return {
+                "status": "OPEN",
+                "order_configuration": {
+                    "trigger_bracket_gtc": {
+                        "base_size": "1",
+                        "limit_price": "82000",
+                        "stop_trigger_price": "80437",
+                    }
+                },
+            }
+
+        gw.get_order.side_effect = get_order
+        gw.cancel_orders.side_effect = cancelled.update
+        gw.place_market_order.side_effect = lambda **kw: {
+            "order": {
+                "order_id": f"mkt-{kw['side']}-{kw['amount']}",
+                "average_price": mark,
+                "filled_qty": kw["amount"],
+            }
+        }
+        gw.place_bracket.side_effect = lambda **kw: {
+            "order": {"order_id": f"br-{kw['limit_price']}"}
+        }
+        gw.place_stop_market.return_value = {"order": {"order_id": "stop-hq"}}
+        return gw
+
+    def test_opposing_mill_is_flattened_before_hq_entry(self) -> None:
+        """The 2026-09-03 failure: HQ BTC short into a bracketed mill long."""
+        mill_id = self._open_mill()
+        gw = self._gateway()
+        suggestion = _hq_suggestion(
+            action="deriv_sell",
+            product_id="BTC-USD",
+            entry=81010.97,
+            stop_loss=81700.0,
+            take_profits=[79257.14, 78562.74],
+            order_block_ref="btc-ob",
+        )
+        with patch.object(execute, "get_gateway", return_value=gw), patch.object(
+            bot_config, "LIVE_HQ_RISK_PCT", 0.007
+        ):
+            result = execute.maybe_execute_live(
+                suggestion, 81030.0, cycle_id="hq-btc-short", source="hq"
+            )
+
+        self.assertIsNotNone(result)
+        mill = live_ledger.get_trade(mill_id)
+        self.assertEqual(mill["status"], "closed")
+        self.assertEqual(mill["close_reason"], "hq_priority")
+        labels = [c.kwargs["label"] for c in gw.place_market_order.call_args_list]
+        self.assertTrue(any(lab.startswith("mill-hq-yield:") for lab in labels))
+        self.assertTrue(any(lab.startswith("hq:") for lab in labels))
+        gw.cancel_orders.assert_called()
+
+    def test_same_direction_mill_is_left_alone(self) -> None:
+        mill_id = self._open_mill(side="short", stop_loss=82000.0)
+        gw = self._gateway()
+        suggestion = _hq_suggestion(
+            action="deriv_sell",
+            product_id="BTC-USD",
+            entry=81010.97,
+            stop_loss=81700.0,
+            take_profits=[79257.14],
+            order_block_ref="btc-ob-2",
+        )
+        with patch.object(execute, "get_gateway", return_value=gw):
+            result = execute.maybe_execute_live(
+                suggestion, 81030.0, cycle_id="hq-btc-short-2", source="hq"
+            )
+
+        self.assertIsNotNone(result)
+        self.assertEqual(live_ledger.get_trade(mill_id)["status"], "open")
+        labels = [c.kwargs["label"] for c in gw.place_market_order.call_args_list]
+        self.assertFalse(any(lab.startswith("mill-hq-yield:") for lab in labels))
+        gw.cancel_orders.assert_not_called()
+
+    def test_flag_off_leaves_opposing_mill_in_place(self) -> None:
+        mill_id = self._open_mill()
+        gw = self._gateway()
+        suggestion = _hq_suggestion(
+            action="deriv_sell",
+            product_id="BTC-USD",
+            entry=81010.97,
+            stop_loss=81700.0,
+            take_profits=[79257.14],
+            order_block_ref="btc-ob-3",
+        )
+        with patch.object(bot_config, "LIVE_HQ_CLEARS_MILL", False), patch.object(
+            execute, "get_gateway", return_value=gw
+        ):
+            result = execute.maybe_execute_live(
+                suggestion, 81030.0, cycle_id="hq-btc-short-3", source="hq"
+            )
+
+        self.assertIsNotNone(result)
+        self.assertEqual(live_ledger.get_trade(mill_id)["status"], "open")
+        labels = [c.kwargs["label"] for c in gw.place_market_order.call_args_list]
+        self.assertFalse(any(lab.startswith("mill-hq-yield:") for lab in labels))
+
+    def test_mill_refill_is_skipped_after_hq_priority_close(self) -> None:
+        mill_id = self._open_mill()
+        gw = self._gateway()
+        suggestion = _hq_suggestion(
+            action="deriv_sell",
+            product_id="BTC-USD",
+            entry=81010.97,
+            stop_loss=81700.0,
+            take_profits=[79257.14],
+            order_block_ref="btc-ob-4",
+        )
+        with patch.object(execute, "get_gateway", return_value=gw), patch.object(
+            execute, "_refill_mill_sleeve"
+        ) as refill:
+            execute.maybe_execute_live(
+                suggestion, 81030.0, cycle_id="hq-btc-short-4", source="hq"
+            )
+        refill.assert_not_called()
+        self.assertEqual(live_ledger.get_trade(mill_id)["close_reason"], "hq_priority")
+
+
 if __name__ == "__main__":
     unittest.main()
