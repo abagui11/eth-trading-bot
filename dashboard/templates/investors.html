@@ -28,12 +28,6 @@
     <h1>Eva — live trading performance</h1>
     <p class="sub">
       Eva's trades only — mill clips are not included.
-      {% if inv.conviction_stat %}
-        In recorded fills, {{ inv.conviction_stat.high_n }} of {{ inv.conviction_stat.total_n }} had high-conviction chart-read score (≥ {{ inv.conviction_stat.threshold_score }}/100), i.e. {{ inv.conviction_stat.high_pct }}%.
-        {% if inv.conviction_stat.low_n and inv.conviction_stat.low_n > 0 %}
-          {{ inv.conviction_stat.low_n }} had lower scores.
-        {% endif %}
-      {% endif %}
       Marks refresh automatically · snapshot <span id="inv-updated">{{ inv.generated_at }}</span>
     </p>
   </header>
