@@ -24,6 +24,7 @@ from __future__ import annotations
 
 import json
 import logging
+import time
 from datetime import datetime, timezone
 from typing import Any
 
@@ -409,6 +410,84 @@ def _improves_stop(side: str, old: float | None, new: float) -> bool:
     return new > float(old) if side == "long" else new < float(old)
 
 
+_SETTLE_TRIES = 6
+_SETTLE_SLEEP = 0.5
+
+# Re-arming swaps a protective stop for a bracket, so every attempt reopens a
+# brief uncovered window. Retrying that once a minute forever would trade a
+# lost target for a permanent gap in cover, which is the wrong way round —
+# after a few failures the bare stop is the better resting state. In memory on
+# purpose: a restart is new information about the venue, so it may try again.
+_REARM_MAX_ATTEMPTS = 3
+_rearm_attempts: dict[int, int] = {}
+
+
+def _await_cancel(gw: Any, order_id: str) -> str:
+    """Block until the venue stops counting ``order_id`` against the position.
+
+    ``cancel_orders`` returns when the request is *accepted*, not when the
+    reservation is released. Placing the replacement in that gap is what broke
+    the retrail on Eva #19: the venue still saw the cancelled leg holding the
+    size the new bracket asked for, rejected it with
+    ``preview_bracket_order_size_exceeds_position``, and that rung fell through
+    to a bare stop — protected, but with nowhere to run above breakeven.
+
+    Returns the terminal status, or the last status seen if it never settles.
+    """
+    status = "OPEN"
+    for _ in range(_SETTLE_TRIES):
+        try:
+            status = str(gw.get_order(order_id).get("status") or "")
+        except GatewayError:
+            logger.exception("Retrail: could not confirm cancel of %s", order_id)
+            return "UNKNOWN"
+        if status in ("CANCELLED", "FILLED", "EXPIRED", "FAILED"):
+            return status
+        time.sleep(_SETTLE_SLEEP)
+    return status or "OPEN"
+
+
+def _place_bracket_settling(
+    gw: Any,
+    *,
+    instrument: str,
+    side: str,
+    amount: float,
+    limit_price: float,
+    stop_trigger_price: float,
+    label: str,
+) -> str:
+    """Place a bracket, retrying while the venue's freed size is still lagging.
+
+    A confirmed cancel does not guarantee the position's reserved size has
+    caught up, and the venue reports that by rejecting the order outright
+    rather than queuing it — so asking again a moment later is the only
+    remedy. Any other rejection is a real problem and propagates.
+    """
+    for attempt in range(_SETTLE_TRIES):
+        try:
+            res = gw.place_bracket(
+                instrument=instrument,
+                side=side,
+                amount=amount,
+                limit_price=limit_price,
+                stop_trigger_price=stop_trigger_price,
+                label=label,
+            )
+            return str(((res or {}).get("order") or {}).get("order_id") or "")
+        except GatewayError as exc:
+            if "exceeds_position" not in str(exc).lower():
+                raise
+            if attempt == _SETTLE_TRIES - 1:
+                raise
+            logger.warning(
+                "Retrail: %s bracket still exceeds free position — retrying",
+                instrument,
+            )
+            time.sleep(_SETTLE_SLEEP * (attempt + 1))
+    return ""
+
+
 def retrail_exits(gw: Any, trade: dict[str, Any], new_stop: float) -> list[str]:
     """Move the stop on the resting brackets by cancel-and-replace.
 
@@ -447,8 +526,30 @@ def retrail_exits(gw: Any, trade: dict[str, Any], new_stop: float) -> list[str]:
             logger.exception("Retrail: cancel failed for %s — leaving it in place", oid)
             fresh.append(oid)
             continue
+
+        settled = _await_cancel(gw, oid)
+        if settled == "FILLED":
+            # The rung paid out between reading it and cancelling it. Its size
+            # has left the position, so a replacement would claim room that no
+            # longer exists; the reconcile pass books the fill instead.
+            logger.info("Retrail: %s filled during cancel — not re-placing", oid)
+            fresh.append(oid)
+            continue
+        if settled not in ("CANCELLED", "EXPIRED"):
+            # Status never caught up, but the cancel itself was accepted, so
+            # the leg is going away. Treating it as still resting would leave
+            # the tranche naked while the ledger believed it covered, so press
+            # on: the venue rejects any order exceeding the unreserved
+            # position, which is what stops this double-covering, and a total
+            # failure still falls through to the plain stop below.
+            logger.warning(
+                "Retrail: %s cancel accepted but status still %s — replacing anyway",
+                oid, settled,
+            )
+
         try:
-            replaced = gw.place_bracket(
+            new_id = _place_bracket_settling(
+                gw,
                 instrument=instrument,
                 side=closing,
                 amount=leg_qty,
@@ -456,7 +557,6 @@ def retrail_exits(gw: Any, trade: dict[str, Any], new_stop: float) -> list[str]:
                 stop_trigger_price=new_stop,
                 label=f"{trade['source']}-retrail",
             )
-            new_id = str(((replaced or {}).get("order") or {}).get("order_id") or "")
             if new_id:
                 fresh.append(new_id)
             else:
@@ -488,8 +588,154 @@ def retrail_exits(gw: Any, trade: dict[str, Any], new_stop: float) -> list[str]:
     return fresh
 
 
-def _maybe_trail_stop(gw: Any, trade_id: int, row: dict[str, Any]) -> None:
-    """Reduce risk on the runner once a target has paid out."""
+def _resting_exits(
+    gw: Any, trade: dict[str, Any], cache: dict[str, dict[str, Any]] | None = None
+) -> list[dict[str, Any]]:
+    """The trade's own exit orders that are still working on the exchange.
+
+    ``cache`` lets the reconcile pass hand over the statuses it just read, so
+    the every-minute health check doesn't double the venue calls.
+    """
+    out: list[dict[str, Any]] = []
+    for oid in _exit_order_ids(trade):
+        order = (cache or {}).get(oid)
+        if order is None:
+            try:
+                order = gw.get_order(oid)
+            except GatewayError:
+                logger.exception("Could not read exit order %s", oid)
+                continue
+        if str(order.get("status") or "") == "OPEN":
+            out.append({"order_id": oid, **order})
+    return out
+
+
+def _unarmed_rungs(
+    resting: list[dict[str, Any]], ordered: list[float], tps_hit: int
+) -> list[float]:
+    """Ladder rungs price hasn't reached that have no order waiting for them.
+
+    A retrail that loses a bracket falls back to a plain stop, so the size
+    stays protected but can no longer end anywhere except the stop. The stop
+    price cannot reveal that — the fallback sets it to exactly the value the
+    trail asked for — which is why the old heal never fired. Comparing the
+    unreached rungs against the limit legs actually resting does reveal it.
+    """
+    armed = {
+        limit
+        for limit, _ in (_bracket_triggers(o) for o in resting)
+        if limit is not None
+    }
+    return [
+        rung
+        for rung in ordered[tps_hit:]
+        if not any(_near_level(rung, a) for a in armed)
+    ]
+
+
+def _rearm_targets(
+    gw: Any,
+    trade: dict[str, Any],
+    stop: float,
+    missing: list[float],
+    resting: list[dict[str, Any]],
+) -> list[str] | None:
+    """Give a bare tranche its targets back.
+
+    Swaps the fallback plain stop for brackets at the rungs still ahead, one
+    at a time, so a failure part-way leaves that size on a stop rather than
+    naked. Returns the trade's new exit id list, or None if there was nothing
+    bare to heal.
+    """
+    instrument = trade["instrument"]
+    closing = "sell" if str(trade["side"]) == "long" else "buy"
+    csize = gw.contract_size(instrument)
+    floor = bot_config.LIVE_PRODUCT_QTY_FLOORS.get(str(trade.get("product_id") or "")) or csize
+
+    bare = [o for o in resting if _is_plain_stop_order(o)]
+    if not bare or not missing:
+        return None
+
+    keep = [
+        str(o.get("order_id"))
+        for o in resting
+        if not _is_plain_stop_order(o)
+    ]
+    fresh: list[str] = list(keep)
+    stranded = 0.0
+
+    for order in bare:
+        oid = str(order.get("order_id"))
+        cfg = next(iter((order.get("order_configuration") or {}).values()), {}) or {}
+        qty = float(cfg.get("base_size") or 0) * csize
+        if qty <= 0:
+            fresh.append(oid)
+            continue
+        try:
+            gw.cancel_orders([oid])
+        except GatewayError:
+            logger.exception("Re-arm: cancel failed for %s — leaving the stop", oid)
+            fresh.append(oid)
+            continue
+        if _await_cancel(gw, oid) not in ("CANCELLED", "EXPIRED"):
+            logger.warning(
+                "Re-arm: %s cancel accepted but unconfirmed — re-arming anyway", oid
+            )
+
+        for price, contracts in _tp_ladder(int(round(qty / floor)), missing):
+            leg_qty = contracts * floor
+            try:
+                new_id = _place_bracket_settling(
+                    gw,
+                    instrument=instrument,
+                    side=closing,
+                    amount=leg_qty,
+                    limit_price=price,
+                    stop_trigger_price=stop,
+                    label=f"{trade['source']}-rearm",
+                )
+            except GatewayError:
+                logger.exception("Re-arm: bracket failed for %.4f of %s", leg_qty, instrument)
+                new_id = ""
+            if new_id:
+                fresh.append(new_id)
+            else:
+                stranded += leg_qty
+
+    if stranded > 0:
+        logger.error(
+            "Re-arm left %.4f %s without a target — restoring the plain stop at %.2f",
+            stranded, instrument, stop,
+        )
+        try:
+            res = gw.place_stop_market(
+                instrument=instrument, side=closing, amount=stranded,
+                trigger_price=stop, label=f"{trade['source']}-rearm-stop",
+            )
+            sid = str(((res or {}).get("order") or {}).get("order_id") or "")
+            if sid:
+                fresh.append(sid)
+        except GatewayError:
+            logger.exception("Re-arm fallback stop FAILED for %s", instrument)
+            halt_live(
+                f"rearm_uncovered:{instrument}:{stranded:.4f} — verify on Coinbase"
+            )
+    return fresh
+
+
+def _maybe_trail_stop(
+    gw: Any,
+    trade_id: int,
+    row: dict[str, Any],
+    resting: dict[str, dict[str, Any]] | None = None,
+) -> None:
+    """Reduce risk on the runner once a target has paid out.
+
+    Also the retry path for a trail that half-failed. The ledger records the
+    trailed stop whether or not every bracket re-placed, so a second pass can
+    never tell from the stop price alone that a rung lost its target — it has
+    to look at what is actually resting.
+    """
     tps_hit = _tps_taken(row)
     if tps_hit <= 0:
         return
@@ -498,7 +744,12 @@ def _maybe_trail_stop(gw: Any, trade_id: int, row: dict[str, Any]) -> None:
         str(row["side"]), _as_tp_list(row.get("take_profits_json")), entry
     )
     new_stop = _trailed_stop(entry, ordered, tps_hit)
-    if new_stop is None or not _improves_stop(str(row["side"]), row.get("stop_loss"), new_stop):
+    if new_stop is None:
+        return
+    if not _improves_stop(str(row["side"]), row.get("stop_loss"), new_stop):
+        _heal_unarmed_targets(
+            gw, trade_id, row, new_stop, ordered, tps_hit, resting=resting
+        )
         return
     logger.info(
         "Trailing stop on #%s after %d target(s): %s -> %.2f",
@@ -513,6 +764,50 @@ def _maybe_trail_stop(gw: Any, trade_id: int, row: dict[str, Any]) -> None:
             f"STOP TRAILED #{trade_id} — {row.get('source')}\n"
             f"{row.get('product_id')} stop -> {new_stop:,.2f} ({label})\n"
             f"after {tps_hit} target(s) filled"
+        )
+
+
+def _heal_unarmed_targets(
+    gw: Any,
+    trade_id: int,
+    row: dict[str, Any],
+    stop: float,
+    ordered: list[float],
+    tps_hit: int,
+    resting: dict[str, dict[str, Any]] | None = None,
+) -> None:
+    """Re-arm a rung whose bracket was lost to a failed retrail.
+
+    Runs on the reconcile cadence, so a lost target costs a minute of upside
+    instead of the rest of the trade. It only ever acts on size that is sitting
+    on a bare stop, which means the worst case of doing nothing is the position
+    exiting at breakeven — the reason this is worth healing but not worth
+    halting over.
+    """
+    open_exits = _resting_exits(gw, row, resting)
+    if not any(_is_plain_stop_order(o) for o in open_exits):
+        return
+    missing = _unarmed_rungs(open_exits, ordered, tps_hit)
+    if not missing:
+        _rearm_attempts.pop(trade_id, None)
+        return
+    attempts = _rearm_attempts.get(trade_id, 0)
+    if attempts >= _REARM_MAX_ATTEMPTS:
+        return
+    _rearm_attempts[trade_id] = attempts + 1
+    logger.warning(
+        "Live trade #%s has %.4f on a bare stop with %s unarmed — re-arming (%d/%d)",
+        trade_id, _qty_open(row), [round(m, 2) for m in missing],
+        attempts + 1, _REARM_MAX_ATTEMPTS,
+    )
+    fresh = _rearm_targets(gw, row, stop, missing, open_exits)
+    if fresh:
+        live_ledger.set_exit_orders(trade_id, fresh)
+    if attempts + 1 >= _REARM_MAX_ATTEMPTS:
+        logger.error(
+            "Live trade #%s: giving up re-arming %s — the size keeps its stop but "
+            "can only exit there; check the ladder on Coinbase",
+            trade_id, [round(m, 2) for m in missing],
         )
 
 
@@ -1166,12 +1461,14 @@ def _reconcile_trade(gw: Any, trade: dict[str, Any]) -> None:
         return
 
     exits: list[tuple[float, float, str]] = []
+    seen: dict[str, dict[str, Any]] = {}
     for oid in order_ids:
         try:
             order = gw.get_order(oid)
         except GatewayError:
             logger.exception("Could not read exit order %s (trade #%s)", oid, trade_id)
             continue
+        seen[oid] = order
         # Book only settled legs: a partially filled bracket would otherwise be
         # booked now and again later at a different average price.
         if str(order.get("status") or "") not in ("FILLED", "EXPIRED", "CANCELLED"):
@@ -1208,7 +1505,7 @@ def _reconcile_trade(gw: Any, trade: dict[str, Any]) -> None:
         # says it belongs — a target booked before the trail existed, or an
         # earlier re-place that failed. Checked every pass so it self-heals.
         try:
-            _maybe_trail_stop(gw, trade_id, trade)
+            _maybe_trail_stop(gw, trade_id, trade, resting=seen)
         except Exception:
             logger.exception("Stop trail failed for live trade #%s", trade_id)
         return

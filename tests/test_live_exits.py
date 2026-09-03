@@ -378,6 +378,38 @@ class TrailedStopTests(unittest.TestCase):
 
 
 class RetrailExitsTests(unittest.TestCase):
+    def setUp(self) -> None:
+        # Real settle waits are seconds long by design; the behaviour under
+        # test is the ordering, not the clock.
+        p = patch.object(live_exec, "_SETTLE_SLEEP", 0)
+        p.start()
+        self.addCleanup(p.stop)
+
+    def _wire(self, gw: MagicMock, orders: dict[str, dict], *, lag: int = 0) -> None:
+        """Model a venue where cancelling actually takes an order off the book.
+
+        The retrail now waits for a cancel to settle before re-placing, so a
+        gateway that reports OPEN forever is not a stand-in for the exchange —
+        it is the pathological case, and it gets its own test. ``lag`` is how
+        many status reads still say OPEN after the cancel is accepted, which is
+        the real behaviour that broke Eva #19.
+        """
+        pending: dict[str, int] = {}
+
+        def get_order(oid: str) -> dict:
+            order = dict(orders[oid])
+            if oid in pending:
+                if pending[oid] > 0:
+                    pending[oid] -= 1
+                else:
+                    order["status"] = "CANCELLED"
+            return order
+
+        gw.get_order.side_effect = get_order
+        gw.cancel_orders.side_effect = lambda ids: pending.update(
+            {oid: lag for oid in ids}
+        )
+
     @staticmethod
     def _bracket(size: str, limit: str, status: str = "OPEN") -> dict:
         return {
@@ -402,10 +434,10 @@ class RetrailExitsTests(unittest.TestCase):
 
     def test_each_rung_is_replaced_with_the_new_stop(self) -> None:
         gw = _gateway()
-        gw.get_order.side_effect = lambda oid: {
+        self._wire(gw, {
             "br-2477": self._bracket("1", "2477"),
             "br-2534": self._bracket("2", "2534"),
-        }[oid]
+        })
         fresh = live_exec.retrail_exits(gw, self._trade(), 2411.5)
 
         self.assertEqual(len(fresh), 2)
@@ -422,10 +454,10 @@ class RetrailExitsTests(unittest.TestCase):
 
     def test_already_filled_rung_is_dropped(self) -> None:
         gw = _gateway()
-        gw.get_order.side_effect = lambda oid: {
+        self._wire(gw, {
             "br-2477": self._bracket("1", "2477", status="FILLED"),
             "br-2534": self._bracket("2", "2534"),
-        }[oid]
+        })
         fresh = live_exec.retrail_exits(gw, self._trade(), 2411.5)
         self.assertEqual(len(fresh), 1)
         self.assertEqual(gw.place_bracket.call_count, 1)
@@ -433,10 +465,10 @@ class RetrailExitsTests(unittest.TestCase):
     def test_failed_replacement_is_covered_by_a_plain_stop(self) -> None:
         """Cancel succeeded but re-place failed: that size must not stay naked."""
         gw = _gateway()
-        gw.get_order.side_effect = lambda oid: {
+        self._wire(gw, {
             "br-2477": self._bracket("1", "2477"),
             "br-2534": self._bracket("2", "2534"),
-        }[oid]
+        })
         gw.place_bracket.side_effect = [
             {"order": {"order_id": "new-1"}},
             GatewayError("rejected"),
@@ -450,15 +482,81 @@ class RetrailExitsTests(unittest.TestCase):
 
     def test_a_rung_that_cannot_be_cancelled_is_left_alone(self) -> None:
         gw = _gateway()
-        gw.get_order.side_effect = lambda oid: {
+        self._wire(gw, {
             "br-2477": self._bracket("1", "2477"),
             "br-2534": self._bracket("2", "2534"),
-        }[oid]
-        gw.cancel_orders.side_effect = [GatewayError("cancel failed"), None]
+        })
+        wired = gw.cancel_orders.side_effect
+        calls: list[int] = []
+
+        def cancel(ids: list[str]) -> None:
+            calls.append(1)
+            if len(calls) == 1:
+                raise GatewayError("cancel failed")
+            wired(ids)
+
+        gw.cancel_orders.side_effect = cancel
         fresh = live_exec.retrail_exits(gw, self._trade(), 2411.5)
         # Untouched rung keeps its original id and its original protection.
         self.assertIn("br-2477", fresh)
         self.assertEqual(gw.place_bracket.call_count, 1)
+
+    def test_replacement_waits_for_the_cancel_to_settle(self) -> None:
+        """The Eva #19 failure: the venue frees the size a few reads late.
+
+        Sending the replacement into that window is what earned
+        ``exceeds_position`` and cost the rung its target, so the retrail must
+        not place until the cancel has actually reported terminal.
+        """
+        gw = _gateway()
+        self._wire(gw, {"br-2477": self._bracket("1", "2477")}, lag=3)
+        trade = self._trade() | {"exit_order_ids_json": json.dumps(["br-2477"])}
+        seen_at_place: list[str] = []
+        gw.place_bracket.side_effect = lambda **kw: (
+            seen_at_place.append(gw.get_order("br-2477")["status"]),
+            {"order": {"order_id": "new-1"}},
+        )[1]
+
+        fresh = live_exec.retrail_exits(gw, trade, 2411.5)
+
+        self.assertEqual(fresh, ["new-1"])
+        self.assertEqual(seen_at_place, ["CANCELLED"])
+        gw.place_stop_market.assert_not_called()
+
+    def test_a_late_reservation_release_is_retried_not_abandoned(self) -> None:
+        """A settled cancel can still leave the freed size lagging a beat."""
+        gw = _gateway()
+        self._wire(gw, {"br-2477": self._bracket("1", "2477")})
+        trade = self._trade() | {"exit_order_ids_json": json.dumps(["br-2477"])}
+        gw.place_bracket.side_effect = [
+            GatewayError(
+                "order rejected: {'error': 'UNKNOWN_FAILURE_REASON', "
+                "'error_details': 'preview_bracket_order_size_exceeds_position'}"
+            ),
+            {"order": {"order_id": "new-1"}},
+        ]
+
+        fresh = live_exec.retrail_exits(gw, trade, 2411.5)
+
+        self.assertEqual(fresh, ["new-1"])
+        # The target survived, so no bare-stop fallback was needed.
+        gw.place_stop_market.assert_not_called()
+
+    def test_an_unconfirmed_cancel_still_gets_a_replacement(self) -> None:
+        """Status never catches up, but the cancel was accepted.
+
+        Skipping the replacement here would leave the tranche naked while the
+        ledger believed it covered — strictly worse than asking the venue,
+        which refuses anything exceeding the unreserved position.
+        """
+        gw = _gateway()
+        gw.get_order.side_effect = lambda oid: self._bracket("1", "2477")
+        trade = self._trade() | {"exit_order_ids_json": json.dumps(["br-2477"])}
+
+        fresh = live_exec.retrail_exits(gw, trade, 2411.5)
+
+        self.assertEqual(gw.place_bracket.call_count, 1)
+        self.assertEqual(fresh, ["br-2477"])
 
 
 class LedgerDbTestCase(unittest.TestCase):
@@ -470,6 +568,10 @@ class LedgerDbTestCase(unittest.TestCase):
         self._patch.start()
         self._cs.start()
         live_ledger.init_db()
+        # Trade ids restart at 1 in each temp ledger, so the re-arm counter
+        # would otherwise carry one test's attempts into the next.
+        live_exec._rearm_attempts.clear()
+        self.addCleanup(live_exec._rearm_attempts.clear)
         self.addCleanup(self._patch.stop)
         self.addCleanup(self._cs.stop)
         self.addCleanup(self._tmp.cleanup)
@@ -700,6 +802,159 @@ class ReconcileTests(LedgerDbTestCase):
 
         self.assertAlmostEqual(live_ledger.get_trade(tid)["stop_loss"], 2411.5)
         self.assertEqual(gw.place_bracket.call_args.kwargs["stop_trigger_price"], 2411.5)
+
+    def _after_a_half_failed_retrail(self) -> tuple[int, MagicMock]:
+        """A trade whose stop is already trailed but whose TP3 rung is bare.
+
+        This is the state Eva #19 was left in: TP1 banked, the stop correctly
+        at breakeven, one rung re-armed, and the other sitting on a fallback
+        plain stop with no target above it.
+        """
+        tid = self._open_trade(
+            exit_order_ids=["br-2477", "stop-fallback"], stop_loss=2411.5
+        )
+        live_ledger.record_partial_exit(
+            tid, exit_qty=0.1, exit_price=2440.0, pnl_usd=2.85,
+            order_id="br-2440", reason="take_profit",
+        )
+        gw = _gateway()
+        gw.get_position.return_value = {"size": 0.3, "mark_price": 2450.0}
+        gw.get_open_orders.return_value = []
+        orders = {
+            "br-2477": {
+                "status": "OPEN", "filled_size": "0", "average_filled_price": "0",
+                "order_id": "br-2477",
+                "order_configuration": {
+                    "trigger_bracket_gtc": {
+                        "base_size": "1", "limit_price": "2477",
+                        "stop_trigger_price": "2411.5",
+                    }
+                },
+            },
+            "stop-fallback": {
+                "status": "OPEN", "filled_size": "0", "average_filled_price": "0",
+                "order_id": "stop-fallback",
+                "order_configuration": {
+                    "stop_limit_stop_limit_gtc": {
+                        "base_size": "2", "limit_price": "2387",
+                        "stop_price": "2411.5",
+                    }
+                },
+            },
+        }
+        cancelled: set[str] = set()
+        placed = {"n": 0}
+
+        def get_order(oid: str) -> dict:
+            order = dict(orders[oid])
+            if oid in cancelled:
+                order["status"] = "CANCELLED"
+            return order
+
+        def place_stop(**kw) -> dict:
+            # A restored fallback is a *new* resting order, so the next pass
+            # must see it open — otherwise the heal looks healed for the wrong
+            # reason and a retry cap can't be observed.
+            placed["n"] += 1
+            oid = f"stop-refallback-{placed['n']}"
+            orders[oid] = {
+                "status": "OPEN", "filled_size": "0", "average_filled_price": "0",
+                "order_id": oid,
+                "order_configuration": {
+                    "stop_limit_stop_limit_gtc": {
+                        "base_size": str(int(round(kw["amount"] / 0.1))),
+                        "limit_price": "2387",
+                        "stop_price": str(kw["trigger_price"]),
+                    }
+                },
+            }
+            return {"order": {"order_id": oid}}
+
+        gw.get_order.side_effect = get_order
+        gw.cancel_orders.side_effect = cancelled.update
+        gw.place_stop_market.side_effect = place_stop
+        return tid, gw
+
+    def test_a_rung_stranded_on_a_bare_stop_gets_its_target_back(self) -> None:
+        """The heal that matters: bare size can only reach breakeven.
+
+        The old guard compared stop prices, and the fallback stop sets the
+        price correctly — so this state looked healthy and the lost target was
+        never recovered for the life of the trade.
+        """
+        tid, gw = self._after_a_half_failed_retrail()
+        with patch.object(live_exec, "_SETTLE_SLEEP", 0), \
+                patch.object(live_exec, "get_gateway", return_value=gw):
+            live_exec.sync_live_positions()
+
+        gw.cancel_orders.assert_called_once_with(["stop-fallback"])
+        placed = gw.place_bracket.call_args_list
+        self.assertEqual([c.kwargs["limit_price"] for c in placed], [2534.0])
+        self.assertAlmostEqual(placed[0].kwargs["amount"], 0.2)
+        self.assertEqual(placed[0].kwargs["stop_trigger_price"], 2411.5)
+        ids = json.loads(live_ledger.get_trade(tid)["exit_order_ids_json"])
+        # The healthy rung is untouched; only the bare one was swapped.
+        self.assertEqual(ids, ["br-2477", "br-2534"])
+
+    def test_the_heal_restores_the_stop_if_the_target_will_not_arm(self) -> None:
+        """A re-arm that fails must not leave the size naked."""
+        _tid, gw = self._after_a_half_failed_retrail()
+        gw.place_bracket.side_effect = GatewayError("still rejected")
+        with patch.object(live_exec, "_SETTLE_SLEEP", 0), \
+                patch.object(live_exec, "get_gateway", return_value=gw):
+            live_exec.sync_live_positions()
+
+        gw.place_stop_market.assert_called_once()
+        self.assertAlmostEqual(gw.place_stop_market.call_args.kwargs["amount"], 0.2)
+        self.assertEqual(
+            gw.place_stop_market.call_args.kwargs["trigger_price"], 2411.5
+        )
+
+    def test_the_heal_gives_up_rather_than_churning_the_stop_forever(self) -> None:
+        """Each attempt reopens an uncovered window; a bare stop beats a gap.
+
+        Without a cap this runs once a minute for the life of the trade, so a
+        lost target would be traded for a permanently flickering stop.
+        """
+        tid, gw = self._after_a_half_failed_retrail()
+        gw.place_bracket.side_effect = GatewayError("still rejected")
+        with patch.object(live_exec, "_SETTLE_SLEEP", 0), \
+                patch.object(live_exec, "get_gateway", return_value=gw):
+            for _ in range(6):
+                live_exec.sync_live_positions()
+
+        self.assertEqual(
+            gw.place_stop_market.call_count, live_exec._REARM_MAX_ATTEMPTS
+        )
+        self.assertEqual(live_exec._rearm_attempts[tid], live_exec._REARM_MAX_ATTEMPTS)
+
+    def test_fully_armed_ladder_is_left_alone(self) -> None:
+        """No bare stop, nothing to heal — and no orders churned every minute."""
+        tid = self._open_trade(
+            exit_order_ids=["br-2477", "br-2534"], stop_loss=2411.5
+        )
+        live_ledger.record_partial_exit(
+            tid, exit_qty=0.1, exit_price=2440.0, pnl_usd=2.85,
+            order_id="br-2440", reason="take_profit",
+        )
+        gw = _gateway()
+        gw.get_position.return_value = {"size": 0.3, "mark_price": 2450.0}
+        gw.get_open_orders.return_value = []
+        gw.get_order.side_effect = lambda oid: {
+            "status": "OPEN", "filled_size": "0", "average_filled_price": "0",
+            "order_id": oid,
+            "order_configuration": {
+                "trigger_bracket_gtc": {
+                    "base_size": "1", "limit_price": oid.split("-")[1],
+                    "stop_trigger_price": "2411.5",
+                }
+            },
+        }
+        with patch.object(live_exec, "get_gateway", return_value=gw):
+            live_exec.sync_live_positions()
+
+        gw.cancel_orders.assert_not_called()
+        gw.place_bracket.assert_not_called()
 
     def test_untouched_trade_keeps_its_structural_stop(self) -> None:
         tid = self._open_trade(exit_order_ids=["br-2477"])
