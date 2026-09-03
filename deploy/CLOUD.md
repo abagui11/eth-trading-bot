@@ -74,7 +74,7 @@ ANTHROPIC_MODEL=claude-sonnet-4-6
 TELEGRAM_BOT_TOKEN=...
 PAYWALL_ENABLED=false
 ALLOWED_TELEGRAM_IDS=YOUR_TELEGRAM_ID
-DASHBOARD_PUBLIC_URL=https://dashboard.yourdomain.com
+DASHBOARD_PUBLIC_URL=https://dashboard.eva.finance
 MARKET_DATA_API=https://api.coinbase.com/api/v3/brokerage/market
 PORTFOLIO_VALUE=5000
 PAPER_PORTFOLIO_VALUE=5000
@@ -332,28 +332,48 @@ http://YOUR_SERVER_IP:8080
 
 From your PC, open that URL in a browser once port 8080 is open in the firewall (testing only).
 
-### Public HTTPS link (recommended)
+### Public HTTPS link — live at `https://dashboard.eva.finance`
 
-1. Buy a domain (optional ~$10/yr) or use a subdomain you already own.
-2. Add a DNS **A record** pointing to your VPS IP (e.g. `dashboard` → `45.33.97.27`).
-3. Install Caddy for automatic HTTPS:
+`dashboard.eva.finance` is an **A record → 45.33.97.27** served by Spaceship DNS (`launch1/launch2.spaceship.net`). Caddy terminates TLS on the VPS and reverse-proxies to `localhost:8080`; the dashboard process itself is unchanged and still binds 8080.
+
+To reproduce on a new box or domain:
+
+1. Add a DNS **A record** pointing to the VPS IP (e.g. `dashboard` → `45.33.97.27`). If the domain was transferred in from another registrar, check the **nameserver** setting as well — records added in the registrar's DNS panel do nothing while the domain is still delegated elsewhere, and the panel will usually flag the record group as inactive.
+2. Install Caddy. It is **not** in Ubuntu's default repos (22.04 or 24.04), so add the Cloudsmith repo first:
 
 ```bash
-sudo apt install -y caddy
-sudo nano /etc/caddy/Caddyfile
+sudo apt install -y debian-keyring debian-archive-keyring apt-transport-https curl gnupg
+curl -1sLf 'https://dl.cloudsmith.io/public/caddy/stable/gpg.key' \
+  | sudo gpg --batch --yes --dearmor -o /usr/share/keyrings/caddy-stable-archive-keyring.gpg
+curl -1sLf 'https://dl.cloudsmith.io/public/caddy/stable/debian.deb.txt' \
+  | sudo tee /etc/apt/sources.list.d/caddy-stable.list
+sudo apt update && sudo apt install -y caddy
 ```
 
+3. Write `/etc/caddy/Caddyfile` and reload:
+
 ```text
-dashboard.yourdomain.com {
+dashboard.eva.finance {
     reverse_proxy localhost:8080
 }
 ```
 
 ```bash
 sudo systemctl reload caddy
+journalctl -u caddy -n 40 --no-pager   # expect "certificate obtained successfully"
 ```
 
-Your public link: `https://dashboard.yourdomain.com` — open it from any device. Set the same value as `DASHBOARD_PUBLIC_URL` in `/opt/eth-trading-agent/.env`, then restart `eth-agent` so Telegram's **Agent journal** and **My book** links use it.
+Ports **80 and 443** must both be reachable from the internet — 80 carries the ACME HTTP-01 challenge, so HTTPS will not issue without it. Check `ufw status` *and* the Linode cloud firewall. A transient `HTTP 404 ... Certificate not found` logged right after a successful challenge is a known Let's Encrypt race; Caddy retries after 60s and obtains the cert.
+
+Caddy redirects plain HTTP to HTTPS automatically (308), so `http://dashboard.eva.finance` also works.
+
+Set `DASHBOARD_PUBLIC_URL=https://dashboard.eva.finance` in `/opt/eth-trading-agent/.env` — full HTTPS URL, no trailing slash or path — then restart `eth-agent` so Telegram's **Agent journal** and **My book** links use it. Telegram requires HTTPS for those link buttons; a raw `http://IP:8080` value will not work.
+
+Once HTTPS is confirmed, close the raw port so nobody can reach the dashboard unencrypted by hitting the IP directly:
+
+```bash
+sudo ufw delete allow 8080/tcp
+```
 
 After deploying personal books, run once (or rely on `paper.init_db` auto-migrate):
 
@@ -382,7 +402,7 @@ nano .env                     # INVESTOR_ACCESS_TOKEN=<paste>
 sudo systemctl restart eth-dashboard
 ```
 
-Then share `https://dashboard.yourdomain.com/investors?k=<token>`. The first visit sets an httponly cookie (30 days, `INVESTOR_SESSION_TTL_SEC`), so reloads and in-app navigation work without the query string. Any request without a valid token gets a **404**, not a 401, so a guessed URL never confirms the page exists. To revoke access, change the token and restart the dashboard.
+Then share `https://dashboard.eva.finance/investors?k=<token>`. The first visit sets an httponly cookie (30 days, `INVESTOR_SESSION_TTL_SEC`), so reloads and in-app navigation work without the query string. Any request without a valid token gets a **404**, not a 401, so a guessed URL never confirms the page exists. To revoke access, change the token and restart the dashboard.
 
 Leaving `INVESTOR_ACCESS_TOKEN` unset keeps the page reachable to anyone who knows the path — the same unlisted-only posture as `/volume`. Set it before sending the link to anyone outside the team.
 
@@ -396,7 +416,7 @@ Push headlines into the same pipeline as RSS (keyword score → Haiku classify �
 2. POST to the dashboard (HTTPS via Caddy recommended):
 
 ```bash
-curl -X POST "https://dashboard.yourdomain.com/api/macro/ingest" \
+curl -X POST "https://dashboard.eva.finance/api/macro/ingest" \
   -H "Authorization: Bearer YOUR_MACRO_WEBHOOK_SECRET" \
   -H "Content-Type: application/json" \
   -d '{"title":"U.S. revokes Iran oil authorization after tanker attacks","url":"https://...","force_classify":true}'
@@ -420,10 +440,10 @@ After the Jul-2026 paper audit, watchdog **scans and shadow-logs** by default bu
 
 ```bash
 # Status
-curl "https://dashboard.yourdomain.com/api/ops/watchdog-execute"
+curl "https://dashboard.eva.finance/api/ops/watchdog-execute"
 
 # Enable paper fills (Bearer = MACRO_WEBHOOK_SECRET)
-curl -X POST "https://dashboard.yourdomain.com/api/ops/watchdog-execute" \
+curl -X POST "https://dashboard.eva.finance/api/ops/watchdog-execute" \
   -H "Authorization: Bearer YOUR_MACRO_WEBHOOK_SECRET" \
   -H "Content-Type: application/json" \
   -d '{"enabled":true}'
@@ -616,7 +636,7 @@ If `eth-dashboard.service` is missing on an older VPS (only ran `update.sh`, not
 sudo bash /opt/eth-trading-agent/deploy/install_dashboard.sh
 ```
 
-Then open `http://YOUR_SERVER_IP:8080` (allow port 8080 in the cloud firewall if needed).
+Then open `https://dashboard.eva.finance`. If Caddy is not up, fall back to `http://YOUR_SERVER_IP:8080` (allow port 8080 in the cloud firewall if needed).
 
 ---
 
