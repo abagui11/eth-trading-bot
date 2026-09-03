@@ -1,0 +1,7 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- EVA brand kit · eva-mark-64-ink · guidelines v2.2 Malachite & Slate -->
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 96 96" width="64" height="64" role="img" aria-label="EVA mark">
+  <rect width="96" height="96" fill="#0D1112"/>
+  <rect x="20" y="43" width="34" height="10" fill="#FAFAF8"/>
+  <rect x="62" y="43" width="16" height="10" fill="#0E7A52"/>
+</svg>

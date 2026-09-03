@@ -5,7 +5,12 @@
   <meta name="robots" content="noindex,nofollow">
   <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
   <title>Eva — Investor View</title>
-  <link rel="stylesheet" href="/static/style.css?v=inv6">
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Source+Serif+4:opsz,wght@8..60,400;8..60,600&family=Inter:wght@400;500;600&family=IBM+Plex+Mono:wght@400;500&display=swap" rel="stylesheet">
+  <link rel="icon" href="/static/brand/eva-mark-32.png" sizes="32x32" type="image/png">
+  <link rel="apple-touch-icon" href="/static/brand/eva-mark-180.png">
+  <link rel="stylesheet" href="/static/style.css?v=eva1">
 </head>
 <body>
 {% from "_macros.html" import trade_card, tip_badge %}
@@ -16,7 +21,7 @@
 {% set d = inv.daily %}
 
 <div class="wrap">
-  <header class="inv-header">
+  <header class="inv-header brand-header">
     <div class="inv-kicker-row">
       <p class="inv-kicker"><span class="feed-live"></span> Private link · not indexed · please do not redistribute</p>
       <span class="inv-acct-health band-{{ ah.band }}" id="inv-acct-health"
@@ -25,7 +30,10 @@
         margin <strong id="inv-acct-health-pct">{% if ah.usage_pct is not none %}{{ ah.usage_pct|pct(decimals=1, sign=False) }}{% else %}n/a{% endif %}</strong>
       </span>
     </div>
-    <h1>Eva — live trading performance</h1>
+    <div class="brand-mark-row">
+      <img class="brand-wordmark" src="/static/brand/eva-wordmark-ink.svg" width="140" height="50" alt="Eva">
+    </div>
+    <h1>Live trading performance</h1>
     <p class="sub">
       Eva's trades only — mill clips are not included.
       Marks refresh automatically · snapshot <span id="inv-updated">{{ inv.generated_at }}</span>
@@ -376,7 +384,7 @@
     var lastX = x(pts.length - 1);
     var area = line + ' L' + lastX.toFixed(1) + ' ' + (h - padB) + ' L' + x(0).toFixed(1) + ' ' + (h - padB) + ' Z';
     var up = pts[pts.length - 1].value >= pts[0].value;
-    var color = up ? '#3fb950' : '#f85149';
+    var color = up ? '#0E7A52' : '#B4503C';
     var last = pts[pts.length - 1];
     svg.innerHTML =
       '<path d="' + area + '" fill="' + color + '" fill-opacity="0.16"></path>' +

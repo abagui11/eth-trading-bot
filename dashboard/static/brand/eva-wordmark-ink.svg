@@ -1,0 +1,10 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- EVA brand kit · eva-wordmark-ink · guidelines v2.2 Malachite & Slate -->
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="-28 -20 356 126" width="356" height="126" role="img" aria-label="EVA">
+  <g fill="#0D1112">
+    <path d="M0 8 H62 V22 H16 V36 H52 V50 H16 V64 H62 V78 H0 Z"/>
+    <path d="M84 8 H104 L124 62 L144 8 H164 L134 78 H114 Z"/>
+    <path d="M200 8 H222 L252 78 H232 L211 26 L190 78 H170 Z"/>
+  </g>
+  <rect x="264" y="43" width="36" height="14" fill="#0E7A52"/>
+</svg>

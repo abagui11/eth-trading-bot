@@ -4,7 +4,12 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
   <title>Eva Intelligence</title>
-  <link rel="stylesheet" href="/static/style.css?v=mill5">
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Source+Serif+4:opsz,wght@8..60,400;8..60,600&family=Inter:wght@400;500;600&family=IBM+Plex+Mono:wght@400;500&display=swap" rel="stylesheet">
+  <link rel="icon" href="/static/brand/eva-mark-32.png" sizes="32x32" type="image/png">
+  <link rel="apple-touch-icon" href="/static/brand/eva-mark-180.png">
+  <link rel="stylesheet" href="/static/style.css?v=eva1">
 </head>
 <body>
   {% macro mill_clip_detail(t, mode) -%}
@@ -90,8 +95,12 @@
   {%- endmacro %}
 
   <div class="wrap">
-    <header>
-      <h1>Eva Intelligence</h1>
+    <header class="brand-header">
+      <p class="brand-kicker">Operator hub</p>
+      <div class="brand-mark-row">
+        <img class="brand-wordmark" src="/static/brand/eva-wordmark-ink.svg" width="140" height="50" alt="Eva">
+        <span class="brand-product">Intelligence</span>
+      </div>
       <p class="sub">Eva is the brain. It feeds three products: Eva Trades, yield generation, and the trade mill.</p>
     </header>
 
