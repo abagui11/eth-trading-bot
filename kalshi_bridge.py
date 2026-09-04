@@ -31,10 +31,9 @@ _BOT_LABELS = {
     "eva_wick": "EVA wick (fade/overshoot)",
 }
 
-# Live sleeve: $450 moved to Kalshi shard 2 and KALSHI_BANKROLL raised.
-# Soak rows stay in the ledger but must not be mixed into the tab totals —
-# that is what made equity look like $66 paper + idle control.
-_LIVE_EPOCH_DEFAULT = "2026-09-04T16:37:00Z"
+# Live sleeve: KALSHI_PAPER_ONLY flipped false at ~14:20 UTC. Overnight soak
+# rows stay in the ledger but must not mix into the tab totals.
+_LIVE_EPOCH_DEFAULT = "2026-09-04T14:20:00Z"
 
 
 def live_epoch() -> str:
