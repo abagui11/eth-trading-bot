@@ -156,9 +156,11 @@ def create_app() -> FastAPI:
 
     @app.get("/", response_class=HTMLResponse)
     async def index(request: Request) -> HTMLResponse:
+        import kalshi_bridge
         import trade_ideas_bridge
 
         mill_paper = trade_ideas_bridge.volume_book_payload(limit=12)
+        kalshi = kalshi_bridge.performance_payload(limit=15)
         live_open = data.enrich_live_trades(live_ledger.get_open_trades(source="hq"))
         mill_open = data.enrich_live_trades(live_ledger.get_open_trades(source="mill"))
         mill_closed = data.enrich_live_trades(
@@ -195,10 +197,19 @@ def create_app() -> FastAPI:
                     "daily_loss_limit_usd": bot_config.LIVE_MILL_DAILY_LOSS_LIMIT_USD,
                 },
                 "mill_paper": mill_paper or {"available": False},
+                "kalshi": kalshi or {"available": False},
                 "yield_enabled": bool(config.YIELD_GEN_API_URL),
                 "yield_dashboard_url": config.YIELD_GEN_DASHBOARD_URL,
             },
         )
+
+    @app.get("/api/kalshi/performance")
+    async def api_kalshi_performance(limit: int = 15) -> dict:
+        """Kalshi 15m bot paper book (read-only colocated ledger)."""
+        import kalshi_bridge
+
+        payload = kalshi_bridge.performance_payload(limit=min(max(limit, 1), 100))
+        return payload or {"available": False}
 
     @app.get("/api/brain")
     async def api_brain() -> dict:
