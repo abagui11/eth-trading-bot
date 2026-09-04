@@ -966,17 +966,19 @@
 
     <div id="tab-kalshi" class="hub-panel" role="tabpanel" hidden>
       <section class="card" id="kalshi-book-card">
-        <h2>Kalshi 15m · EVA wick paper book</h2>
+        <h2>Kalshi 15m · EVA wick book</h2>
         {% if kalshi.available %}
         <p class="sub" style="margin-bottom:10px">
           Zero-Claude bot trading Kalshi 15-minute BTC/ETH up/down binaries off the hub's
           H4/H1/M15 stances — fades pops and buys overshoots when the cheap side lines up
-          with EVA's lean. Paper fills, real Telegram broadcasts, 2× early take-profit.
+          with EVA's lean. Live on the boss Kalshi account since 09/04 (paper soak before
+          that); Telegram broadcasts, 2× early take-profit. Ledger excludes Kalshi taker
+          fees, so account P&amp;L runs slightly below book.
         </p>
         {% set kt = kalshi.totals %}
         <div class="metrics" style="margin-bottom:10px">
           <div class="metric">
-            <div class="label">Paper equity</div>
+            <div class="label">Book equity</div>
             <div class="value" id="kalshi-equity">${{ "%.2f"|format(kt.equity_usd) }}</div>
           </div>
           <div class="metric">
