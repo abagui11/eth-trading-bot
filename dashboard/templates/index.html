@@ -970,10 +970,10 @@
         {% if kalshi.available %}
         <p class="sub" style="margin-bottom:10px">
           Zero-Claude bot trading Kalshi 15-minute BTC/ETH up/down binaries off the hub's
-          H4/H1/M15 stances — fades pops and buys overshoots when the cheap side lines up
-          with EVA's lean. Live on the boss Kalshi account since 09/04 (paper soak before
-          that); Telegram broadcasts, 2× early take-profit. Ledger excludes Kalshi taker
-          fees, so account P&amp;L runs slightly below book.
+          H4/H1/M15 stances. Metrics are the <strong>live sleeve</strong> (bankroll moved
+          to Kalshi shard 2 at 12:37 ET) — not the overnight $66 paper soak, and not the
+          idle control book. Equity should match shard-2 cash; taker fees and any fill
+          the ledger refused still sit only on the account.
         </p>
         {% set kt = kalshi.totals %}
         <div class="metrics" style="margin-bottom:10px">
@@ -995,7 +995,8 @@
           </div>
         </div>
         <p class="sub" id="kalshi-bots-line">
-          {% for b in kalshi.bots %}{{ b.label }}: ${{ "%.0f"|format(b.equity_usd) }} ({{ b.wins }}W/{{ b.losses }}L{% if b.early_exits %}, {{ b.early_exits }} TP{% endif %}){% if not loop.last %} · {% endif %}{% endfor %}
+          {% for b in kalshi.bots %}{{ b.label }}: ${{ "%.0f"|format(b.equity_usd) }} from ${{ "%.0f"|format(b.starting_usd) }} ({{ b.wins }}W/{{ b.losses }}L{% if b.early_exits %}, {{ b.early_exits }} TP{% endif %}){% if not loop.last %} · {% endif %}{% endfor %}
+          {% if kalshi.soak_closed %} · {{ kalshi.soak_closed }} soak trades hidden from totals{% endif %}
         </p>
         <p class="sub news-section">Open positions</p>
         <p class="sub" id="kalshi-open-empty"{% if kalshi.open %} hidden{% endif %}>No open positions. The bot only enters when a wick setup lines up with EVA's lean.</p>
@@ -1569,11 +1570,13 @@
       set('kalshi-closed-count', String(kt.closed || 0) + wr);
       var botsLine = document.getElementById('kalshi-bots-line');
       if (botsLine) {
+        var soak = data.soak_closed ? ' · ' + data.soak_closed + ' soak trades hidden from totals' : '';
         botsLine.textContent = (data.bots || []).map(function (b) {
           var tp = b.early_exits ? ', ' + b.early_exits + ' TP' : '';
           return b.label + ': $' + Number(b.equity_usd || 0).toFixed(0) +
+            ' from $' + Number(b.starting_usd || 0).toFixed(0) +
             ' (' + b.wins + 'W/' + b.losses + 'L' + tp + ')';
-        }).join(' · ');
+        }).join(' · ') + soak;
       }
       var openHtml = (data.open || []).map(function (p) {
         return '<tr><td>' + esc(p.opened_at) + '</td><td>' + esc(p.market_ticker) +

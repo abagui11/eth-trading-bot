@@ -31,6 +31,15 @@ _BOT_LABELS = {
     "eva_wick": "EVA wick (fade/overshoot)",
 }
 
+# Live sleeve: $450 moved to Kalshi shard 2 and KALSHI_BANKROLL raised.
+# Soak rows stay in the ledger but must not be mixed into the tab totals —
+# that is what made equity look like $66 paper + idle control.
+_LIVE_EPOCH_DEFAULT = "2026-09-04T16:37:00Z"
+
+
+def live_epoch() -> str:
+    return (os.getenv("KALSHI_LIVE_EPOCH") or _LIVE_EPOCH_DEFAULT).strip()
+
 
 def kalshi_db_path() -> Path | None:
     raw = (os.getenv("KALSHI_DB") or "").strip()
@@ -99,10 +108,11 @@ def performance_payload(limit: int = 15) -> dict[str, Any] | None:
             "SELECT * FROM paper_positions WHERE status = 'open'"
             " ORDER BY opened_at DESC LIMIT 40"
         ).fetchall()
+        epoch = live_epoch()
         closed_rows = conn.execute(
             "SELECT * FROM paper_positions WHERE status != 'open'"
-            " ORDER BY closed_at DESC LIMIT ?",
-            (max(1, min(int(limit), 100)),),
+            " AND opened_at >= ? ORDER BY closed_at DESC LIMIT ?",
+            (epoch, max(1, min(int(limit), 100))),
         ).fetchall()
         agg = conn.execute(
             "SELECT bot_id,"
@@ -111,8 +121,16 @@ def performance_payload(limit: int = 15) -> dict[str, Any] | None:
             "  SUM(CASE WHEN pnl_usd < 0 THEN 1 ELSE 0 END) AS losses,"
             "  SUM(COALESCE(pnl_usd, 0)) AS pnl_usd,"
             "  SUM(CASE WHEN result = 'flat' THEN 1 ELSE 0 END) AS early_exits"
-            " FROM paper_positions WHERE status != 'open' GROUP BY bot_id"
+            " FROM paper_positions"
+            " WHERE status != 'open' AND opened_at >= ?"
+            " GROUP BY bot_id",
+            (epoch,),
         ).fetchall()
+        soak_n = conn.execute(
+            "SELECT COUNT(*) FROM paper_positions"
+            " WHERE status != 'open' AND opened_at < ?",
+            (epoch,),
+        ).fetchone()[0]
     except sqlite3.Error:
         logger.exception("Kalshi ledger query failed")
         return None
@@ -135,6 +153,10 @@ def performance_payload(limit: int = 15) -> dict[str, Any] | None:
         closed = int(a["closed"]) if a else 0
         wins = int(a["wins"] or 0) if a else 0
         losses = int(a["losses"] or 0) if a else 0
+        n_open = sum(1 for p in open_list if p["bot_id"] == bot_id)
+        # Idle leftover bots (the unused control book) inflate totals.
+        if closed == 0 and n_open == 0 and bot_id != "eva_wick":
+            continue
         decided = wins + losses
         cash = float(st["cash_usd"] or 0)
         bots.append(
@@ -145,7 +167,7 @@ def performance_payload(limit: int = 15) -> dict[str, Any] | None:
                 "cash_usd": cash,
                 "equity_usd": cash + open_cost_by_bot.get(bot_id, 0.0),
                 "realized_pnl_usd": float(st["realized_pnl_usd"] or 0),
-                "open": sum(1 for p in open_list if p["bot_id"] == bot_id),
+                "open": n_open,
                 "closed": closed,
                 "wins": wins,
                 "losses": losses,
@@ -169,6 +191,8 @@ def performance_payload(limit: int = 15) -> dict[str, Any] | None:
     }
     return {
         "available": True,
+        "live_epoch": epoch,
+        "soak_closed": int(soak_n or 0),
         "totals": totals,
         "bots": bots,
         "open": open_list,
