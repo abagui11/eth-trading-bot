@@ -57,12 +57,13 @@ _BOT_BLURBS = {
     ),
     "eva_arb": (
         "Last 2 minutes only. If the favorite touched 90¢ then dips to 75–85¢, "
-        "buy the favored side before quotes freeze. Logging only — not trading yet."
+        "buy the favored side before quotes freeze and hold to settlement. "
+        "Paper trading this epoch."
     ),
 }
 
 # Bots always shown in the comparison, even before their first trade.
-_EXPERIMENT_BOTS = ("eva_streak", "eva_wick")
+_EXPERIMENT_BOTS = ("eva_streak", "eva_wick", "eva_arb")
 
 # Multi-bot experiment flip: eva_streak went live (mid entry), eva_wick moved
 # to paper with the double-down rule. Comparison starts here.
@@ -285,27 +286,6 @@ def performance_payload(limit: int = 15) -> dict[str, Any] | None:
         )
     # Live book first, then paper books alphabetically.
     bots.sort(key=lambda b: (b["mode"] != "live", b["bot_id"]))
-
-    # Arb sleeve: always listed, never traded yet (logger only).
-    bots.append(
-        {
-            "bot_id": "eva_arb",
-            "label": _BOT_LABELS["eva_arb"],
-            "blurb": _BOT_BLURBS["eva_arb"],
-            "mode": "logger",
-            "starting_usd": 0.0,
-            "cash_usd": 0.0,
-            "equity_usd": 0.0,
-            "realized_pnl_usd": 0.0,
-            "epoch_pnl_usd": 0.0,
-            "open": 0,
-            "closed": 0,
-            "wins": 0,
-            "losses": 0,
-            "early_exits": 0,
-            "win_rate": None,
-        }
-    )
 
     live_list = [b for b in bots if b["mode"] == "live"]
     live_wins = sum(b["wins"] for b in live_list)
