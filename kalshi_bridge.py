@@ -38,15 +38,34 @@ _BOT_LABELS = {
     "control": "Control (conviction ICT)",
     "lottery": "Lottery / hail-mary",
     "adverse": "Adverse / wick-hunt",
-    "eva_wick": "EVA wick (fade/overshoot)",
-    "eva_streak": "EVA streak (Dan reversal)",
+    "eva_wick": "EVA wick",
+    "eva_streak": "EVA reversal",
+    "eva_arb": "EVA arb",
+}
+
+# Short grey subtitles under each bot name in the comparison table (≤4 lines).
+_BOT_BLURBS = {
+    "eva_streak": (
+        "After ≥3 same-direction 15m candles with a sweep of the prior extreme, "
+        "buy the opposite side at the open mid. Cash out at 2× or cut at ½; "
+        "cool down after consecutive stops."
+    ),
+    "eva_wick": (
+        "Fade session-range pops and buy overshoots against EVA’s H4/H1/M15 lean "
+        "when the side is cheap (≤33¢). Paper: if crushed under 12¢ after a "
+        "29–33¢ entry, double down and trim the add back at 29¢."
+    ),
+    "eva_arb": (
+        "Last 2 minutes only. If the favorite touched 90¢ then dips to 75–85¢, "
+        "buy the favored side before quotes freeze. Logging only — not trading yet."
+    ),
 }
 
 # Bots always shown in the comparison, even before their first trade.
 _EXPERIMENT_BOTS = ("eva_streak", "eva_wick")
 
 # Multi-bot experiment flip: eva_streak went live (mid entry), eva_wick moved
-# to paper with the boss double-down rule. Comparison starts here.
+# to paper with the double-down rule. Comparison starts here.
 _EXPERIMENT_EPOCH_DEFAULT = "2026-09-08T18:00:00Z"
 
 
@@ -122,8 +141,8 @@ def lastmin_payload(max_windows: int = 400) -> dict[str, Any] | None:
     """Eva #3 arb logger evidence: dip setups seen vs how they settled.
 
     A "dip setup" = the favored side touched >=90c inside the final window
-    and later printed back inside 75-85c (Dan's buy zone). No trading —
-    this only answers "how often would that buy have settled in the money?".
+    and later printed back inside 75-85c. No trading — this only answers
+    "how often would that buy have settled in the money?".
     """
     conn = _connect(lastmin_db_path())
     if conn is None:
@@ -249,6 +268,7 @@ def performance_payload(limit: int = 15) -> dict[str, Any] | None:
             {
                 "bot_id": bot_id,
                 "label": _BOT_LABELS.get(bot_id, bot_id),
+                "blurb": _BOT_BLURBS.get(bot_id, ""),
                 "mode": "live" if bot_id in live_set else "paper",
                 "starting_usd": float(st["starting_usd"] or 0),
                 "cash_usd": cash,
@@ -265,6 +285,27 @@ def performance_payload(limit: int = 15) -> dict[str, Any] | None:
         )
     # Live book first, then paper books alphabetically.
     bots.sort(key=lambda b: (b["mode"] != "live", b["bot_id"]))
+
+    # Arb sleeve: always listed, never traded yet (logger only).
+    bots.append(
+        {
+            "bot_id": "eva_arb",
+            "label": _BOT_LABELS["eva_arb"],
+            "blurb": _BOT_BLURBS["eva_arb"],
+            "mode": "logger",
+            "starting_usd": 0.0,
+            "cash_usd": 0.0,
+            "equity_usd": 0.0,
+            "realized_pnl_usd": 0.0,
+            "epoch_pnl_usd": 0.0,
+            "open": 0,
+            "closed": 0,
+            "wins": 0,
+            "losses": 0,
+            "early_exits": 0,
+            "win_rate": None,
+        }
+    )
 
     live_list = [b for b in bots if b["mode"] == "live"]
     live_wins = sum(b["wins"] for b in live_list)

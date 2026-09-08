@@ -973,8 +973,8 @@
           (<span id="kalshi-epoch">{{ kalshi.experiment_epoch_label }}</span>):
           the <strong>LIVE</strong> book trades real Kalshi money at 1-contract
           size, the paper bots shadow the same markets on ledger-only fills,
-          and the Eva #3 arb logger just collects evidence. Live equity should
-          match shard-2 cash; taker fees sit only on the account.
+          and the arb sleeve logs last-2-min dips without trading. Live equity
+          should match shard-2 cash; taker fees sit only on the account.
         </p>
         {% set kt = kalshi.totals %}
         <p class="sub news-section" style="margin-bottom:6px">
@@ -1010,14 +1010,26 @@
             <tbody id="kalshi-compare">
               {% for b in kalshi.bots %}
               <tr>
-                <td>{{ b.label }}</td>
+                <td class="kalshi-bot-cell">
+                  <div class="kalshi-bot-name">{{ b.label }}</div>
+                  {% if b.blurb %}<div class="kalshi-bot-blurb">{{ b.blurb }}</div>{% endif %}
+                </td>
                 <td><span class="badge {{ 'badge-good' if b.mode == 'live' else 'badge-none' }}">{{ b.mode | upper }}</span></td>
+                {% if b.mode == 'logger' %}
+                <td>0</td>
+                <td>—</td>
+                <td>—</td>
+                <td>—</td>
+                <td>—</td>
+                <td>—</td>
+                {% else %}
                 <td>{{ b.closed }}{% if b.open %} (+{{ b.open }} open){% endif %}</td>
                 <td>{{ b.wins }}W/{{ b.losses }}L</td>
                 <td>{% if b.win_rate is not none %}{{ (b.win_rate * 100)|round|int }}%{% else %}—{% endif %}</td>
                 <td>{{ b.early_exits }}</td>
                 <td class="{{ 'pos' if b.epoch_pnl_usd >= 0 else 'neg' }}">{{ "%+.2f"|format(b.epoch_pnl_usd) }}</td>
                 <td>${{ "%.2f"|format(b.equity_usd) }}</td>
+                {% endif %}
               </tr>
               {% endfor %}
             </tbody>
@@ -1025,16 +1037,6 @@
         </div>
         <p class="sub" id="kalshi-hidden-line">
           {% if kalshi.hidden_closed %}{{ kalshi.hidden_closed }} pre-experiment trades hidden from these numbers.{% endif %}
-        </p>
-
-        <p class="sub news-section">Eva #3 · last-2-min arb logger (no trading yet)</p>
-        <p class="sub" id="kalshi-lastmin-line">
-          {% if kalshi.lastmin %}
-            {{ kalshi.lastmin.windows }} windows tracked · {{ kalshi.lastmin.dips }} dip setups (favorite touched 90¢ then printed 75–85¢)
-            {% if kalshi.lastmin.dip_win_rate is not none %} · favored side settled in the money {{ (kalshi.lastmin.dip_win_rate * 100)|round|int }}% of dips{% endif %}
-          {% else %}
-            Logger DB not mounted (set <code>KALSHI_LASTMIN_DB</code>).
-          {% endif %}
         </p>
 
         <p class="sub news-section">Open positions (all bots)</p>
@@ -1614,11 +1616,18 @@
       set('kalshi-closed-count', String(kt.closed || 0) + wr);
       var compareHtml = (data.bots || []).map(function (b) {
         var badge = b.mode === 'live' ? 'badge-good' : 'badge-none';
+        var nameCell = '<div class="kalshi-bot-name">' + esc(b.label) + '</div>' +
+          (b.blurb ? '<div class="kalshi-bot-blurb">' + esc(b.blurb) + '</div>' : '');
+        if (b.mode === 'logger') {
+          return '<tr><td class="kalshi-bot-cell">' + nameCell + '</td>' +
+            '<td><span class="badge badge-none">' + esc(String(b.mode).toUpperCase()) + '</span></td>' +
+            '<td>0</td><td>—</td><td>—</td><td>—</td><td>—</td><td>—</td></tr>';
+        }
         var wrb = b.win_rate != null ? Math.round(b.win_rate * 100) + '%' : '—';
         var pnl = (b.epoch_pnl_usd >= 0 ? '+' : '') + Number(b.epoch_pnl_usd || 0).toFixed(2);
         var pnlCls = b.epoch_pnl_usd >= 0 ? 'pos' : 'neg';
         var trades = String(b.closed || 0) + (b.open ? ' (+' + b.open + ' open)' : '');
-        return '<tr><td>' + esc(b.label) + '</td>' +
+        return '<tr><td class="kalshi-bot-cell">' + nameCell + '</td>' +
           '<td><span class="badge ' + badge + '">' + esc(String(b.mode).toUpperCase()) + '</span></td>' +
           '<td>' + trades + '</td>' +
           '<td>' + b.wins + 'W/' + b.losses + 'L</td>' +
@@ -1634,15 +1643,6 @@
         hiddenLine.textContent = data.hidden_closed
           ? data.hidden_closed + ' pre-experiment trades hidden from these numbers.'
           : '';
-      }
-      var lm = data.lastmin;
-      var lmLine = document.getElementById('kalshi-lastmin-line');
-      if (lmLine && lm) {
-        var lmWr = lm.dip_win_rate != null
-          ? ' · favored side settled in the money ' + Math.round(lm.dip_win_rate * 100) + '% of dips'
-          : '';
-        lmLine.textContent = lm.windows + ' windows tracked · ' + lm.dips +
-          ' dip setups (favorite touched 90¢ then printed 75–85¢)' + lmWr;
       }
       var botCell = function (p) {
         return esc(p.bot_id) + (p.mode === 'live' ? ' · LIVE' : '');
