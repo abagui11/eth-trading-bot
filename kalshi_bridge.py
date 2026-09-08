@@ -1,13 +1,23 @@
 """Read-only bridge to the colocated Kalshi 15m bot ledger.
 
-The Kalshi eva_wick bot (kalshi_15m_bot repo, /opt/kalshi-15m-bot on the VPS)
-keeps its paper book in its own SQLite ledger. This module mirrors the
+The Kalshi 15m bots (kalshi_15m_bot repo, /opt/kalshi-15m-bot on the VPS)
+keep their books in one SQLite ledger. This module mirrors the
 trade_ideas_bridge pattern: fail-soft reads over ``KALSHI_DB`` so the hub
-dashboard can show the bot's performance without importing its code.
+dashboard can show bot performance without importing bot code.
 
-Set ``KALSHI_DB=/opt/kalshi-15m-bot/ledger.db`` in the hub .env. When unset or
-unreadable every payload reports ``{"available": False}`` and the tab shows a
-mount hint instead of breaking.
+Hub .env knobs:
+
+* ``KALSHI_DB=/opt/kalshi-15m-bot/ledger.db`` — required for the tab.
+* ``KALSHI_LIVE_BOTS=eva_streak`` — which bot(s) trade the real account;
+  everything else shows as PAPER. Mirrors the bot repo's env of the same name.
+* ``KALSHI_EXPERIMENT_EPOCH`` — comparison start line (default: the
+  2026-09-08 multi-bot flip). All per-bot stats and the closed list count
+  from here so live and paper books race from the same start.
+* ``KALSHI_LASTMIN_DB=/opt/kalshi-15m-bot/lastmin.db`` — optional; enables
+  the Eva #3 last-2-min arb logger card (logging only, no trading).
+
+When ``KALSHI_DB`` is unset or unreadable every payload reports
+``{"available": False}`` and the tab shows a mount hint instead of breaking.
 """
 
 from __future__ import annotations
@@ -29,19 +39,35 @@ _BOT_LABELS = {
     "lottery": "Lottery / hail-mary",
     "adverse": "Adverse / wick-hunt",
     "eva_wick": "EVA wick (fade/overshoot)",
+    "eva_streak": "EVA streak (Dan reversal)",
 }
 
-# Live sleeve: KALSHI_PAPER_ONLY flipped false at ~14:20 UTC. Overnight soak
-# rows stay in the ledger but must not mix into the tab totals.
-_LIVE_EPOCH_DEFAULT = "2026-09-04T14:20:00Z"
+# Bots always shown in the comparison, even before their first trade.
+_EXPERIMENT_BOTS = ("eva_streak", "eva_wick")
+
+# Multi-bot experiment flip: eva_streak went live (mid entry), eva_wick moved
+# to paper with the boss double-down rule. Comparison starts here.
+_EXPERIMENT_EPOCH_DEFAULT = "2026-09-08T18:00:00Z"
 
 
-def live_epoch() -> str:
-    return (os.getenv("KALSHI_LIVE_EPOCH") or _LIVE_EPOCH_DEFAULT).strip()
+def experiment_epoch() -> str:
+    return (
+        os.getenv("KALSHI_EXPERIMENT_EPOCH") or _EXPERIMENT_EPOCH_DEFAULT
+    ).strip()
+
+
+def live_bots() -> tuple[str, ...]:
+    raw = (os.getenv("KALSHI_LIVE_BOTS") or "eva_streak").strip()
+    return tuple(s.strip() for s in raw.split(",") if s.strip())
 
 
 def kalshi_db_path() -> Path | None:
     raw = (os.getenv("KALSHI_DB") or "").strip()
+    return Path(raw) if raw else None
+
+
+def lastmin_db_path() -> Path | None:
+    raw = (os.getenv("KALSHI_LASTMIN_DB") or "").strip()
     return Path(raw) if raw else None
 
 
@@ -50,8 +76,7 @@ def enabled() -> bool:
     return path is not None and path.exists()
 
 
-def _connect() -> sqlite3.Connection | None:
-    path = kalshi_db_path()
+def _connect(path: Path | None) -> sqlite3.Connection | None:
     if path is None or not path.exists():
         return None
     try:
@@ -93,11 +118,71 @@ def _position_row(row: sqlite3.Row) -> dict[str, Any]:
     }
 
 
-def performance_payload(limit: int = 15) -> dict[str, Any] | None:
-    """Kalshi paper book snapshot for the hub tab; None when not mounted."""
-    conn = _connect()
+def lastmin_payload(max_windows: int = 400) -> dict[str, Any] | None:
+    """Eva #3 arb logger evidence: dip setups seen vs how they settled.
+
+    A "dip setup" = the favored side touched >=90c inside the final window
+    and later printed back inside 75-85c (Dan's buy zone). No trading —
+    this only answers "how often would that buy have settled in the money?".
+    """
+    conn = _connect(lastmin_db_path())
     if conn is None:
         return None
+    try:
+        results = conn.execute(
+            "SELECT ticker, result FROM results ORDER BY settled_ts DESC LIMIT ?",
+            (int(max_windows),),
+        ).fetchall()
+        windows_total = conn.execute("SELECT COUNT(*) FROM results").fetchone()[0]
+        quotes_total = conn.execute("SELECT COUNT(*) FROM quotes").fetchone()[0]
+        dips = 0
+        dip_wins = 0
+        for r in results:
+            rows = conn.execute(
+                "SELECT yes_mid FROM quotes WHERE ticker = ? AND yes_mid IS NOT NULL"
+                " ORDER BY id",
+                (str(r["ticker"]),),
+            ).fetchall()
+            mids = [float(q["yes_mid"]) for q in rows]
+            if not mids:
+                continue
+            for favored, touch, lo, hi in (
+                ("yes", lambda m: m >= 90.0, 75.0, 85.0),
+                ("no", lambda m: m <= 10.0, 15.0, 25.0),
+            ):
+                touched = False
+                dipped = False
+                for m in mids:
+                    if touch(m):
+                        touched = True
+                    elif touched and lo <= m <= hi:
+                        dipped = True
+                        break
+                if dipped:
+                    dips += 1
+                    if str(r["result"]) == favored:
+                        dip_wins += 1
+                    break
+    except sqlite3.Error:
+        logger.exception("lastmin db query failed")
+        return None
+    finally:
+        conn.close()
+    return {
+        "windows": int(windows_total or 0),
+        "quotes": int(quotes_total or 0),
+        "dips": dips,
+        "dip_wins": dip_wins,
+        "dip_win_rate": (dip_wins / dips) if dips else None,
+    }
+
+
+def performance_payload(limit: int = 15) -> dict[str, Any] | None:
+    """Kalshi multi-bot snapshot for the hub tab; None when not mounted."""
+    conn = _connect(kalshi_db_path())
+    if conn is None:
+        return None
+    epoch = experiment_epoch()
     try:
         states = conn.execute(
             "SELECT bot_id, starting_usd, cash_usd, realized_pnl_usd"
@@ -107,7 +192,6 @@ def performance_payload(limit: int = 15) -> dict[str, Any] | None:
             "SELECT * FROM paper_positions WHERE status = 'open'"
             " ORDER BY opened_at DESC LIMIT 40"
         ).fetchall()
-        epoch = live_epoch()
         closed_rows = conn.execute(
             "SELECT * FROM paper_positions WHERE status != 'open'"
             " AND opened_at >= ? ORDER BY closed_at DESC LIMIT ?",
@@ -125,7 +209,7 @@ def performance_payload(limit: int = 15) -> dict[str, Any] | None:
             " GROUP BY bot_id",
             (epoch,),
         ).fetchall()
-        soak_n = conn.execute(
+        hidden_n = conn.execute(
             "SELECT COUNT(*) FROM paper_positions"
             " WHERE status != 'open' AND opened_at < ?",
             (epoch,),
@@ -136,8 +220,11 @@ def performance_payload(limit: int = 15) -> dict[str, Any] | None:
     finally:
         conn.close()
 
+    live_set = set(live_bots())
     open_list = [_position_row(r) for r in open_rows]
     closed_list = [_position_row(r) for r in closed_rows]
+    for p in open_list + closed_list:
+        p["mode"] = "live" if p["bot_id"] in live_set else "paper"
     agg_by_bot = {str(r["bot_id"]): r for r in agg}
     open_cost_by_bot: dict[str, float] = {}
     for pos in open_list:
@@ -153,8 +240,8 @@ def performance_payload(limit: int = 15) -> dict[str, Any] | None:
         wins = int(a["wins"] or 0) if a else 0
         losses = int(a["losses"] or 0) if a else 0
         n_open = sum(1 for p in open_list if p["bot_id"] == bot_id)
-        # Idle leftover bots (the unused control book) inflate totals.
-        if closed == 0 and n_open == 0 and bot_id != "eva_wick":
+        # Idle leftover books (old control/lottery rows) stay off the tab.
+        if closed == 0 and n_open == 0 and bot_id not in _EXPERIMENT_BOTS:
             continue
         decided = wins + losses
         cash = float(st["cash_usd"] or 0)
@@ -162,10 +249,12 @@ def performance_payload(limit: int = 15) -> dict[str, Any] | None:
             {
                 "bot_id": bot_id,
                 "label": _BOT_LABELS.get(bot_id, bot_id),
+                "mode": "live" if bot_id in live_set else "paper",
                 "starting_usd": float(st["starting_usd"] or 0),
                 "cash_usd": cash,
                 "equity_usd": cash + open_cost_by_bot.get(bot_id, 0.0),
                 "realized_pnl_usd": float(st["realized_pnl_usd"] or 0),
+                "epoch_pnl_usd": float(a["pnl_usd"] or 0) if a else 0.0,
                 "open": n_open,
                 "closed": closed,
                 "wins": wins,
@@ -174,26 +263,34 @@ def performance_payload(limit: int = 15) -> dict[str, Any] | None:
                 "win_rate": (wins / decided) if decided else None,
             }
         )
+    # Live book first, then paper books alphabetically.
+    bots.sort(key=lambda b: (b["mode"] != "live", b["bot_id"]))
 
-    total_wins = sum(b["wins"] for b in bots)
-    total_losses = sum(b["losses"] for b in bots)
-    decided = total_wins + total_losses
+    live_list = [b for b in bots if b["mode"] == "live"]
+    live_wins = sum(b["wins"] for b in live_list)
+    live_losses = sum(b["losses"] for b in live_list)
+    decided = live_wins + live_losses
     totals = {
-        "starting_usd": sum(b["starting_usd"] for b in bots),
-        "equity_usd": sum(b["equity_usd"] for b in bots),
-        "realized_pnl_usd": sum(b["realized_pnl_usd"] for b in bots),
-        "open": len(open_list),
-        "closed": sum(b["closed"] for b in bots),
-        "wins": total_wins,
-        "losses": total_losses,
-        "win_rate": (total_wins / decided) if decided else None,
+        "label": " + ".join(b["label"] for b in live_list) or "(no live bot)",
+        "starting_usd": sum(b["starting_usd"] for b in live_list),
+        "equity_usd": sum(b["equity_usd"] for b in live_list),
+        "realized_pnl_usd": sum(b["realized_pnl_usd"] for b in live_list),
+        "epoch_pnl_usd": sum(b["epoch_pnl_usd"] for b in live_list),
+        "open": sum(b["open"] for b in live_list),
+        "closed": sum(b["closed"] for b in live_list),
+        "wins": live_wins,
+        "losses": live_losses,
+        "win_rate": (live_wins / decided) if decided else None,
     }
     return {
         "available": True,
-        "live_epoch": epoch,
-        "soak_closed": int(soak_n or 0),
+        "experiment_epoch": epoch,
+        "experiment_epoch_label": _fmt_ts(epoch) + " ET",
+        "live_bots": sorted(live_set),
+        "hidden_closed": int(hidden_n or 0),
         "totals": totals,
         "bots": bots,
         "open": open_list,
         "closed": closed_list,
+        "lastmin": lastmin_payload(),
     }

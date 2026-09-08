@@ -966,25 +966,30 @@
 
     <div id="tab-kalshi" class="hub-panel" role="tabpanel" hidden>
       <section class="card" id="kalshi-book-card">
-        <h2>Kalshi 15m · EVA wick book</h2>
+        <h2>Kalshi 15m · multi-bot experiment</h2>
         {% if kalshi.available %}
         <p class="sub" style="margin-bottom:10px">
-          Zero-Claude bot trading Kalshi 15-minute BTC/ETH up/down binaries off the hub's
-          H4/H1/M15 stances. Metrics are the <strong>live sleeve</strong> (real Kalshi
-          fills since ~10:20 ET, including the 1-contract trades before the size-up) —
-          not the overnight $66 paper soak, and not the
-          idle control book. Equity should match shard-2 cash; taker fees and any fill
-          the ledger refused still sit only on the account.
+          Three sleeves race from the same start line
+          (<span id="kalshi-epoch">{{ kalshi.experiment_epoch_label }}</span>):
+          the <strong>LIVE</strong> book trades real Kalshi money at 1-contract
+          size, the paper bots shadow the same markets on ledger-only fills,
+          and the Eva #3 arb logger just collects evidence. Live equity should
+          match shard-2 cash; taker fees sit only on the account.
         </p>
         {% set kt = kalshi.totals %}
+        <p class="sub news-section" style="margin-bottom:6px">
+          <span class="badge badge-good">LIVE</span>
+          <strong id="kalshi-live-label">{{ kt.label }}</strong>
+          — the real-money main book
+        </p>
         <div class="metrics" style="margin-bottom:10px">
           <div class="metric">
             <div class="label">Book equity</div>
             <div class="value" id="kalshi-equity">${{ "%.2f"|format(kt.equity_usd) }}</div>
           </div>
           <div class="metric">
-            <div class="label">Realized P&amp;L</div>
-            <div class="value {{ 'pos' if kt.realized_pnl_usd >= 0 else 'neg' }}" id="kalshi-pnl">{{ "%+.2f"|format(kt.realized_pnl_usd) }}</div>
+            <div class="label">P&amp;L since start</div>
+            <div class="value {{ 'pos' if kt.epoch_pnl_usd >= 0 else 'neg' }}" id="kalshi-pnl">{{ "%+.2f"|format(kt.epoch_pnl_usd) }}</div>
           </div>
           <div class="metric">
             <div class="label">Open</div>
@@ -995,11 +1000,44 @@
             <div class="value" id="kalshi-closed-count">{{ kt.closed }}{% if kt.win_rate is not none %} · {{ (kt.win_rate * 100)|round|int }}% win{% endif %}</div>
           </div>
         </div>
-        <p class="sub" id="kalshi-bots-line">
-          {% for b in kalshi.bots %}{{ b.label }}: ${{ "%.0f"|format(b.equity_usd) }} from ${{ "%.0f"|format(b.starting_usd) }} ({{ b.wins }}W/{{ b.losses }}L{% if b.early_exits %}, {{ b.early_exits }} TP{% endif %}){% if not loop.last %} · {% endif %}{% endfor %}
-          {% if kalshi.soak_closed %} · {{ kalshi.soak_closed }} soak trades hidden from totals{% endif %}
+
+        <p class="sub news-section">Bot comparison (since experiment start)</p>
+        <div class="table-scroll">
+          <table>
+            <thead>
+              <tr><th>Bot</th><th>Mode</th><th>Trades</th><th>W/L</th><th>Win%</th><th>Early exits</th><th>P&amp;L</th><th>Equity</th></tr>
+            </thead>
+            <tbody id="kalshi-compare">
+              {% for b in kalshi.bots %}
+              <tr>
+                <td>{{ b.label }}</td>
+                <td><span class="badge {{ 'badge-good' if b.mode == 'live' else 'badge-none' }}">{{ b.mode | upper }}</span></td>
+                <td>{{ b.closed }}{% if b.open %} (+{{ b.open }} open){% endif %}</td>
+                <td>{{ b.wins }}W/{{ b.losses }}L</td>
+                <td>{% if b.win_rate is not none %}{{ (b.win_rate * 100)|round|int }}%{% else %}—{% endif %}</td>
+                <td>{{ b.early_exits }}</td>
+                <td class="{{ 'pos' if b.epoch_pnl_usd >= 0 else 'neg' }}">{{ "%+.2f"|format(b.epoch_pnl_usd) }}</td>
+                <td>${{ "%.2f"|format(b.equity_usd) }}</td>
+              </tr>
+              {% endfor %}
+            </tbody>
+          </table>
+        </div>
+        <p class="sub" id="kalshi-hidden-line">
+          {% if kalshi.hidden_closed %}{{ kalshi.hidden_closed }} pre-experiment trades hidden from these numbers.{% endif %}
         </p>
-        <p class="sub news-section">Open positions</p>
+
+        <p class="sub news-section">Eva #3 · last-2-min arb logger (no trading yet)</p>
+        <p class="sub" id="kalshi-lastmin-line">
+          {% if kalshi.lastmin %}
+            {{ kalshi.lastmin.windows }} windows tracked · {{ kalshi.lastmin.dips }} dip setups (favorite touched 90¢ then printed 75–85¢)
+            {% if kalshi.lastmin.dip_win_rate is not none %} · favored side settled in the money {{ (kalshi.lastmin.dip_win_rate * 100)|round|int }}% of dips{% endif %}
+          {% else %}
+            Logger DB not mounted (set <code>KALSHI_LASTMIN_DB</code>).
+          {% endif %}
+        </p>
+
+        <p class="sub news-section">Open positions (all bots)</p>
         <p class="sub" id="kalshi-open-empty"{% if kalshi.open %} hidden{% endif %}>No open positions. The bot only enters when a wick setup lines up with EVA's lean.</p>
         <div class="table-scroll" id="kalshi-open-table"{% if not kalshi.open %} hidden{% endif %}>
           <table>
@@ -1015,18 +1053,18 @@
                 <td>{{ p.contracts }}</td>
                 <td>{{ "%.1f"|format(p.entry_cents) }}¢</td>
                 <td>${{ "%.2f"|format(p.cost_usd) }}</td>
-                <td>{{ p.bot_id }}</td>
+                <td>{{ p.bot_id }}{% if p.mode == 'live' %} · LIVE{% endif %}</td>
               </tr>
               {% endfor %}
             </tbody>
           </table>
         </div>
-        <p class="sub news-section">Closed positions</p>
-        <p class="sub" id="kalshi-closed-empty"{% if kalshi.closed %} hidden{% endif %}>No settled positions yet. Trades appear here after windows settle (or early take-profit exits).</p>
+        <p class="sub news-section">Closed positions (all bots, since experiment start)</p>
+        <p class="sub" id="kalshi-closed-empty"{% if kalshi.closed %} hidden{% endif %}>No settled positions yet. Trades appear here after windows settle (or early TP/SL exits).</p>
         <div class="table-scroll" id="kalshi-closed-table"{% if not kalshi.closed %} hidden{% endif %}>
           <table>
             <thead>
-              <tr><th>Closed</th><th>Market</th><th>Side</th><th>Qty</th><th>Entry</th><th>Result</th><th>P&amp;L</th></tr>
+              <tr><th>Closed</th><th>Market</th><th>Side</th><th>Qty</th><th>Entry</th><th>Result</th><th>P&amp;L</th><th>Bot</th></tr>
             </thead>
             <tbody id="kalshi-closed">
               {% for p in kalshi.closed %}
@@ -1036,8 +1074,9 @@
                 <td>{{ p.side }}</td>
                 <td>{{ p.contracts }}</td>
                 <td>{{ "%.1f"|format(p.entry_cents) }}¢</td>
-                <td>{{ 'TP exit' if p.result == 'flat' else p.result }}</td>
+                <td>{{ 'early exit' if p.result == 'flat' else p.result }}</td>
                 <td class="{{ 'pos' if p.pnl_usd is not none and p.pnl_usd >= 0 else 'neg' }}">{% if p.pnl_usd is not none %}{{ "%+.2f"|format(p.pnl_usd) }}{% else %}—{% endif %}</td>
+                <td>{{ p.bot_id }}{% if p.mode == 'live' %} · LIVE{% endif %}</td>
               </tr>
               {% endfor %}
             </tbody>
@@ -1563,37 +1602,66 @@
           if (cls != null) el.className = 'value ' + cls;
         }
       };
+      var epochEl = document.getElementById('kalshi-epoch');
+      if (epochEl && data.experiment_epoch_label) epochEl.textContent = data.experiment_epoch_label;
+      var liveLabel = document.getElementById('kalshi-live-label');
+      if (liveLabel) liveLabel.textContent = kt.label || '';
       set('kalshi-equity', '$' + Number(kt.equity_usd || 0).toFixed(2));
-      set('kalshi-pnl', (kt.realized_pnl_usd >= 0 ? '+' : '') + Number(kt.realized_pnl_usd || 0).toFixed(2),
-          kt.realized_pnl_usd >= 0 ? 'pos' : 'neg');
+      set('kalshi-pnl', (kt.epoch_pnl_usd >= 0 ? '+' : '') + Number(kt.epoch_pnl_usd || 0).toFixed(2),
+          kt.epoch_pnl_usd >= 0 ? 'pos' : 'neg');
       set('kalshi-open-count', String(kt.open || 0));
       var wr = kt.win_rate != null ? ' · ' + Math.round(kt.win_rate * 100) + '% win' : '';
       set('kalshi-closed-count', String(kt.closed || 0) + wr);
-      var botsLine = document.getElementById('kalshi-bots-line');
-      if (botsLine) {
-        var soak = data.soak_closed ? ' · ' + data.soak_closed + ' soak trades hidden from totals' : '';
-        botsLine.textContent = (data.bots || []).map(function (b) {
-          var tp = b.early_exits ? ', ' + b.early_exits + ' TP' : '';
-          return b.label + ': $' + Number(b.equity_usd || 0).toFixed(0) +
-            ' from $' + Number(b.starting_usd || 0).toFixed(0) +
-            ' (' + b.wins + 'W/' + b.losses + 'L' + tp + ')';
-        }).join(' · ') + soak;
+      var compareHtml = (data.bots || []).map(function (b) {
+        var badge = b.mode === 'live' ? 'badge-good' : 'badge-none';
+        var wrb = b.win_rate != null ? Math.round(b.win_rate * 100) + '%' : '—';
+        var pnl = (b.epoch_pnl_usd >= 0 ? '+' : '') + Number(b.epoch_pnl_usd || 0).toFixed(2);
+        var pnlCls = b.epoch_pnl_usd >= 0 ? 'pos' : 'neg';
+        var trades = String(b.closed || 0) + (b.open ? ' (+' + b.open + ' open)' : '');
+        return '<tr><td>' + esc(b.label) + '</td>' +
+          '<td><span class="badge ' + badge + '">' + esc(String(b.mode).toUpperCase()) + '</span></td>' +
+          '<td>' + trades + '</td>' +
+          '<td>' + b.wins + 'W/' + b.losses + 'L</td>' +
+          '<td>' + wrb + '</td>' +
+          '<td>' + (b.early_exits || 0) + '</td>' +
+          '<td class="' + pnlCls + '">' + pnl + '</td>' +
+          '<td>$' + Number(b.equity_usd || 0).toFixed(2) + '</td></tr>';
+      }).join('');
+      var compareBody = document.getElementById('kalshi-compare');
+      if (compareBody) compareBody.innerHTML = compareHtml;
+      var hiddenLine = document.getElementById('kalshi-hidden-line');
+      if (hiddenLine) {
+        hiddenLine.textContent = data.hidden_closed
+          ? data.hidden_closed + ' pre-experiment trades hidden from these numbers.'
+          : '';
       }
+      var lm = data.lastmin;
+      var lmLine = document.getElementById('kalshi-lastmin-line');
+      if (lmLine && lm) {
+        var lmWr = lm.dip_win_rate != null
+          ? ' · favored side settled in the money ' + Math.round(lm.dip_win_rate * 100) + '% of dips'
+          : '';
+        lmLine.textContent = lm.windows + ' windows tracked · ' + lm.dips +
+          ' dip setups (favorite touched 90¢ then printed 75–85¢)' + lmWr;
+      }
+      var botCell = function (p) {
+        return esc(p.bot_id) + (p.mode === 'live' ? ' · LIVE' : '');
+      };
       var openHtml = (data.open || []).map(function (p) {
         return '<tr><td>' + esc(p.opened_at) + '</td><td>' + esc(p.market_ticker) +
           '</td><td>' + esc(p.side) + '</td><td>' + p.contracts +
           '</td><td>' + Number(p.entry_cents).toFixed(1) + '¢</td><td>$' +
-          Number(p.cost_usd).toFixed(2) + '</td><td>' + esc(p.bot_id) + '</td></tr>';
+          Number(p.cost_usd).toFixed(2) + '</td><td>' + botCell(p) + '</td></tr>';
       }).join('');
       kalshiSetTable('kalshi-open', 'kalshi-open-table', 'kalshi-open-empty', openHtml, (data.open || []).length > 0);
       var closedHtml = (data.closed || []).map(function (p) {
         var pnl = p.pnl_usd == null ? '—' : (p.pnl_usd >= 0 ? '+' : '') + Number(p.pnl_usd).toFixed(2);
         var cls = p.pnl_usd != null && p.pnl_usd >= 0 ? 'pos' : 'neg';
-        var result = p.result === 'flat' ? 'TP exit' : p.result;
+        var result = p.result === 'flat' ? 'early exit' : p.result;
         return '<tr><td>' + esc(p.closed_at) + '</td><td>' + esc(p.market_ticker) +
           '</td><td>' + esc(p.side) + '</td><td>' + p.contracts +
           '</td><td>' + Number(p.entry_cents).toFixed(1) + '¢</td><td>' + esc(result) +
-          '</td><td class="' + cls + '">' + pnl + '</td></tr>';
+          '</td><td class="' + cls + '">' + pnl + '</td><td>' + botCell(p) + '</td></tr>';
       }).join('');
       kalshiSetTable('kalshi-closed', 'kalshi-closed-table', 'kalshi-closed-empty', closedHtml, (data.closed || []).length > 0);
     }
