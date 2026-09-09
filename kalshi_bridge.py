@@ -47,13 +47,13 @@ _BOT_LABELS = {
 _BOT_BLURBS = {
     "eva_streak": (
         "After ≥3 same-direction 15m candles with a sweep of the prior extreme, "
-        "buy the opposite side at the open mid. Cash out at 2× or cut at ½; "
-        "cool down after consecutive stops."
+        "buy the opposite side at the open mid only when priced 45–65¢. "
+        "Cash out at 2× or cut at ½; cool down after consecutive stops."
     ),
     "eva_wick": (
         "Fade session-range pops and buy overshoots against EVA’s H4/H1/M15 lean "
-        "when the side is cheap (≤33¢). Paper: if crushed under 12¢ after a "
-        "29–33¢ entry, double down and trim the add back at 29¢."
+        "when the side is cheap (≤33¢). Take profit near 2× entry; hold losers "
+        "to settlement."
     ),
     "eva_arb": (
         "Last 2 minutes only. If the favorite touched 90¢ then dips to 75–85¢, "
