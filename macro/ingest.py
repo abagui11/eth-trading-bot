@@ -6,6 +6,7 @@ import logging
 from typing import Any
 
 import feedparser
+import requests
 
 import bot_config
 import config
@@ -102,6 +103,26 @@ def ingest_headline(
     return event
 
 
+# feedparser.parse(url) fetches through urllib without passing a timeout, so it
+# falls back to the default socket timeout — which is None. A feed host that
+# accepts the connection and then never answers blocks the calling thread for
+# good. This poll shares one thread pool with the hourly trade cycle, and that
+# pool is 5 threads on the VPS, so a few stalled feeds would starve run_cycle
+# until someone restarts the process. Fetch the bytes under a bound ourselves
+# and leave feedparser to do only the parsing.
+_FEED_TIMEOUT_SEC = 15
+
+
+def _fetch_feed(feed_url: str) -> Any:
+    response = requests.get(
+        feed_url,
+        timeout=_FEED_TIMEOUT_SEC,
+        headers={"User-Agent": "eva-macro-ingest/1.0"},
+    )
+    response.raise_for_status()
+    return feedparser.parse(response.content)
+
+
 def poll_feeds() -> int:
     """Poll configured RSS feeds; return count of newly ingested items."""
     if not bot_config.MACRO_CONTEXT_ENABLED:
@@ -113,9 +134,9 @@ def poll_feeds() -> int:
     ingested = 0
     for feed_url in config.MACRO_FEED_URLS:
         try:
-            parsed = feedparser.parse(feed_url)
+            parsed = _fetch_feed(feed_url)
         except Exception:
-            logger.exception("Failed to parse RSS feed %s", feed_url)
+            logger.exception("Failed to fetch RSS feed %s", feed_url)
             continue
 
         source = parsed.feed.get("title") or feed_url
