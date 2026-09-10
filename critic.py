@@ -499,7 +499,9 @@ def refine_suggestion(
             market_context, downgrade_reason=reason_codes or None
         )
         suggestion = Suggestion.no_trade(
-            llm_body, product_id=suggestion.product_id
+            llm_body,
+            product_id=suggestion.product_id,
+            reason_code="audit_downgrade",
         )
         suggestion.decision_charts = ["H4"]
         downgraded = True
@@ -510,8 +512,12 @@ def refine_suggestion(
         [f for f in final_findings if f.code == "LLM_HALLUCINATION"],
     ):
         llm_body = sanitize_rationale(market_context)
+        # Prose rewrite of an already-abstaining cycle, not a killed trade —
+        # the reason it did not trade is still the model's own call.
         suggestion = Suggestion.no_trade(
-            llm_body, product_id=suggestion.product_id
+            llm_body,
+            product_id=suggestion.product_id,
+            reason_code="model_no_trade",
         )
         suggestion.decision_charts = ["H4"]
         sanitized = True

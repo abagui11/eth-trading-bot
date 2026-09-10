@@ -586,7 +586,11 @@ def propose_trades_multi(
         except Exception as exc:
             logger.exception("Claude multi-asset API call failed")
             return [
-                Suggestion.no_trade(f"api_error: {exc}", product_id=pid)
+                Suggestion.no_trade(
+                    f"api_error: {exc}",
+                    product_id=pid,
+                    reason_code="proposal_error",
+                )
                 for pid in bot_config.TRADED_PRODUCTS
                 if pid in allowed_products
             ]
@@ -644,6 +648,7 @@ def propose_trades_multi(
                     suggestion = Suggestion.no_trade(
                         rationale,
                         product_id=product_id,
+                        reason_code="validation_rejected",
                     )
                 suggestions.append(suggestion)
             return suggestions

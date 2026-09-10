@@ -27,6 +27,38 @@ from patterns.relative_strength import build_relative_strength_context
 logger = logging.getLogger(__name__)
 
 
+def select_decisions(suggestions: list[Suggestion]) -> list[Suggestion]:
+    """One persisted decision per traded product.
+
+    Every verdict the model returned is kept, actionable or not. Products it
+    said nothing about are backfilled so both charts stay on the dashboard,
+    and those rows are marked `not_evaluated` so they are never mistaken for
+    a considered abstention.
+    """
+    if suggestions:
+        selected = list(suggestions)
+    else:
+        selected = [
+            Suggestion.no_trade(
+                "No valid dual-asset suggestion returned.",
+                product_id=bot_config.TRADED_PRODUCTS[0],
+                reason_code="proposal_empty",
+            )
+        ]
+
+    answered = {s.product_id for s in selected}
+    for product_id in bot_config.TRADED_PRODUCTS:
+        if product_id not in answered:
+            selected.append(
+                Suggestion.no_trade(
+                    "No independent setup for this asset this cycle.",
+                    product_id=product_id,
+                    reason_code="not_evaluated",
+                )
+            )
+    return selected
+
+
 def run_cycle() -> list[tuple[Suggestion, list[str]]] | None:
     """Run one dual-asset cycle and return persisted product decisions."""
     cycle_id = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
@@ -85,31 +117,7 @@ def run_cycle() -> list[tuple[Suggestion, list[str]]] | None:
             trading_guide=guide,
         )
 
-        actionable = [s for s in suggestions if s.action != "no_trade"]
-        if actionable:
-            selected = actionable
-        elif suggestions:
-            selected = [suggestions[0]]
-        else:
-            first_product = bot_config.TRADED_PRODUCTS[0]
-            selected = [
-                Suggestion.no_trade(
-                    "No valid dual-asset suggestion returned.",
-                    product_id=first_product,
-                )
-            ]
-
-        # Always persist a decision (trade or no_trade) per product so both
-        # ETH and BTC marked charts stay available on the dashboard.
-        selected_by_product = {s.product_id: s for s in selected}
-        for product_id in bot_config.TRADED_PRODUCTS:
-            if product_id not in selected_by_product:
-                selected.append(
-                    Suggestion.no_trade(
-                        "No independent setup for this asset this cycle.",
-                        product_id=product_id,
-                    )
-                )
+        selected = select_decisions(suggestions)
 
         spots = research.get_spot_prices()
         results: list[tuple[Suggestion, list[str]]] = []
@@ -149,7 +157,11 @@ def run_cycle() -> list[tuple[Suggestion, list[str]]] | None:
                 llm_body = critic.sanitize_rationale(
                     market_context, downgrade_reason=codes
                 )
-                suggestion = Suggestion.no_trade(llm_body, product_id=product_id)
+                suggestion = Suggestion.no_trade(
+                    llm_body,
+                    product_id=product_id,
+                    reason_code="audit_downgrade",
+                )
                 suggestion.decision_charts = ["H4"]
                 suggestion.rationale = critic.compose_rationale(
                     llm_body, context_block

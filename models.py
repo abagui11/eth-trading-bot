@@ -25,6 +25,8 @@ class Suggestion:
   product_id: str = "ETH-USD"  # Coinbase product, e.g. ETH-USD / BTC-USD
   macro_note: str | None = None  # required when inject-level macro is active
   trigger_name: str | None = None  # watchdog structured trigger (e.g. m5_ob_fib_short)
+  # Why this decision came out the way it did. See ledger.REASON_CODES.
+  reason_code: str | None = None
 
   @classmethod
   def no_trade(
@@ -32,6 +34,7 @@ class Suggestion:
     rationale: str = "No setup",
     *,
     product_id: str = "ETH-USD",
+    reason_code: str | None = None,
   ) -> Suggestion:
     return cls(
       action="no_trade",
@@ -43,6 +46,7 @@ class Suggestion:
       rationale=rationale,
       order_block=None,
       product_id=product_id,
+      reason_code=reason_code,
     )
 
   @classmethod

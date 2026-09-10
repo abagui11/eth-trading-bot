@@ -924,6 +924,7 @@ def run_watchdog() -> list[Suggestion] | None:
                 executed=will_execute,
                 trigger_name=trigger.name,
                 macro_json=macro_snap,
+                reason_code="trade" if will_execute else "watchdog_shadow",
             )
 
             if will_execute:

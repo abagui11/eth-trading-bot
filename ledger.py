@@ -12,6 +12,41 @@ from models import Suggestion
 
 # TODO: split into paper vs actual ledgers for the full build.
 
+# Why a cycle ended the way it did. `executed = 0` conflates all of the
+# abstaining cases below, so counting them apart used to mean LIKE-matching
+# prose. Mirrors the role `skip_reason` plays in `vault_allocations`.
+REASON_CODES = (
+    "trade",  # actionable idea survived to broadcast
+    "model_no_trade",  # the model read the chart and declined
+    "validation_rejected",  # validate.py refused the levels (R/R, stop distance, OB)
+    "proposal_error",  # API or JSON failure — no verdict was reached
+    "proposal_empty",  # call returned no usable decision for any product
+    "not_evaluated",  # backfilled so both products keep a row; not a judgement
+    "audit_downgrade",  # critic or hard audit block killed an actionable idea
+    "watchdog_shadow",  # watchdog trigger logged but execution disabled
+)
+
+
+def classify_reason(suggestion: Suggestion) -> str:
+    """Best-effort reason code for a suggestion that did not set one itself.
+
+    Explicit `reason_code` always wins; this only covers callers that predate
+    the field, and it reads the prose prefixes `analyze.py` already writes.
+    """
+    explicit = getattr(suggestion, "reason_code", None)
+    if explicit:
+        return str(explicit)
+    if suggestion.action != "no_trade":
+        return "trade"
+    rationale = suggestion.rationale or ""
+    if "parse_error:" in rationale:
+        return "validation_rejected"
+    if "api_error:" in rationale:
+        return "proposal_error"
+    if rationale.startswith("Audit downgrade"):
+        return "audit_downgrade"
+    return "model_no_trade"
+
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS suggestions (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -51,6 +86,8 @@ def _ensure_columns(conn: sqlite3.Connection) -> None:
         conn.execute("ALTER TABLE suggestions ADD COLUMN trigger_name TEXT")
     if "macro_json" not in cols:
         conn.execute("ALTER TABLE suggestions ADD COLUMN macro_json TEXT")
+    if "reason_code" not in cols:
+        conn.execute("ALTER TABLE suggestions ADD COLUMN reason_code TEXT")
 
 
 def _connect() -> sqlite3.Connection:
@@ -77,12 +114,14 @@ def append(
     executed: bool = True,
     trigger_name: str | None = None,
     macro_json: str | dict[str, Any] | None = None,
+    reason_code: str | None = None,
 ) -> int:
     """Append one suggestion row. Returns the new row id."""
     init_db()
     row_ts = ts or datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
     product_id = getattr(suggestion, "product_id", None) or "ETH-USD"
     trigger = trigger_name or getattr(suggestion, "trigger_name", None)
+    reason = reason_code or classify_reason(suggestion)
     if isinstance(macro_json, dict):
         macro_payload = json.dumps(macro_json)
     else:
@@ -94,8 +133,9 @@ def append(
             INSERT INTO suggestions (
                 ts, cycle_id, action, size, entry, stop_loss,
                 take_profits, risk_reward, price_at_suggestion, rationale, chart_path,
-                setup_tags, product_id, executed, trigger_name, macro_json
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                setup_tags, product_id, executed, trigger_name, macro_json,
+                reason_code
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 row_ts,
@@ -114,6 +154,7 @@ def append(
                 1 if executed else 0,
                 trigger,
                 macro_payload,
+                reason,
             ),
         )
         conn.commit()
