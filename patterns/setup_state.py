@@ -6,7 +6,7 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Literal
 
-from patterns.signal_state import get_state, set_state
+from patterns.signal_state import get_state, product_key, set_state
 
 SETUP_STATE_KEY = "trade_setup_state"
 
@@ -51,12 +51,12 @@ class SetupState:
         )
 
 
-def load_setup_state() -> SetupState:
-    return SetupState.from_dict(get_state(SETUP_STATE_KEY))
+def load_setup_state(product_id: str | None = None) -> SetupState:
+    return SetupState.from_dict(get_state(product_key(SETUP_STATE_KEY, product_id)))
 
 
-def save_setup_state(state: SetupState) -> None:
-    set_state(SETUP_STATE_KEY, state.to_dict())
+def save_setup_state(state: SetupState, product_id: str | None = None) -> None:
+    set_state(product_key(SETUP_STATE_KEY, product_id), state.to_dict())
 
 
 def _now_iso() -> str:
@@ -72,6 +72,7 @@ def update_bearish_retest_state(
     htf_bearish_bias: bool,
     recent_bearish_m5_sfp: bool = False,
     recent_bearish_h1_sfp: bool | None = None,
+    product_id: str | None = None,
 ) -> tuple[SetupState, list[str], list[str]]:
     """
     Advance bearish retest setup state and return (state, alerts, setup_tags).
@@ -80,13 +81,13 @@ def update_bearish_retest_state(
         recent_bearish_m5_sfp = recent_bearish_h1_sfp
     alerts: list[str] = []
     tags: list[str] = []
-    state = load_setup_state()
+    state = load_setup_state(product_id)
     now = _now_iso()
 
     if retest_low is None or retest_high is None or not htf_bearish_bias:
         if state.phase != "idle":
             state = SetupState(phase="idle", updated_ts=now)
-            save_setup_state(state)
+            save_setup_state(state, product_id)
         return state, alerts, tags
 
     high = range_high_24h if range_high_24h is not None else spot
@@ -149,5 +150,5 @@ def update_bearish_retest_state(
 
     state.retest_low = retest_low
     state.retest_high = retest_high
-    save_setup_state(state)
+    save_setup_state(state, product_id)
     return state, alerts, tags

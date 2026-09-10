@@ -20,6 +20,15 @@ def _connect() -> sqlite3.Connection:
     return conn
 
 
+def product_key(base: str, product_id: str | None) -> str:
+    """Scope a state key to one product.
+
+    Every traded product runs through the same context builder in one cycle, so
+    an unscoped key makes each product read whatever the previous product wrote.
+    """
+    return f"{base}:{product_id}" if product_id else base
+
+
 def init_state() -> None:
     with _connect() as conn:
         conn.execute(_SCHEMA)

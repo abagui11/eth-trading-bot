@@ -77,6 +77,41 @@ class SetupStateTests(unittest.TestCase):
         self.assertEqual(state.phase, "bearish_retest_rejected")
         self.assertIn("short_trigger_retest", tags)
 
+    def test_retest_state_is_per_product(self) -> None:
+        """One product's latched retest phase must not leak into another's."""
+        eth, _, _ = update_bearish_retest_state(
+            spot=1575.0,
+            range_high_24h=1624.0,
+            retest_low=1610.0,
+            retest_high=1658.0,
+            htf_bearish_bias=True,
+            product_id="ETH-USD",
+        )
+        self.assertEqual(eth.phase, "bearish_retest_filled")
+
+        # BTC has no bearish zone this cycle, so it must read as idle.
+        btc, alerts, tags = update_bearish_retest_state(
+            spot=77_000.0,
+            range_high_24h=78_000.0,
+            retest_low=None,
+            retest_high=None,
+            htf_bearish_bias=False,
+            product_id="BTC-USD",
+        )
+        self.assertEqual(btc.phase, "idle")
+        self.assertEqual(alerts, [])
+        self.assertEqual(tags, [])
+
+        # ETH keeps its own latched zone rather than BTC's reset.
+        self.assertEqual(load_setup_state("ETH-USD").phase, "bearish_retest_filled")
+        self.assertEqual(load_setup_state("ETH-USD").retest_low, 1610.0)
+        self.assertEqual(load_setup_state("BTC-USD").phase, "idle")
+
+    def test_unscoped_state_is_isolated_from_product_state(self) -> None:
+        save_setup_state(SetupState(phase="bearish_retest_filled"), "ETH-USD")
+        self.assertEqual(load_setup_state().phase, "idle")
+        self.assertIsNone(get_state(SETUP_STATE_KEY))
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -19,7 +19,7 @@ from patterns.order_block import (
 from patterns.range_24h import Range24h, compute_range_24h, detect_range_break
 from patterns.setup_state import SetupState, update_bearish_retest_state
 from patterns.sfp import SFPEvent, detect_sfps
-from patterns.signal_state import get_state, set_state
+from patterns.signal_state import get_state, product_key, set_state
 from patterns.zone_resolver import ZoneSnapshot, format_zone, resolve_zones
 
 try:
@@ -203,8 +203,10 @@ def build_market_context(
     is_ranging = bool(range_24h and range_24h.is_ranging)
     range_break: str | None = None
 
+    range_state_key = product_key(RANGE_STATE_KEY, product_id)
+
     if range_24h:
-        prev = get_state(RANGE_STATE_KEY)
+        prev = get_state(range_state_key)
         if prev is None:
             alerts.append(
                 f"24h range established: {range_24h.low:,.2f} - {range_24h.high:,.2f} "
@@ -242,7 +244,7 @@ def build_market_context(
                 )
 
         set_state(
-            RANGE_STATE_KEY,
+            range_state_key,
             {"high": range_24h.high, "low": range_24h.low, "end_ts": range_24h.end_ts},
         )
 
@@ -277,6 +279,7 @@ def build_market_context(
         retest_high=zone_snap.bearish_retest_high,
         htf_bearish_bias=bearish_bias,
         recent_bearish_m5_sfp=recent_bearish_m5,
+        product_id=product_id,
     )
     alerts.extend(setup_alerts)
     setup_tags.extend(setup_state_tags)

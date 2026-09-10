@@ -131,6 +131,39 @@ class MarketContextTests(unittest.TestCase):
     def test_fib_position_label_above(self) -> None:
         self.assertEqual(_fib_position_label(1630.0, 1620.0, 1625.0), "above")
 
+    def test_range_state_is_per_product(self) -> None:
+        """ETH must not compare its spot against BTC's 24h range.
+
+        Both products run through this builder in one cycle, so an unscoped
+        state key made each read whatever the other wrote — every cycle then
+        reported a false break in the other asset's price scale.
+        """
+
+        def ctx_for(product_id: str, price: float):
+            return build_market_context(
+                _h4_series(start_price=price * 1.4),
+                _h1_series(30, start_price=price),
+                _m5_series(start_price=price),
+                product_id=product_id,
+            )
+
+        eth_first = ctx_for("ETH-USD", 1570.0)
+        btc_first = ctx_for("BTC-USD", 77_000.0)
+        eth_second = ctx_for("ETH-USD", 1570.0)
+
+        # Each product establishes its own range rather than breaking the other's.
+        self.assertIn("range_24h_new", eth_first.setup_tags)
+        self.assertIn("range_24h_new", btc_first.setup_tags)
+
+        for ctx in (btc_first, eth_second):
+            self.assertNotIn("range_24h_break_above", ctx.setup_tags)
+            self.assertNotIn("range_24h_break_below", ctx.setup_tags)
+        self.assertIsNone(eth_second.range_break)
+
+        # No alert may quote a level from the other product's price scale.
+        for alert in eth_second.alerts:
+            self.assertNotIn("77,", alert)
+
     def test_summary_uses_retest_vocabulary(self) -> None:
         h1 = _h1_series(30)
         h4 = _h4_series(start_price=1800.0)
