@@ -120,9 +120,36 @@ WATCHDOG_INTERVAL_SEC = 60  # 1 minute (valid range: 60–300)
 WATCHDOG_COOLDOWN_SEC = 30 * 60  # 30 min — suppress repeat trigger on same M5 OB
 # Scan/log always when WATCHDOG_ENABLED; paper fills + subscriber offers only when execute is on.
 # Runtime override via user_books meta key WATCHDOG_EXECUTE_META_KEY (dashboard / Telegram).
+#
+# Do not arm this on the "it fires 60x a day and we're only taking 1" argument.
+# The 1,416 shadow fires from 2026-08-06 to 09-10 were replayed on M5 candles
+# through the same ladder engine as every other study, filled the way an armed
+# watchdog actually fills (market at the mark — `execute._execute` sends a
+# market order and never records a live pending), and measured in R because
+# `vault.propose` normalises risk. Result: the whole book is **-0.077R per
+# trigger**, and no family survives. `m5_ob_fib_long` looked like +0.223R over
+# 200 resolved, but 34% of its fires never resolve inside 7 days (its stops
+# average 6.85% of price), and forcing those to the worst case flips it to
+# -0.187R — so its sign is undetermined, not positive. Day-clustered p was
+# 0.090 before Holm and 0.451 after, and 78% of its total R came from 2 of 16
+# days. `m5_sfp_sweep_reversal` is the one solid result and it is **negative**:
+# -0.443R, 95% CI [-0.780, -0.065], below the placebo's 0th percentile.
+# `short_trigger_retest` went 0 for 4 at -1.000R each.
+# Under the real sleeve (4 open / 2 per product) only 112 of 1,416 fires are
+# takeable at all, and every candidate policy lands between -$45 and +$53 over
+# five weeks. The min-k sweep is monotonic unconstrained but **non-monotonic
+# once capacity-limited** (+$53 at k>=2.0, -$22 at k>=3.0), which per
+# eva-quant-evidence means noise, not a parameter. Read
+# trade_ideas/analysis/WATCHDOG_FINDINGS.md before touching this.
 WATCHDOG_EXECUTE_ENABLED = False
 WATCHDOG_EXECUTE_META_KEY = "watchdog_execute_enabled"
 # When execute is on, still block short fires unless this is True (inverted M5 short module).
+# Keeping this False has been doing real work: shorts are 1,096 of the 1,416
+# shadow fires and ran -0.135R over 1,048 resolved. Note the window is not a
+# fair test of the short module — BTC rose 19.4% and ETH 28.8% across it, which
+# is why the same-geometry random-entry placebo also lost (-0.204R). Shorts beat
+# that placebo by +0.069R, so the module is not worse than chance; it is just
+# that being less bad than a losing baseline is still losing money.
 WATCHDOG_ALLOW_SHORTS = False
 # Scale-in only when unrealized P&L >= this multiple of 1R (entry→stop distance).
 SCALE_IN_MIN_R = 0.5
