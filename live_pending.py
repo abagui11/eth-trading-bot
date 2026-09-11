@@ -67,15 +67,34 @@ CREATE UNIQUE INDEX IF NOT EXISTS live_pending_product
 
 TRADE_ACTIONS = ("spot_buy", "spot_sell", "deriv_buy", "deriv_sell")
 
+# Every way a waiting plan can end. The card told subscribers the order only
+# executes if price reaches the entry, so each of these has to be said out
+# loud — otherwise the promise just goes quiet and the card stays on their
+# screen looking live.
+OUTCOMES = (
+    "filled",  # price arrived and the order went on
+    "refused",  # price arrived but a halt or a full sleeve stopped the order
+    "missed",  # price ran through the entry and the stop before we could act
+    "cancelled",  # Eva re-read the chart and no longer wants the trade
+    "expired",  # LIVE_PENDING_EXPIRY_HOURS elapsed untouched
+)
+
 
 def _now() -> str:
     return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+def _ensure_columns(conn: sqlite3.Connection) -> None:
+    have = {r["name"] for r in conn.execute("PRAGMA table_info(live_pending)")}
+    if "notify_ids" not in have:
+        conn.execute("ALTER TABLE live_pending ADD COLUMN notify_ids TEXT")
 
 
 def _connect() -> sqlite3.Connection:
     conn = sqlite3.connect(config.LEDGER_DB)
     conn.row_factory = sqlite3.Row
     conn.executescript(_SCHEMA)
+    _ensure_columns(conn)
     return conn
 
 
@@ -177,14 +196,69 @@ def record(suggestion: Suggestion, *, cycle_id: str | None) -> int | None:
     return int(cur.lastrowid or 0)
 
 
-def cancel(product_id: str, *, reason: str = "no setup this cycle") -> int:
+def set_recipients(product_id: str, telegram_ids: list[int] | set[int]) -> None:
+    """Remember who was told about this plan, so they can be told how it ends.
+
+    Stored rather than re-derived at notice time: the subscriber list moves,
+    and someone who joined after the card went out should not get a fill notice
+    for an order they never saw. Written after the broadcast because that is
+    the first moment the real audience is known — ``internal_only`` and per-user
+    send failures both change it.
+    """
+    ids = sorted({int(i) for i in telegram_ids})
+    if not ids:
+        return
+    with _connect() as conn:
+        conn.execute(
+            "UPDATE live_pending SET notify_ids = ? WHERE product_id = ?",
+            (json.dumps(ids), product_id),
+        )
+
+
+def recipients_of(row: dict[str, Any]) -> list[int]:
+    try:
+        return [int(i) for i in json.loads(row.get("notify_ids") or "[]")]
+    except (TypeError, ValueError):
+        return []
+
+
+def _notify(row: dict[str, Any], outcome: str, **facts: Any) -> None:
+    """Tell the card's recipients what became of the order. Never raises.
+
+    The sweep runs on the watchdog loop and reconciles live positions after
+    this, so a Telegram failure must not take it down. An unsent notice leaves
+    the subscriber exactly where they were before this existed.
+    """
+    if not recipients_of(row):
+        return
+    try:
+        import notify as notify_mod
+
+        notify_mod.send_pending_notice(row, outcome=outcome, **facts)
+    except Exception:
+        logger.exception(
+            "Pending %s notice failed for %s", outcome, row.get("product_id")
+        )
+
+
+def cancel(
+    product_id: str,
+    *,
+    reason: str = "no setup this cycle",
+    outcome: str | None = "cancelled",
+) -> int:
     """Drop a waiting plan once Eva re-reads the chart and declines it.
 
     This, not the expiry clock, is what actually bounds a plan's life. Every
     cycle evaluates every traded product, so a ``no_trade`` is a fresh verdict
     on the same chart rather than silence, and holding the old limit through it
     would rest an order Eva would no longer write.
+
+    ``outcome=None`` drops the plan without telling anyone, for the cases where
+    a fresh card for the same product is going out in the same breath and a
+    notice would only be noise.
     """
+    rows = get_pending(product_id)
     with _connect() as conn:
         cur = conn.execute(
             "DELETE FROM live_pending WHERE product_id = ?", (product_id,)
@@ -192,6 +266,9 @@ def cancel(product_id: str, *, reason: str = "no setup this cycle") -> int:
         dropped = int(cur.rowcount or 0)
     if dropped:
         logger.info("live: %s pending entry cancelled — %s", product_id, reason)
+        if outcome:
+            for row in rows:
+                _notify(row, outcome, reason=reason)
     return dropped
 
 
@@ -283,10 +360,18 @@ def sweep(spots: dict[str, float] | None = None) -> list[dict[str, Any]]:
                     spot,
                     float(row["stop_loss"]),
                 )
+                _notify(row, "missed", spot=spot)
                 continue
             result = _fire(row, spot)
             if result is not None:
                 filled.append(result)
+            # Only a live order is a fill worth announcing. Shadow mode logs a
+            # payload and sends nothing, so claiming a fill there would be a
+            # message about a position that does not exist.
+            if result is not None and result.get("mode") == "live":
+                _notify(row, "filled", spot=spot, fill=result.get("fill"))
+            elif result is None:
+                _notify(row, "refused", spot=spot)
             continue
 
         if ttl and _hours_since(row.get("created_at"), now_dt) >= ttl:
@@ -298,6 +383,7 @@ def sweep(spots: dict[str, float] | None = None) -> list[dict[str, Any]]:
                 entry,
                 ttl,
             )
+            _notify(row, "expired", spot=spot, hours=ttl)
             continue
 
         with _connect() as conn:

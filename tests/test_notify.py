@@ -119,7 +119,10 @@ def test_friendly_card_caption_short_and_pcts():
     assert suggestion.rationale == original
     assert caption.startswith("BTC Spot Sell")
     assert "Potential entry near $65,087.87" in caption
-    assert "price move" in caption
+    # A short's target is a "+" return that price has to fall into, so the
+    # card names the direction rather than calling the sign a price move.
+    assert "if price falls to it" in caption
+    assert "price move" not in caption
     assert "Open a demo account" in caption or "Agent size" in caption
     assert "Accept within" in caption
     assert "Why this trade" not in caption

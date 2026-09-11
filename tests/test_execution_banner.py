@@ -46,8 +46,9 @@ def test_a_resting_short_says_it_has_not_filled_and_names_the_trigger() -> None:
     assert "$77,637.82" in body
     assert "1.48% away" in body
     # A short waits for a rally; saying "falls" here would invert the setup.
-    assert "rises to" in body
-    assert "falls" not in body
+    # Scoped to the trigger clause — the levels line names both directions.
+    assert "only if BTC rises to $78,783.23" in body
+    assert "only if BTC falls" not in body
     assert "spot limit sell" in body
     # The vague old lead must be gone, not merely pushed down the card.
     assert "Potential entry near" not in body
@@ -56,8 +57,8 @@ def test_a_resting_short_says_it_has_not_filled_and_names_the_trigger() -> None:
 def test_a_resting_long_waits_for_a_fall() -> None:
     body = build_caption(_sug(action="deriv_buy"), resting=True, spot=79900.0)
 
-    assert "falls to $78,783.23" in body
-    assert "rises" not in body
+    assert "only if BTC falls to $78,783.23" in body
+    assert "only if BTC rises" not in body
     # Futures wording has to name the exposure: "buy" alone reads as spot.
     assert "futures limit buy that opens a long" in body
 

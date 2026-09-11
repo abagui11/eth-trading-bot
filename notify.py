@@ -99,6 +99,123 @@ def build_caption_html(
     return marked
 
 
+# A resting HQ card promises "it executes only if BTC rises to $X". Each of
+# these is the answer to that promise, and without them the card just goes
+# quiet and keeps looking live on the subscriber's screen.
+_PENDING_HEADLINES = {
+    "filled": "Filled — this position is now open.",
+    "refused": "Never filled — the order could not be placed.",
+    "missed": "Never filled — the setup is gone.",
+    "cancelled": "Never filled — Eva pulled the order.",
+    "expired": "Never filled — the order expired.",
+}
+
+
+def format_pending_notice(
+    row: dict,
+    *,
+    outcome: str,
+    spot: float | None = None,
+    fill: float | None = None,
+    hours: float | None = None,
+    reason: str | None = None,
+) -> str:
+    """Follow up on a resting order. First line is the headline, for bolding."""
+    suggestion = Suggestion(
+        action=str(row["action"]),
+        size=float(row.get("size") or 0.0),
+        entry=float(row["entry"]),
+        stop_loss=float(row["stop_loss"]),
+        take_profits=[],
+        risk_reward=row.get("risk_reward"),
+        rationale="",
+        order_block=None,
+        product_id=str(row["product_id"]),
+    )
+    product = bot_config.product_label(suggestion.product_id)
+    title = f"High Quality · {display_summary.friendly_title(suggestion)}"
+    entry = float(row["entry"])
+    side = display_summary.side_label(suggestion.action)
+    headline = _PENDING_HEADLINES.get(outcome, "This order is no longer resting.")
+
+    if outcome == "filled":
+        at = f" at ${float(fill):,.2f}" if fill else ""
+        body = (
+            f"{product} reached the entry, so the limit at ${entry:,.2f} "
+            f"executed and the {side} is open{at}. Stop ${float(row['stop_loss']):,.2f}."
+        )
+    elif outcome == "refused":
+        body = (
+            f"{product} reached ${entry:,.2f}, but the order was stopped by a "
+            f"risk halt or a full sleeve. No position was taken, and the plan "
+            f"is not being held for a later fill — that price has passed."
+        )
+    elif outcome == "missed":
+        body = (
+            f"{product} ran through both the entry (${entry:,.2f}) and the stop "
+            f"(${float(row['stop_loss']):,.2f}) before the order could go on, so "
+            f"the setup is spent. No position was taken."
+        )
+    elif outcome == "expired":
+        window = f" within {float(hours):.0f}h" if hours else ""
+        body = (
+            f"{product} never reached ${entry:,.2f}{window}, so the order has "
+            f"been pulled. No position was taken."
+        )
+    else:  # cancelled
+        body = (
+            f"Eva re-read the chart and no longer wants this trade, so the "
+            f"limit at ${entry:,.2f} has been cancelled"
+            + (f" ({reason})" if reason else "")
+            + ". No position was taken."
+        )
+
+    # A fill already states the price it happened at; repeating the mark reads
+    # as a second, different number.
+    if spot and outcome != "filled":
+        body += f" {product} is ${float(spot):,.2f} now."
+    return f"{title} — {headline}\n\n{body}"
+
+
+async def send_pending_notice_async(
+    row: dict, *, outcome: str, **facts: object
+) -> int:
+    """DM the people who got the card, and only them."""
+    import live_pending
+
+    recipients = live_pending.recipients_of(row)
+    if not recipients:
+        return 0
+
+    text = format_pending_notice(row, outcome=outcome, **facts)  # type: ignore[arg-type]
+    headline, _, rest = text.partition("\n")
+    marked = f"<b>{html.escape(headline)}</b>{html.escape(rest)}"
+
+    bot = Bot(token=config.TELEGRAM_BOT_TOKEN)
+    sent = 0
+    for user_id in recipients:
+        try:
+            await bot.send_message(
+                chat_id=user_id, text=marked, parse_mode=ParseMode.HTML
+            )
+            sent += 1
+        except Exception:
+            logger.exception("Pending notice failed for user %s", user_id)
+    logger.info(
+        "live: %s pending %s notice sent to %d/%d recipients",
+        row.get("product_id"),
+        outcome,
+        sent,
+        len(recipients),
+    )
+    return sent
+
+
+def send_pending_notice(row: dict, *, outcome: str, **facts: object) -> int:
+    """Sync wrapper — called from the watchdog sweep thread."""
+    return asyncio.run(send_pending_notice_async(row, outcome=outcome, **facts))
+
+
 def build_rationale_message(suggestion: Suggestion, pnl_footer: str) -> str:
     """Full thesis + Market context + PnL as a follow-up text message (See more)."""
     parts: list[str] = []
@@ -329,7 +446,7 @@ async def broadcast_to_subscribers(
     internal_only: bool = False,
     resting: bool | None = None,
     spot: float | None = None,
-) -> None:
+) -> set[int]:
     """DM the suggestion to every registered subscriber (or allowlist if paywall on).
 
     internal_only gates the HQ (abstention-first) trade cards to the internal
@@ -337,6 +454,9 @@ async def broadcast_to_subscribers(
 
     resting is whether the plan was parked as a limit order rather than filled
     at the mark, so the card can say which happened.
+
+    Returns the ids that actually received it. A resting plan is followed up
+    when it fills or is pulled, and only this set saw the promise.
     """
     footer = pnl_footer or paper.format_pnl_footer()
     recipients = (
@@ -387,9 +507,12 @@ async def broadcast_to_subscribers(
                     resting=resting,
                     spot=spot,
                 )
+                sent.add(admin_id)
                 logger.info("Sent suggestion to admin chat %s", admin_chat)
             except Exception:
                 logger.exception("Failed to send to admin chat %s", admin_chat)
+
+    return sent
 
 
 def format_audit_alert(verdict: AuditVerdict) -> str:
@@ -554,13 +677,13 @@ def broadcast(
     internal_only: bool = False,
     resting: bool | None = None,
     spot: float | None = None,
-) -> None:
-    """Sync wrapper for standalone agent.py / tests."""
+) -> set[int]:
+    """Sync wrapper for standalone agent.py / tests. Returns the ids reached."""
     footer = pnl_footer or paper.format_pnl_footer()
 
-    async def _run() -> None:
+    async def _run() -> set[int]:
         bot = Bot(token=config.TELEGRAM_BOT_TOKEN)
-        await broadcast_to_subscribers(
+        return await broadcast_to_subscribers(
             bot,
             suggestion,
             chart_paths,
@@ -572,7 +695,7 @@ def broadcast(
             spot=spot,
         )
 
-    asyncio.run(_run())
+    return asyncio.run(_run())
 
 
 def broadcast_text(
@@ -583,13 +706,13 @@ def broadcast_text(
     display_summary_text: str | None = None,
     resting: bool | None = None,
     spot: float | None = None,
-) -> None:
+) -> set[int]:
     """Broadcast a watchdog / text-only trade signal (no chart images)."""
     footer = pnl_footer or paper.format_pnl_footer()
 
-    async def _run() -> None:
+    async def _run() -> set[int]:
         bot = Bot(token=config.TELEGRAM_BOT_TOKEN)
-        await broadcast_to_subscribers(
+        return await broadcast_to_subscribers(
             bot,
             suggestion,
             [],
@@ -600,7 +723,7 @@ def broadcast_text(
             spot=spot,
         )
 
-    asyncio.run(_run())
+    return asyncio.run(_run())
 
 
 async def broadcast_plain_text_async(text: str) -> None:

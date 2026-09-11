@@ -86,7 +86,13 @@ def is_scale_in(suggestion: Suggestion) -> bool:
 
 
 def price_move_pcts(suggestion: Suggestion) -> dict[str, float] | None:
-    """Return favorable price-move % to TP1 and adverse % to SL from entry."""
+    """Return the % gain at TP1 and the % loss at SL, both from entry.
+
+    These are position returns, not price moves: on a short, TP1 sits *below*
+    entry and still returns `+tp_pct`. The card has to name the direction price
+    travels separately — see ``price_direction`` — or the sign reads as a
+    claim that price rises into a short's target.
+    """
     if suggestion.entry is None or suggestion.stop_loss is None:
         return None
     if not suggestion.take_profits:
@@ -110,6 +116,16 @@ def price_move_pcts(suggestion: Suggestion) -> dict[str, float] | None:
 
 def format_pct(value: float) -> str:
     return f"{value:+.2f}%"
+
+
+def price_direction(action: str, *, toward_target: bool) -> str:
+    """Which way price has to travel to reach a target or a stop.
+
+    A short's target is a fall and its stop is a rise, which is the opposite of
+    what its `+`/`-` return sign looks like at a glance.
+    """
+    rising = (side_label(action) == "long") == toward_target
+    return "rises" if rising else "falls"
 
 
 def source_timestamp(suggestion: Suggestion) -> str | None:
@@ -316,9 +332,16 @@ def build_card_body(
     else:
         lines = [title, "", f"Potential entry near ${entry:,.2f}."]
     if pcts and tp1 is not None:
+        # The percentages are position returns, so on a short the target is a
+        # "+" that price has to fall into. Naming the direction is the whole
+        # point of these two clauses — "+2.07% price move" read as a rise.
         lines.append(
-            f"Target 1 is ${tp1:,.2f} ({format_pct(pcts['tp_pct'])} price move) "
-            f"with a stop at ${stop:,.2f} ({format_pct(-abs(pcts['sl_pct']))})."
+            f"Target 1 is ${tp1:,.2f} "
+            f"({format_pct(pcts['tp_pct'])} if price "
+            f"{price_direction(suggestion.action, toward_target=True)} to it), "
+            f"with a stop at ${stop:,.2f} "
+            f"({format_pct(-abs(pcts['sl_pct']))} if price "
+            f"{price_direction(suggestion.action, toward_target=False)} to it)."
         )
     else:
         tps = ", ".join(f"${tp:,.2f}" for tp in suggestion.take_profits[:3]) or "n/a"

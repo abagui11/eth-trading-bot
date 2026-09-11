@@ -257,6 +257,16 @@ def run_cycle() -> list[tuple[Suggestion, list[str]]] | None:
                 if waits:
                     live_pending.record(suggestion, cycle_id=product_cycle_id)
                 else:
+                    # Taking the product at market retires whatever was still
+                    # resting on it. Without this the old limit survives and
+                    # the sweep can later fire it too, opening a second HQ clip
+                    # on the same product from the same idea lineage. Silent
+                    # because the card going out below carries the new terms.
+                    live_pending.cancel(
+                        product_id,
+                        reason="taken at market this cycle",
+                        outcome=None,
+                    )
                     execute.maybe_execute_live(
                         suggestion,
                         spot_now,
@@ -314,7 +324,7 @@ def run_cycle() -> list[tuple[Suggestion, list[str]]] | None:
 
             try:
                 if broadcast_sent:
-                    notify.broadcast(
+                    reached = notify.broadcast(
                         suggestion,
                         output_paths,
                         pnl_footer=pnl_footer,
@@ -329,6 +339,13 @@ def run_cycle() -> list[tuple[Suggestion, list[str]]] | None:
                         resting=waits,
                         spot=spots.get(product_id, price),
                     )
+                    # The card promised this order only executes if price
+                    # reaches the entry, so these are the people owed an
+                    # answer when it fills or gets pulled.
+                    if waits and reached:
+                        import live_pending
+
+                        live_pending.set_recipients(product_id, reached)
                     # Announcement-only mirror on X (no Accept/Reject there).
                     twitter_post.announce_hq(
                         suggestion,
