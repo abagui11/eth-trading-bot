@@ -211,6 +211,9 @@ def run_cycle() -> list[tuple[Suggestion, list[str]]] | None:
             # paper path — failures log + halt inside execute.
             offer_id = None
             card_summary = None
+            # None until the live path decides; the card only names an
+            # execution route it actually took.
+            waits: bool | None = None
             if suggestion.action != "no_trade":
                 import execute
                 import vault
@@ -321,6 +324,10 @@ def run_cycle() -> list[tuple[Suggestion, list[str]]] | None:
                         # High Quality label; True gates to the internal
                         # ops allowlist.
                         internal_only=bot_config.HQ_IDEAS_INTERNAL_ONLY,
+                        # Same verdict the live path routed on, so the card
+                        # says whether this is resting or already going on.
+                        resting=waits,
+                        spot=spots.get(product_id, price),
                     )
                     # Announcement-only mirror on X (no Accept/Reject there).
                     twitter_post.announce_hq(

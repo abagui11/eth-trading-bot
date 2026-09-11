@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import logging
 import re
+from typing import NamedTuple
 
 import anthropic
 
@@ -32,6 +33,24 @@ Rules:
 
 _NUM_RE = re.compile(r"\d")
 _MAX_SUMMARY_CHARS = 320
+
+# What a subscriber would call the order that actually goes on the book. Spot
+# and futures share the limit mechanics, so the part worth spelling out is the
+# exposure each one opens — "sell" on a contract you do not hold is the bit
+# people read as closing something.
+RESTING_ORDER_TERMS = {
+    "spot_buy": "spot limit buy",
+    "spot_sell": "spot limit sell",
+    "deriv_buy": "futures limit buy that opens a long",
+    "deriv_sell": "futures limit sell that opens a short",
+}
+
+MARKET_ORDER_TERMS = {
+    "spot_buy": "spot market buy",
+    "spot_sell": "spot market sell",
+    "deriv_buy": "futures market buy that opens a long",
+    "deriv_sell": "futures market sell that opens a short",
+}
 
 
 def side_label(action: str) -> str:
@@ -195,12 +214,76 @@ def generate_display_summary(suggestion: Suggestion) -> str:
     return deterministic_setup_blurb(suggestion)
 
 
+class ExecutionNote(NamedTuple):
+    """The card's opening line, split so only the verdict is emphasised."""
+
+    headline: str
+    detail: str
+
+    @property
+    def text(self) -> str:
+        return f"{self.headline} {self.detail}".strip()
+
+
+def execution_banner(
+    suggestion: Suggestion,
+    *,
+    spot: float | None = None,
+    resting: bool | None = None,
+) -> ExecutionNote | None:
+    """Say whether this card is an order still waiting or an entry going on now.
+
+    Eva's entry is a pullback into an M5 block, so the market is usually not
+    there yet and most HQ cards are orders that may never fill. "Potential
+    entry near $X" does not carry that — it reads like a position someone
+    already holds, which is the one thing about these broadcasts that misleads.
+
+    ``resting`` is the same verdict ``agent`` routed the trade on, so a card can
+    never claim a fill the executor did not attempt. ``None`` means the caller
+    does not know which path was taken, and the card stays quiet rather than
+    guessing.
+    """
+    if resting is None or suggestion.action == "no_trade" or suggestion.entry is None:
+        return None
+
+    product = bot_config.product_label(suggestion.product_id)
+    entry = float(suggestion.entry)
+    mark = float(spot) if spot and float(spot) > 0 else None
+    add = "Adding to the open position. " if is_scale_in(suggestion) else ""
+
+    if not resting:
+        term = MARKET_ORDER_TERMS.get(suggestion.action, "market order")
+        at = f" near ${mark:,.2f}" if mark else ""
+        return ExecutionNote(
+            headline=f"{add}Going on now at market — this is not a resting order.",
+            detail=(
+                f"{product} has already reached the entry, so it fills "
+                f"immediately{at} as a {term}."
+            ),
+        )
+
+    term = RESTING_ORDER_TERMS.get(suggestion.action, "limit order")
+    moves = "falls" if side_label(suggestion.action) == "long" else "rises"
+    gap = ""
+    if mark:
+        gap = f" from ${mark:,.2f} ({abs(entry - mark) / mark * 100.0:.2f}% away)"
+    return ExecutionNote(
+        headline=f"{add}Not filled yet — a potential entry that may never fill.",
+        detail=(
+            f"It executes only if {product} {moves} to ${entry:,.2f}{gap}, and "
+            f"rests as a {term} until then."
+        ),
+    )
+
+
 def build_card_body(
     suggestion: Suggestion,
     *,
     display_summary: str | None = None,
     telegram_id: int | None = None,
     offer_id: str | None = None,
+    resting: bool | None = None,
+    spot: float | None = None,
 ) -> str:
     """Concise photo caption / card text (Telegram caption limit 1024)."""
     if suggestion.action == "no_trade":
@@ -216,17 +299,22 @@ def build_card_body(
     stop = float(suggestion.stop_loss)
     tp1 = float(suggestion.take_profits[0]) if suggestion.take_profits else None
 
-    if is_scale_in(suggestion):
-        lead = f"Adding near ${entry:,.2f}"
-    else:
-        lead = f"Potential entry near ${entry:,.2f}"
-
     # HQ hourly (abstention-first ICT) cards carry the High Quality label;
     # watchdog programmatic fires do not.
     title = friendly_title(suggestion)
     if not is_watchdog_suggestion(suggestion):
         title = f"High Quality · {title}"
-    lines = [title, "", lead + "."]
+
+    # The banner already names the entry and says what happens to it, so the
+    # old lead would only repeat the price under a vaguer verb.
+    note = execution_banner(suggestion, spot=spot, resting=resting)
+    if note is not None:
+        # A paragraph, not a one-liner, so it needs air before the levels.
+        lines = [title, "", note.text, ""]
+    elif is_scale_in(suggestion):
+        lines = [title, "", f"Adding near ${entry:,.2f}."]
+    else:
+        lines = [title, "", f"Potential entry near ${entry:,.2f}."]
     if pcts and tp1 is not None:
         lines.append(
             f"Target 1 is ${tp1:,.2f} ({format_pct(pcts['tp_pct'])} price move) "

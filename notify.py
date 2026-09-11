@@ -3,10 +3,12 @@
 from __future__ import annotations
 
 import asyncio
+import html
 import logging
 from pathlib import Path
 
 from telegram import Bot
+from telegram.constants import ParseMode
 
 import access
 import bot_config
@@ -49,6 +51,8 @@ def build_caption(
     telegram_id: int | None = None,
     offer_id: str | None = None,
     display_summary_text: str | None = None,
+    resting: bool | None = None,
+    spot: float | None = None,
 ) -> str:
     """Short caption for the chart photo (Telegram limit: 1024 characters)."""
     return display_summary.build_card_body(
@@ -56,7 +60,43 @@ def build_caption(
         display_summary=display_summary_text,
         telegram_id=telegram_id,
         offer_id=offer_id,
+        resting=resting,
+        spot=spot,
     )
+
+
+def build_caption_html(
+    suggestion: Suggestion,
+    *,
+    telegram_id: int | None = None,
+    offer_id: str | None = None,
+    display_summary_text: str | None = None,
+    resting: bool | None = None,
+    spot: float | None = None,
+) -> str:
+    """The same caption with the execution verdict in bold.
+
+    Everything except our own ``<b>`` comes from ``html.escape``, so prose the
+    model wrote can never open a tag. Send the result *unsliced*: Telegram
+    measures the 1024 limit after parsing entities, so the tags cost nothing,
+    but cutting the string could split one in half and fail the whole send.
+    ``build_card_body`` already bounds the visible text.
+    """
+    body = build_caption(
+        suggestion,
+        telegram_id=telegram_id,
+        offer_id=offer_id,
+        display_summary_text=display_summary_text,
+        resting=resting,
+        spot=spot,
+    )
+    marked = html.escape(body)
+    note = display_summary.execution_banner(suggestion, spot=spot, resting=resting)
+    if note is not None:
+        headline = html.escape(note.headline)
+        # Absent only if the caption was truncated past it; plain text then.
+        marked = marked.replace(headline, f"<b>{headline}</b>", 1)
+    return marked
 
 
 def build_rationale_message(suggestion: Suggestion, pnl_footer: str) -> str:
@@ -126,6 +166,8 @@ async def send_suggestion_to_chat(
     telegram_id: int | None = None,
     display_summary_text: str | None = None,
     include_full_rationale: bool = False,
+    resting: bool | None = None,
+    spot: float | None = None,
 ) -> None:
     """Send the concise decision card; optionally include full detail (ops/resend)."""
     paths = _decision_chart_only(chart_paths) if not include_full_rationale else (
@@ -145,11 +187,13 @@ async def send_suggestion_to_chat(
         if offer and offer.get("display_summary"):
             summary = str(offer["display_summary"])
 
-    caption = build_caption(
+    caption = build_caption_html(
         suggestion,
         telegram_id=tid,
         offer_id=offer_id,
         display_summary_text=summary,
+        resting=resting,
+        spot=spot,
     )
     keyboard = (
         telegram_ui.trade_decision_keyboard(offer_id)
@@ -159,7 +203,10 @@ async def send_suggestion_to_chat(
 
     if not paths:
         await bot.send_message(
-            chat_id=chat_id, text=caption[:4096], reply_markup=keyboard
+            chat_id=chat_id,
+            text=caption,
+            reply_markup=keyboard,
+            parse_mode=ParseMode.HTML,
         )
         if include_full_rationale:
             rationale_message = build_rationale_message(suggestion, pnl_footer)
@@ -172,15 +219,20 @@ async def send_suggestion_to_chat(
         if not path.exists():
             raise FileNotFoundError(f"Chart not found: {chart_path}")
 
-        photo_caption = caption if i == 0 else f"Chart {i + 1}/{len(paths)}"
+        # The first caption is already-escaped HTML and must not be sliced —
+        # see build_caption_html. The rest are ours and contain no markup.
+        photo_caption = (
+            caption if i == 0 else html.escape(f"Chart {i + 1}/{len(paths)}")
+        )
         markup = keyboard if i == 0 else None
         try:
             with open(path, "rb") as photo:
                 await bot.send_photo(
                     chat_id=chat_id,
                     photo=photo,
-                    caption=photo_caption[:1024],
+                    caption=photo_caption,
                     reply_markup=markup,
+                    parse_mode=ParseMode.HTML,
                 )
         except Exception:
             logger.exception(
@@ -275,11 +327,16 @@ async def broadcast_to_subscribers(
     offer_id: str | None = None,
     display_summary_text: str | None = None,
     internal_only: bool = False,
+    resting: bool | None = None,
+    spot: float | None = None,
 ) -> None:
     """DM the suggestion to every registered subscriber (or allowlist if paywall on).
 
     internal_only gates the HQ (abstention-first) trade cards to the internal
     ops allowlist instead of the public subscriber list.
+
+    resting is whether the plan was parked as a limit order rather than filled
+    at the mark, so the card can say which happened.
     """
     footer = pnl_footer or paper.format_pnl_footer()
     recipients = (
@@ -302,6 +359,8 @@ async def broadcast_to_subscribers(
                 offer_id=offer_id,
                 telegram_id=user_id,
                 display_summary_text=display_summary_text,
+                resting=resting,
+                spot=spot,
             )
             sent.add(user_id)
             logger.info("Sent suggestion to user %s", user_id)
@@ -325,6 +384,8 @@ async def broadcast_to_subscribers(
                     offer_id=offer_id,
                     telegram_id=admin_id,
                     display_summary_text=display_summary_text,
+                    resting=resting,
+                    spot=spot,
                 )
                 logger.info("Sent suggestion to admin chat %s", admin_chat)
             except Exception:
@@ -491,6 +552,8 @@ def broadcast(
     offer_id: str | None = None,
     display_summary_text: str | None = None,
     internal_only: bool = False,
+    resting: bool | None = None,
+    spot: float | None = None,
 ) -> None:
     """Sync wrapper for standalone agent.py / tests."""
     footer = pnl_footer or paper.format_pnl_footer()
@@ -505,6 +568,8 @@ def broadcast(
             offer_id=offer_id,
             display_summary_text=display_summary_text,
             internal_only=internal_only,
+            resting=resting,
+            spot=spot,
         )
 
     asyncio.run(_run())
@@ -516,6 +581,8 @@ def broadcast_text(
     *,
     offer_id: str | None = None,
     display_summary_text: str | None = None,
+    resting: bool | None = None,
+    spot: float | None = None,
 ) -> None:
     """Broadcast a watchdog / text-only trade signal (no chart images)."""
     footer = pnl_footer or paper.format_pnl_footer()
@@ -529,6 +596,8 @@ def broadcast_text(
             footer,
             offer_id=offer_id,
             display_summary_text=display_summary_text,
+            resting=resting,
+            spot=spot,
         )
 
     asyncio.run(_run())
