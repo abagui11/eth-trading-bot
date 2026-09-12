@@ -53,6 +53,13 @@ PRODUCT_QTY_CAPS: dict[str, tuple[float, float]] = {
 MIN_ETH_QTY = PRODUCT_QTY_CAPS["ETH-USD"][0]
 MAX_ETH_QTY = PRODUCT_QTY_CAPS["ETH-USD"][1]
 
+# Paper scales out on the ladder the live sleeve could actually place, so the
+# published journal does not show profit taken at targets a whole-contract clip
+# can never reach. This shapes the *weights* only — paper sizing is still
+# fixed-fraction on paper equity. False reverts paper to an even split across
+# every target, which is what it did before 2026-09-11.
+PAPER_LADDER_MATCHES_LIVE = True
+
 # Shared paper book: fake Fund deposit (placeholder for future real funding).
 PAPER_CONTRIBUTION_USD = 1000.0
 # Telegram user id reserved for the house seed stake in paper_contributions.
@@ -161,6 +168,13 @@ LIVE_HQ_EQUITY_USD = 2000.0          # HQ ICT margin sleeve
 LIVE_TRADE_DEPLOY_PCT = 0.50         # fallback notional when no clip is set
 LIVE_MAX_OPEN_HQ = 4                 # skip new ideas when full (no FIFO kill)
 LIVE_MAX_PER_PRODUCT_HQ = 2          # concurrent positions in one product
+# A position that has banked a rung and trailed its stop to breakeven cannot
+# lose money, so charging it a slot taxes idea flow for risk that is no longer
+# there — and Eva's median TP1 takes 20.4h, so a runner can hold a slot for
+# days. This many such positions are excused from LIVE_MAX_OPEN_HQ and
+# LIVE_MAX_PER_PRODUCT_HQ. Their notional still counts against
+# LIVE_MAX_LEVERAGE, which is the cap that actually bounds the book. 0 disables.
+LIVE_DERISKED_SLOT_EXEMPT_HQ = 2
 LIVE_DAILY_LOSS_LIMIT_USD = 160.0    # 8% of sleeve → halt until next UTC day
 # Notional ceiling, not a risk ceiling — per-trade risk is bounded by
 # LIVE_HQ_RISK_PCT. Four concurrent clips at their widest (two tight-stop ETH
@@ -327,12 +341,29 @@ LONG_THESIS_INTERVAL_SEC = 24 * 3600
 DAILY_PERFORMANCE_POST_ENABLED = True
 DAILY_DIGEST_HOUR_UTC = 21  # 21:00 UTC ≈ 5pm ET
 DAILY_DIGEST_SOURCE = "mill"
-MILL_PAPER_EPOCH_START = "2026-09-01"  # UTC; volume paper opened_at >= this
+# Re-based 2026-09-12 with the mill's bracket change (stop 1.5x -> 3.0x ATR,
+# TP1 1.5R -> 0.375R). The two geometries have completely different hit rates
+# (37.4% vs a measured 71.3%), so averaging them produces a digest number that
+# describes neither. Move this whenever the bracket moves.
+# Cut at the restart itself, not at midnight: ten ideas were minted on the old
+# bracket earlier the same day. The filter is a lexicographic >= on an ISO
+# opened_at, so a full timestamp works wherever a date does.
+MILL_PAPER_EPOCH_START = "2026-09-12T17:36:00Z"  # UTC; volume paper opened_at >= this
 
 
 def qty_caps(product_id: str) -> tuple[float, float]:
     """Return (min_qty, max_qty) for a product; fall back to ETH caps."""
     return PRODUCT_QTY_CAPS.get(product_id, PRODUCT_QTY_CAPS["ETH-USD"])
+
+
+def ladder_unit(product_id: str) -> float | None:
+    """Indivisible trade unit for a product — one CDE nano contract.
+
+    Shapes the scale-out ladder in both books, so it is not a live-only number
+    despite living beside the live floors. ``None`` for a product the venue
+    does not list, which means a ladder over it can split freely.
+    """
+    return LIVE_PRODUCT_QTY_FLOORS.get(product_id)
 
 
 def ob_min_width_pct(product_id: str | None = None) -> float:
