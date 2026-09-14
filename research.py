@@ -19,6 +19,10 @@ _MAX_CANDLES = 350  # Coinbase hard cap per request
 
 # Spec timeframes -> Coinbase granularity and default bar counts.
 _TIMEFRAME_CONFIG: dict[str, dict[str, Any]] = {
+    # M1: eva_day trigger timeframe. Never charted or sent to the vision call —
+    # the day variant reads it deterministically between 30-min cycles, which
+    # is what keeps its entries free of new token cost. 350 bars ≈ 6h.
+    "M1": {"granularity": "ONE_MINUTE", "seconds": 60, "limit": 350},
     "M5": {"granularity": "FIVE_MINUTE", "seconds": 300, "limit": 350},
     # M15: intelligence-layer stance timeframe (24h of context).
     "M15": {"granularity": "FIFTEEN_MINUTE", "seconds": 900, "limit": 96},
@@ -245,7 +249,7 @@ def get_ohlc(
     *,
     product_id: str = PRODUCT_ID,
 ) -> list[dict[str, float | str]]:
-    """Pull candles for a supported timeframe (M5, H1, H4, H12, D1, W1)."""
+    """Pull candles for a supported timeframe (M1, M5, H1, H4, H12, D1, W1)."""
     tf = timeframe.upper()
     if tf not in _TIMEFRAME_CONFIG:
         raise ValueError(f"Unsupported timeframe: {timeframe}. Use one of {list(_TIMEFRAME_CONFIG)}")

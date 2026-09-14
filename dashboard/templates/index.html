@@ -110,6 +110,7 @@
       <button type="button" class="hub-tab" data-tab="yield" role="tab" aria-selected="false">Yield Generation</button>
       <button type="button" class="hub-tab" data-tab="mill" role="tab" aria-selected="false">Trade mill</button>
       <button type="button" class="hub-tab" data-tab="kalshi" role="tab" aria-selected="false">Kalshi 15m</button>
+      <button type="button" class="hub-tab" data-tab="evalab" role="tab" aria-selected="false">Eva Lab</button>
     </nav>
 
     <div id="tab-brain" class="hub-panel" role="tabpanel">
@@ -1091,6 +1092,112 @@
       </section>
     </div><!-- /tab-kalshi -->
 
+    <div id="tab-evalab" class="hub-panel" role="tabpanel" hidden>
+      <section class="card" id="eva-variants-card">
+        <h2>Eva Lab · holding-period experiment</h2>
+        {% if eva_variants.available %}
+        {% set ev = eva_variants %}
+        <p class="sub" style="margin-bottom:10px">
+          Four books race from the same start line
+          (<span id="eva-epoch">{{ ev.epoch }}</span>) to test one question:
+          is Eva's ~24h hold and ~1% stop the right shape? The
+          <strong>LIVE</strong> book is the shipped bot, untouched — the other
+          three are paper only and cannot place an order. Every book risks the
+          same <strong>${{ "%.0f"|format(ev.risk_usd) }}</strong> per trade, so
+          a wider stop buys a smaller position and the books are comparable in
+          <strong>R</strong> rather than dollars.
+        </p>
+        <p class="sub" style="margin-bottom:10px">
+          A leading paper book is <em>not</em> a promotion. Promotion requires
+          the pre-registered bar in <code>EVA_VARIANTS_PREREG.md</code> to
+          clear first; at these sample sizes most single-book differences are
+          noise.
+        </p>
+
+        <p class="sub news-section">Book comparison (since experiment start)</p>
+        <div class="table-scroll">
+          <table>
+            <thead>
+              <tr><th>Book</th><th>Mode</th><th>Closed</th><th>Win%</th><th>Mean R</th><th>Total R</th><th>Median hold</th><th>Stopped→paid</th><th>Skips</th></tr>
+            </thead>
+            <tbody id="eva-compare">
+              {% for b in ev.books %}
+              <tr>
+                <td class="kalshi-bot-cell">
+                  <div class="kalshi-bot-name">{{ b.label }}</div>
+                  {% if b.blurb %}<div class="kalshi-bot-blurb">{{ b.blurb }}</div>{% endif %}
+                </td>
+                <td><span class="badge {{ 'badge-good' if b.mode == 'live' else 'badge-none' }}">{{ b.mode | upper }}</span></td>
+                <td>{{ b.n_closed }}{% if b.n_open %} (+{{ b.n_open }} open){% endif %}</td>
+                <td>{% if b.win_rate is not none %}{{ (b.win_rate * 100)|round|int }}%{% else %}—{% endif %}</td>
+                <td class="{{ 'pos' if b.mean_r is not none and b.mean_r >= 0 else 'neg' }}">{% if b.mean_r is not none %}{{ "%+.3f"|format(b.mean_r) }}{% else %}—{% endif %}</td>
+                <td class="{{ 'pos' if b.sum_r >= 0 else 'neg' }}">{{ "%+.2f"|format(b.sum_r) }}</td>
+                <td>{% if b.median_hold_h is not none %}{{ "%.1f"|format(b.median_hold_h) }}h{% else %}—{% endif %}</td>
+                <td>{% if b.stopped_n %}{{ b.stopped_then_paid }}/{{ b.stopped_n }}{% else %}—{% endif %}</td>
+                <td>{{ b.skips }}</td>
+              </tr>
+              {% endfor %}
+            </tbody>
+          </table>
+        </div>
+        <p class="sub" id="eva-leader-line">
+          {% if ev.leader %}Leading paper book: <strong>{{ ev.leader }}</strong> — candidate only, not yet promoted.{% endif %}
+        </p>
+
+        <p class="sub news-section">Open variant positions</p>
+        <p class="sub" id="eva-open-empty"{% if ev.open_positions %} hidden{% endif %}>No open variant positions.</p>
+        <div class="table-scroll" id="eva-open-table"{% if not ev.open_positions %} hidden{% endif %}>
+          <table>
+            <thead>
+              <tr><th>Opened</th><th>Book</th><th>Product</th><th>Side</th><th>Entry</th><th>Stop</th><th>TPs hit</th><th>Source</th></tr>
+            </thead>
+            <tbody id="eva-open">
+              {% for p in ev.open_positions %}
+              <tr>
+                <td>{{ p.opened_at }}</td>
+                <td>{{ p.variant }}</td>
+                <td>{{ p.product_id }}</td>
+                <td>{{ p.side }}</td>
+                <td>{{ "%.2f"|format(p.entry) }}</td>
+                <td>{{ "%.2f"|format(p.stop_loss) }}</td>
+                <td>{{ p.tps_hit }}</td>
+                <td>{{ p.entry_source }}</td>
+              </tr>
+              {% endfor %}
+            </tbody>
+          </table>
+        </div>
+
+        <p class="sub news-section">Closed positions (all books, since experiment start)</p>
+        <p class="sub" id="eva-closed-empty"{% if ev.closed %} hidden{% endif %}>No closed positions yet.</p>
+        <div class="table-scroll" id="eva-closed-table"{% if not ev.closed %} hidden{% endif %}>
+          <table>
+            <thead>
+              <tr><th>Closed</th><th>Book</th><th>Product</th><th>Side</th><th>Entry</th><th>Exit</th><th>R</th><th>Why</th></tr>
+            </thead>
+            <tbody id="eva-closed">
+              {% for p in ev.closed %}
+              <tr>
+                <td>{{ p.closed_at }}</td>
+                <td>{{ p.variant }}</td>
+                <td>{{ p.product_id }}</td>
+                <td>{{ p.side }}</td>
+                <td>{{ "%.2f"|format(p.entry) }}</td>
+                <td>{% if p.exit_price is not none %}{{ "%.2f"|format(p.exit_price) }}{% else %}—{% endif %}</td>
+                <td class="{{ 'pos' if p.realized_r is not none and p.realized_r >= 0 else 'neg' }}">{% if p.realized_r is not none %}{{ "%+.2f"|format(p.realized_r) }}R{% else %}—{% endif %}</td>
+                <td>{{ p.close_reason }}</td>
+              </tr>
+              {% endfor %}
+            </tbody>
+          </table>
+        </div>
+        {% else %}
+        <p class="sub">Variant experiment disabled (set <code>EVA_VARIANTS_ENABLED</code>).</p>
+        {% endif %}
+        <p class="sub feed-status" id="eva-status"></p>
+      </section>
+    </div><!-- /tab-evalab -->
+
     <footer>
       Not financial advice. Brain + tape refresh every 60s. Consumer votes live on <a href="/feed">/feed</a>.
     </footer>
@@ -1140,6 +1247,7 @@
         yield: document.getElementById('tab-yield'),
         mill: document.getElementById('tab-mill'),
         kalshi: document.getElementById('tab-kalshi'),
+        evalab: document.getElementById('tab-evalab'),
       };
       function activate(name, pushHash) {
         if (name === 'eva') name = 'trading';
@@ -1160,6 +1268,7 @@
         if (name === 'yield') refreshYield();
         if (name === 'mill') refreshMill();
         if (name === 'kalshi') refreshKalshi();
+        if (name === 'evalab') refreshEvaLab();
       }
       tabs.forEach(function (btn) {
         btn.addEventListener('click', function () {
@@ -1680,6 +1789,105 @@
           var panel = document.getElementById('tab-kalshi');
           if (panel && !panel.hidden) refreshKalshi();
         }, 30000);
+      }
+    }
+
+    var evaLabPollStarted = false;
+
+    function evaSetTable(bodyId, tableId, emptyId, html, hasRows) {
+      var body = document.getElementById(bodyId);
+      if (body) body.innerHTML = html;
+      var table = document.getElementById(tableId);
+      if (table) table.hidden = !hasRows;
+      var empty = document.getElementById(emptyId);
+      if (empty) empty.hidden = hasRows;
+    }
+
+    function evaR(v) {
+      if (v === null || v === undefined) return '<td>—</td>';
+      var n = Number(v);
+      return '<td class="' + (n >= 0 ? 'pos' : 'neg') + '">' +
+        (n >= 0 ? '+' : '') + n.toFixed(2) + 'R</td>';
+    }
+
+    async function refreshEvaLabBook() {
+      var res = await fetch('/api/eva/variants?limit=20');
+      if (!res.ok) throw new Error('HTTP ' + res.status);
+      var data = await res.json();
+      if (!data || !data.available) return;
+
+      var epochEl = document.getElementById('eva-epoch');
+      if (epochEl) epochEl.textContent = data.epoch || '';
+
+      var compare = (data.books || []).map(function (b) {
+        var name = '<div class="kalshi-bot-name">' + esc(b.label) + '</div>' +
+          (b.blurb ? '<div class="kalshi-bot-blurb">' + esc(b.blurb) + '</div>' : '');
+        var meanR = (b.mean_r === null || b.mean_r === undefined)
+          ? '<td>—</td>'
+          : '<td class="' + (b.mean_r >= 0 ? 'pos' : 'neg') + '">' +
+            (b.mean_r >= 0 ? '+' : '') + Number(b.mean_r).toFixed(3) + '</td>';
+        var wr = (b.win_rate === null || b.win_rate === undefined)
+          ? '—' : Math.round(Number(b.win_rate) * 100) + '%';
+        var hold = (b.median_hold_h === null || b.median_hold_h === undefined)
+          ? '—' : Number(b.median_hold_h).toFixed(1) + 'h';
+        var stopped = b.stopped_n ? (b.stopped_then_paid + '/' + b.stopped_n) : '—';
+        return '<tr><td class="kalshi-bot-cell">' + name + '</td>' +
+          '<td><span class="badge ' + (b.mode === 'live' ? 'badge-good' : 'badge-none') +
+          '">' + String(b.mode).toUpperCase() + '</span></td>' +
+          '<td>' + (b.n_closed || 0) + (b.n_open ? ' (+' + b.n_open + ' open)' : '') + '</td>' +
+          '<td>' + wr + '</td>' + meanR +
+          '<td class="' + (b.sum_r >= 0 ? 'pos' : 'neg') + '">' +
+          (b.sum_r >= 0 ? '+' : '') + Number(b.sum_r || 0).toFixed(2) + '</td>' +
+          '<td>' + hold + '</td><td>' + stopped + '</td><td>' + (b.skips || 0) + '</td></tr>';
+      }).join('');
+      var compareBody = document.getElementById('eva-compare');
+      if (compareBody) compareBody.innerHTML = compare;
+
+      var leaderLine = document.getElementById('eva-leader-line');
+      if (leaderLine) {
+        leaderLine.innerHTML = data.leader
+          ? 'Leading paper book: <strong>' + esc(data.leader) +
+            '</strong> — candidate only, not yet promoted.'
+          : '';
+      }
+
+      var openHtml = (data.open_positions || []).map(function (p) {
+        return '<tr><td>' + esc(p.opened_at) + '</td><td>' + esc(p.variant) + '</td>' +
+          '<td>' + esc(p.product_id) + '</td><td>' + esc(p.side) + '</td>' +
+          '<td>' + Number(p.entry).toFixed(2) + '</td>' +
+          '<td>' + Number(p.stop_loss).toFixed(2) + '</td>' +
+          '<td>' + (p.tps_hit || 0) + '</td><td>' + esc(p.entry_source) + '</td></tr>';
+      }).join('');
+      evaSetTable('eva-open', 'eva-open-table', 'eva-open-empty', openHtml,
+        (data.open_positions || []).length > 0);
+
+      var closedHtml = (data.closed || []).map(function (p) {
+        return '<tr><td>' + esc(p.closed_at) + '</td><td>' + esc(p.variant) + '</td>' +
+          '<td>' + esc(p.product_id) + '</td><td>' + esc(p.side) + '</td>' +
+          '<td>' + Number(p.entry).toFixed(2) + '</td>' +
+          '<td>' + (p.exit_price != null ? Number(p.exit_price).toFixed(2) : '—') + '</td>' +
+          evaR(p.realized_r) +
+          '<td>' + esc(p.close_reason || '') + '</td></tr>';
+      }).join('');
+      evaSetTable('eva-closed', 'eva-closed-table', 'eva-closed-empty', closedHtml,
+        (data.closed || []).length > 0);
+    }
+
+    async function refreshEvaLab() {
+      try {
+        await refreshEvaLabBook();
+        var st = document.getElementById('eva-status');
+        if (st) st.textContent = '';
+      } catch (e) {
+        var st2 = document.getElementById('eva-status');
+        if (st2) st2.textContent = 'Eva Lab refresh failed: ' + e.message;
+      }
+      if (!evaLabPollStarted) {
+        evaLabPollStarted = true;
+        setInterval(function () {
+          var panel = document.getElementById('tab-evalab');
+          if (panel && !panel.hidden) refreshEvaLab();
+        }, 60000);
       }
     }
 

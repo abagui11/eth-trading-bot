@@ -121,6 +121,51 @@ LIVE_PENDING_ENTRIES_ENABLED: bool = True
 # widens, so any interior optimum is noise.
 LIVE_PENDING_EXPIRY_HOURS: float = 4.0
 
+# --------------------------------------------------------------------------
+# Eva HQ variant experiment (see deploy/EVA_VARIANTS_PLAN.md).
+#
+# Four books, one live. `control` IS paper.py and is never written by the
+# variant code — that is why the variants live in their own tables rather than
+# behind a `variant` column on paper_positions. EVA_LIVE_VARIANT names the only
+# book allowed to touch real money; promoting anything off `control` requires
+# its pre-registered bar in EVA_VARIANTS_PREREG.md to clear first.
+EVA_VARIANTS_ENABLED = True
+EVA_LIVE_VARIANT = "control"          # the ONLY book that trades real money
+EVA_EXPERIMENT_EPOCH = "2026-09-14"   # variant stats measured from this date
+
+# Equal dollar risk per trade across all books, so a wider stop buys a smaller
+# position. Without this the swing arms would beat control by betting more.
+VARIANT_RISK_USD = 10.0
+
+# eva_day — fast ICT, paper only, zero new LLM calls.
+EVA_DAY_SCAN_INTERVAL_SEC = 120       # M1 trigger scan cadence
+EVA_DAY_M1_TRIGGERS_ENABLED = True
+EVA_DAY_MAX_HOLD_H = 4.0              # hard close; the variant's whole premise
+EVA_DAY_TP_R = 1.0                    # single near target, swept in paper
+EVA_DAY_MIN_STOP_PCT = 0.0015         # 0.15% — below this the stop is spread
+EVA_DAY_MAX_STOP_PCT = 0.0060         # 0.60% — above this it is not a day trade
+
+# eva_swing_mech — control's entries, structural stop, no LLM.
+EVA_SWING_MAX_HOLD_H = 168.0          # 7 days
+EVA_SWING_TP_RUNGS = (1.5, 3.0, 5.0)  # control's ladder shape, swing distances
+EVA_SWING_MIN_STOP_PCT = 0.010        # 1.0% — floor, roughly control's stop
+EVA_SWING_MAX_STOP_PCT = 0.045        # 4.5% — ceiling on structural placement
+EVA_SWING_FALLBACK_STOP_PCT = 0.025   # used when H4 pivots are unavailable
+EVA_SWING_ATR_BUFFER = 0.5            # ATR multiples beyond the swing
+# Reach is tested on the furthest rung, not the nearest: with a structural (so
+# wide) stop, a real intermediate objective can legitimately sit under 1R.
+EVA_SWING_MIN_FIRST_TARGET_R = 0.5
+EVA_SWING_MIN_LAST_TARGET_R = 2.0
+
+# eva_swing_llm — its own vision call on a slower cadence. Deliberately NOT
+# folded into the 30-min cycle: a single Claude call cannot show H12/D1 to the
+# swing mandate while hiding them from control, so sharing the call would
+# contaminate the control book. Swing holds for days, so 2h resolution costs
+# it nothing and ~12 calls/day keeps the token bill negligible.
+EVA_SWING_LLM_ENABLED = True
+EVA_SWING_LLM_INTERVAL_SEC = 7200     # 2 hours
+EVA_SWING_LLM_TIMEFRAMES = ("D1", "H12", "H4")
+
 # Sub-hourly programmatic entry scanner (charts + no LLM).
 WATCHDOG_ENABLED = True
 WATCHDOG_INTERVAL_SEC = 60  # 1 minute (valid range: 60–300)

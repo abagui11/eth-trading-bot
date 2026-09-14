@@ -45,6 +45,32 @@ async def watchdog_job(context) -> None:
         logger.exception("Watchdog job failed")
 
 
+async def eva_day_job(context) -> None:
+    """Resolve variant paper positions and scan M1 for day-variant entries."""
+    if not bot_config.EVA_VARIANTS_ENABLED:
+        return
+    from eva_day import run_day_scan
+
+    loop = asyncio.get_running_loop()
+    try:
+        await loop.run_in_executor(None, run_day_scan)
+    except Exception:
+        logger.exception("Eva day-variant job failed")
+
+
+async def eva_swing_llm_job(context) -> None:
+    """Swing-mandate vision call on its own slower cadence (paper only)."""
+    if not (bot_config.EVA_VARIANTS_ENABLED and bot_config.EVA_SWING_LLM_ENABLED):
+        return
+    from eva_swing_llm import run_swing_llm_cycle
+
+    loop = asyncio.get_running_loop()
+    try:
+        await loop.run_in_executor(None, run_swing_llm_cycle)
+    except Exception:
+        logger.exception("Eva swing-LLM job failed")
+
+
 async def macro_feed_job(context) -> None:
     """Poll RSS feeds for macro headlines."""
     if not bot_config.MACRO_CONTEXT_ENABLED:
@@ -223,6 +249,33 @@ def main() -> None:
             name="watchdog_scan",
         )
         logger.info("Watchdog enabled — scanning every %ss", interval)
+
+    if bot_config.EVA_VARIANTS_ENABLED:
+        # This job also drives mark-to-market for *all* variant books, so it
+        # runs even when the M1 triggers themselves are disabled — otherwise
+        # the swing books would never resolve their exits.
+        day_interval = max(60, int(bot_config.EVA_DAY_SCAN_INTERVAL_SEC))
+        app.job_queue.run_repeating(
+            eva_day_job,
+            interval=day_interval,
+            first=45,
+            name="eva_day_scan",
+        )
+        logger.info(
+            "Eva variants enabled — day scan every %ss, live variant=%s",
+            day_interval,
+            bot_config.EVA_LIVE_VARIANT,
+        )
+
+        if bot_config.EVA_SWING_LLM_ENABLED:
+            swing_interval = max(1800, int(bot_config.EVA_SWING_LLM_INTERVAL_SEC))
+            app.job_queue.run_repeating(
+                eva_swing_llm_job,
+                interval=swing_interval,
+                first=300,
+                name="eva_swing_llm_cycle",
+            )
+            logger.info("Eva swing-LLM arm enabled — every %ss", swing_interval)
 
     if bot_config.MACRO_CONTEXT_ENABLED:
         macro_interval = max(60, bot_config.MACRO_POLL_INTERVAL_SEC)

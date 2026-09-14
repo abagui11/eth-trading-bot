@@ -45,6 +45,7 @@ from dashboard.formatting import (
 )
 from dashboard.intel_api import router as intel_router
 from dashboard.investor import build_investor_payload
+from dashboard import public_api
 from intelligence import store as intel_store
 from macro import store as macro_store
 from macro.ingest import ingest_headline
@@ -136,8 +137,21 @@ def create_app() -> FastAPI:
     import vault as hq_vault
 
     hq_vault.init_db()
+    public_api.init_db()
 
     app.include_router(intel_router)
+    # Marketing-site API (eva.finance). In production Caddy proxies
+    # eva.finance/api/* here same-origin; the CORS entry below exists only so
+    # a local `astro dev` (:4321) can hit a local dashboard during development.
+    app.include_router(public_api.router)
+    from fastapi.middleware.cors import CORSMiddleware
+
+    app.add_middleware(
+        CORSMiddleware,
+        allow_origins=["http://localhost:4321"],
+        allow_methods=["GET", "POST"],
+        allow_headers=["Content-Type"],
+    )
 
     templates = Jinja2Templates(directory=str(_PKG_DIR / "templates"))
     templates.env.filters["trade_time"] = format_trade_time
@@ -156,11 +170,13 @@ def create_app() -> FastAPI:
 
     @app.get("/", response_class=HTMLResponse)
     async def index(request: Request) -> HTMLResponse:
+        import eva_variants_bridge
         import kalshi_bridge
         import trade_ideas_bridge
 
         mill_paper = trade_ideas_bridge.volume_book_payload(limit=12)
         kalshi = kalshi_bridge.performance_payload(limit=15)
+        eva_variants = eva_variants_bridge.performance_payload(limit=20)
         live_open = data.enrich_live_trades(live_ledger.get_open_trades(source="hq"))
         mill_open = data.enrich_live_trades(live_ledger.get_open_trades(source="mill"))
         mill_closed = data.enrich_live_trades(
@@ -198,9 +214,19 @@ def create_app() -> FastAPI:
                 },
                 "mill_paper": mill_paper or {"available": False},
                 "kalshi": kalshi or {"available": False},
+                "eva_variants": eva_variants or {"available": False},
                 "yield_enabled": bool(config.YIELD_GEN_API_URL),
                 "yield_dashboard_url": config.YIELD_GEN_DASHBOARD_URL,
             },
+        )
+
+    @app.get("/api/eva/variants")
+    async def api_eva_variants(limit: int = 20) -> dict:
+        """Eva HQ variant experiment: four books, one live."""
+        import eva_variants_bridge
+
+        return eva_variants_bridge.performance_payload(
+            limit=min(max(limit, 1), 100)
         )
 
     @app.get("/api/kalshi/performance")

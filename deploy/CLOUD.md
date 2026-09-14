@@ -375,6 +375,121 @@ Once HTTPS is confirmed, close the raw port so nobody can reach the dashboard un
 sudo ufw delete allow 8080/tcp
 ```
 
+### Marketing site — apex `eva.finance` (eva-web)
+
+The marketing site is a separate static build (repo `eva-web`, sibling of this
+one) served by the same Caddy at the **apex** domain. It never links to
+`dashboard.eva.finance`; its `/api/*` calls are proxied by Caddy to this
+dashboard process, which serves them from `dashboard/public_api.py`
+(`GET /api/public/strategies`, `POST /api/public/beta`).
+
+**The VPS has no Node.** The site is built on a workstation and only the
+static `dist/` is shipped, which is why there is no `eva-web` checkout on the
+server. Served from `/var/www/eva-web`, owned by `caddy`.
+
+#### 1. DNS (Spaceship)
+
+**A record** for `@` (apex) *and* `www` → `45.33.97.27`, same pattern as
+`dashboard`. Caddy cannot issue a certificate until both resolve; until then
+it retries on a backoff for 30 days and logs
+`NXDOMAIN looking up A for eva.finance`. Check with:
+
+```bash
+dig +short eva.finance A @1.1.1.1
+dig +short www.eva.finance A @1.1.1.1
+```
+
+#### 2. Build on the workstation, ship `dist/`
+
+The build-time numbers must come from the **production** ledgers, so generate
+the snapshot on the VPS and pull it back before building:
+
+```bash
+# on the VPS — snapshot the live books
+scp eva-web/scripts/build_snapshot.py root@45.33.97.27:/tmp/
+ssh root@45.33.97.27 'mkdir -p /tmp/evaweb/scripts /tmp/evaweb/src/data &&
+  cp /tmp/build_snapshot.py /tmp/evaweb/scripts/ && cd /tmp/evaweb &&
+  python3 scripts/build_snapshot.py /opt/eth-trading-agent/ledger.db \
+    /opt/trade-ideas/ideas.db /opt/kalshi-15m-bot/ledger.db'
+
+# back on the workstation
+scp root@45.33.97.27:/tmp/evaweb/src/data/strategies.json eva-web/src/data/
+for id in 8 18 19 25; do
+  scp "root@45.33.97.27:/opt/eth-trading-agent/charts/case_study_hq_$id.png" \
+      eva-web/public/case-studies/
+done
+cd eva-web && npm ci && npm run build
+```
+
+Ship it atomically so a half-copied tree is never served:
+
+```bash
+ssh root@45.33.97.27 'rm -rf /var/www/eva-web.new && mkdir -p /var/www/eva-web.new'
+scp -r dist/* root@45.33.97.27:/var/www/eva-web.new/
+ssh root@45.33.97.27 'rm -rf /var/www/eva-web.old &&
+  mv /var/www/eva-web /var/www/eva-web.old &&
+  mv /var/www/eva-web.new /var/www/eva-web &&
+  chown -R caddy:caddy /var/www/eva-web'
+```
+
+`/var/www/eva-web.old` is the previous build — roll back by swapping it back.
+
+#### 3. Caddy
+
+The live config is kept in `deploy/caddy_eva_finance.snippet`; install it with
+`deploy/_install_caddyfile.py` (backs up, normalises CRLF, validates **as the
+caddy user**, then reloads). Two traps worth knowing:
+
+- **Never run `caddy validate` as root.** It creates
+  `/var/log/caddy/eva-finance.log` owned by `root:root`, and the service —
+  which runs as `caddy` — then fails to reload with `permission denied`.
+- **No `/404.html` in `try_files`.** Falling back to it there serves the error
+  page with a `200`, making every typo look like a real page to crawlers.
+  The miss is left to become a genuine 404 and is caught by `handle_errors`,
+  which re-serves `/404.html` with `status {err.status_code}`.
+
+`handle_path` strips the `/api` prefix and re-adds `/api/public`, so the
+site's `fetch("/api/…")` reaches the public router and **only** the public
+router — no other dashboard route is exposed at the apex.
+
+#### 4. `.env` for the beta form (then restart `eth-dashboard`)
+
+```bash
+RESEND_API_KEY=...            # shared with the ops alerts
+ALERT_EMAIL_FROM=...          # see the delivery caveat below
+# BETA_SIGNUP_EMAIL_TO=a@x,b@y   # default: abagui@ + daniel@ republictech.io
+```
+
+> **Delivery caveat (currently live).** `ALERT_EMAIL_FROM=onboarding@resend.dev`
+> is a Resend *test* sender: it only delivers to the Resend account owner
+> (`abagui@republictech.io`). Sending to `daniel@republictech.io` returns
+> `403 validation_error`. The notifier therefore sends **one request per
+> recipient** — a single batched call is rejected outright when any recipient
+> is undeliverable, which would silently notify nobody. As it stands
+> `abagui@` is notified and `daniel@` is not, and each rejection is logged at
+> ERROR. To fix properly: verify `republictech.io` at resend.com/domains and
+> set `ALERT_EMAIL_FROM` to an address on that domain.
+
+Signups are stored in `ledger.db` table **`beta_signups`** regardless of email
+delivery (the email is a notification, not the record). Read them with:
+
+```bash
+sqlite3 /opt/eth-trading-agent/ledger.db \
+  "SELECT created_at, email, name, note FROM beta_signups ORDER BY id DESC;"
+```
+
+#### Verifying a deploy
+
+`deploy/_verify_evaweb.sh` checks services, the dashboard, the public API,
+the files on disk, and end-to-end DNS/TLS. `deploy/_routing_check.sh` proves
+the routing block (clean URLs, assets, real 404, `/api/*` rewrite, beta POST)
+by mounting the same handlers on `http://localhost:8099`, then removing the
+temporary block — useful **before** DNS exists.
+
+To refresh the site's built-in numbers later, rerun `build_snapshot.py` and
+`npm run build` (the pages also hydrate live from `/api/strategies` on load,
+so between rebuilds only the charts and captions trail).
+
 After deploying personal books, run once (or rely on `paper.init_db` auto-migrate):
 
 ```bash
@@ -454,6 +569,54 @@ curl -X POST "https://dashboard.eva.finance/api/ops/watchdog-execute" \
 Runtime override is stored in SQLite meta (`watchdog_execute_enabled`); config default remains `WATCHDOG_EXECUTE_ENABLED=False`.
 
 **Ops note:** if an oversized watchdog BTC short is still open after deploy, flatten or hard-cap it manually before re-enabling execute.
+
+### Eva variant experiment (Eva Lab tab)
+
+Three extra Eva books run as **paper only** alongside the live bot: `eva_swing_mech`, `eva_swing_llm`, `eva_day`. They write to their own tables in `ledger.db` (`variant_positions`, `variant_trades`, `variant_skips`) and cannot place an order. `paper.py` is untouched — control *is* `paper.py`.
+
+All flags live in `bot_config.py`, not `.env`. No new secrets, no new services, no schema change to any existing table (the tables are created on first use by `eva_variants.init_db()`).
+
+**Two new scheduler jobs** appear in the journal on start:
+
+```bash
+journalctl -u eva-bot -n 200 --no-pager | grep -i "eva "
+# Eva variants enabled — day scan every 120s, live variant=control
+# Eva swing-LLM arm enabled — every 7200s
+```
+
+- `eva_day_scan` (every 120s) — also drives **mark-to-market for every variant book**, so it must stay enabled even if `EVA_DAY_M1_TRIGGERS_ENABLED=False`, or the swing books never resolve their exits.
+- `eva_swing_llm_cycle` (every 2h) — the only new LLM spend: ~12 vision calls/day. Deliberately not folded into the 30-min cycle, because one Claude call cannot show H12/D1 to the swing mandate while hiding it from control.
+
+**Check the books are recording:**
+
+```bash
+curl -s "https://dashboard.eva.finance/api/eva/variants" | python3 -m json.tool | head -40
+sqlite3 /opt/eva-bot/ledger.db \
+  "SELECT variant, status, COUNT(*) FROM variant_positions GROUP BY 1,2;"
+sqlite3 /opt/eva-bot/ledger.db \
+  "SELECT variant, reason, COUNT(*) FROM variant_skips GROUP BY 1,2 ORDER BY 3 DESC LIMIT 10;"
+```
+
+The skip table is the first place to look if a book is empty — it records *why* each trigger did not open (`no_stance`, `stance_no_trade`, `no_structure_break`, `no_open_fvg`, `price_outside_fvg`, `cooldown`, `rejected:*`). An empty `eva_day` book with thousands of `stance_no_trade` skips is the gate working, not a bug.
+
+**Kill switch** — stops all variant writes immediately; control is unaffected either way:
+
+```bash
+# edit bot_config.py: EVA_VARIANTS_ENABLED = False
+systemctl restart eva-bot
+```
+
+**Promotion is not an ops action.** `EVA_LIVE_VARIANT` is the only book allowed to touch real money and is `control`. Do not change it on the basis of the dashboard leaderboard — the tab labels its front-runner a candidate for a reason. The bar is in `deploy/EVA_VARIANTS_PREREG.md` §4 (≥60 closed positions, day-clustered bootstrap CI excluding zero, placebo beaten, mechanism metric moved, structural review).
+
+**Re-basing the epoch** (only if a registered parameter changes, which invalidates the experiment):
+
+```bash
+# 1. edit bot_config.py: EVA_EXPERIMENT_EPOCH = "YYYY-MM-DD"
+# 2. archive the old book so the two geometries are never blended
+sqlite3 /opt/eva-bot/ledger.db \
+  "UPDATE variant_positions SET variant = variant || '_preepoch' WHERE status = 'closed';"
+systemctl restart eva-bot
+```
 
 ### Republic Intelligence API (`/api/v1`)
 

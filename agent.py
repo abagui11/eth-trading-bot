@@ -200,6 +200,23 @@ def run_cycle() -> list[tuple[Suggestion, list[str]]] | None:
                 cycle_id=product_cycle_id,
                 spots=spots,
             )
+            # Experiment mirrors. Paper-only books that re-bracket this same
+            # suggestion; they never place an order and never touch paper.py.
+            # Wrapped because a variant failing must not cost control a cycle.
+            if bot_config.EVA_VARIANTS_ENABLED and suggestion.action != "no_trade":
+                try:
+                    import eva_day
+                    import eva_swing
+
+                    eva_swing.mirror(suggestion, cycle_id=product_cycle_id)
+                    eva_day.mirror_vision_suggestion(
+                        suggestion, cycle_id=product_cycle_id
+                    )
+                except Exception:
+                    logger.exception(
+                        "Variant mirrors failed for %s", product_cycle_id
+                    )
+
             # A fresh read of the same chart that finds nothing retires any
             # plan still waiting on it: silence would leave a resting order
             # Eva would no longer write.

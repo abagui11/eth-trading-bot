@@ -184,6 +184,24 @@ def get_latest_trade_suggestion() -> dict | None:
     return _row_to_record(row)
 
 
+def get_latest_for_product(product_id: str, *, traded_only: bool = False) -> dict | None:
+    """Most recent suggestion for one product, or None.
+
+    The eva_day variant gates its deterministic M1 triggers on this so it only
+    ever trades in the direction Eva's last vision read supports — the whole
+    point of the gate is that the fast bot never forms its own directional
+    opinion, it only times an existing one.
+    """
+    init_db()
+    sql = "SELECT * FROM suggestions WHERE product_id = ?"
+    if traded_only:
+        sql += " AND action != 'no_trade'"
+    sql += " ORDER BY id DESC LIMIT 1"
+    with _connect() as conn:
+        row = conn.execute(sql, (product_id,)).fetchone()
+    return _row_to_record(row) if row is not None else None
+
+
 def get_suggestion_by_cycle_id(cycle_id: str) -> dict | None:
     init_db()
     with _connect() as conn:
