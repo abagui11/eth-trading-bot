@@ -131,7 +131,12 @@ LIVE_PENDING_EXPIRY_HOURS: float = 4.0
 # its pre-registered bar in EVA_VARIANTS_PREREG.md to clear first.
 EVA_VARIANTS_ENABLED = True
 EVA_LIVE_VARIANT = "control"          # the ONLY book that trades real money
-EVA_EXPERIMENT_EPOCH = "2026-09-14"   # variant stats measured from this date
+# Compared as a string against `closed_at`, so it can carry a time. It is set
+# to the moment the candle-window fix shipped rather than to midnight: every
+# position resolved before it — control's included — was walked against bars
+# that predated its own entry, so those results are not measurements of
+# anything and must not sit in the same sample as what follows.
+EVA_EXPERIMENT_EPOCH = "2026-09-15T15:10:00Z"
 
 # Equal dollar risk per trade across all books, so a wider stop buys a smaller
 # position. Without this the swing arms would beat control by betting more.

@@ -57,6 +57,21 @@ def _median(xs: list[float]) -> float | None:
     return s[n // 2] if n % 2 else (s[n // 2 - 1] + s[n // 2]) / 2
 
 
+def was_stopped_out(row: dict) -> bool:
+    """True only for exits at the *opening* stop, with no rung banked.
+
+    The two engines label trailed exits differently — ``paper`` reports every
+    stop-shaped exit as ``stop_loss`` even once the stop has trailed to
+    breakeven, while the variant engine says ``trail``. Deciding on the label
+    alone would count control's trailed winners as stopped and the variants'
+    as not, biasing the stopped-then-paid rate the pre-registration reads as a
+    primary metric. ``tps_hit`` settles it the same way for both books.
+    """
+    if "stop" not in str(row.get("close_reason") or "").lower():
+        return False
+    return int(row.get("tps_hit") or 0) == 0
+
+
 def _control_stops() -> dict[str, dict]:
     """Opening stop and MFE per control position, keyed by ``open_cycle_id``.
 
@@ -140,8 +155,6 @@ def control_positions(since: str | None = None) -> list[dict]:
         opened_at = str(rows[0].get("opened_at") or "")
         a, b = _parse(opened_at), _parse(closed_at)
         mfe_pct = meta.get("mfe_pct")
-        # A position that ends on a stop after banking rungs still reports the
-        # stop as its reason; that is the honest label for the exit.
         reasons = [str(r.get("close_reason") or "") for r in rows]
         out.append({
             "variant": eva_variants.CONTROL,
@@ -168,7 +181,7 @@ def control_summary(since: str | None = None) -> dict:
     rows = control_positions(since)
     rs = [float(r["realized_r"]) for r in rows]
     holds = [r["hold_h"] for r in rows if r["hold_h"] is not None]
-    stopped = [r for r in rows if "stop" in str(r["close_reason"]).lower()]
+    stopped = [r for r in rows if was_stopped_out(r)]
     paid = [r for r in stopped
             if r["mfe_r"] is not None and float(r["mfe_r"]) > 0]
     return {

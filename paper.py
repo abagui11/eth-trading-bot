@@ -1645,13 +1645,24 @@ def _sl_hit(side: str, spot: float, stop_loss: float) -> bool:
     return spot >= stop_loss
 
 
-def _m5_path(product_id: str, since: str | None) -> list[dict]:
+_M5_SECONDS = 300
+
+
+def _m5_path(
+    product_id: str, since: str | None, not_before: str | None = None
+) -> list[dict]:
     """M5 bars between the last barrier walk and now, oldest first.
 
     Returns empty when the window is unknown or the fetch fails, which
     collapses the caller back to a spot-only check. A missing candle feed must
     not stall the cycle, but it does mean a stop can still be missed, so the
     failure is logged rather than swallowed silently.
+
+    ``since`` is rounded *down* to the M5 boundary so the partial bar the last
+    walk stopped inside is re-walked rather than skipped; re-walking a bar is
+    idempotent, whereas skipping one loses a wick. ``not_before`` is the entry
+    time and is rounded *up*, because the bar that straddles the entry carries
+    ticks from before the position existed and must not resolve it.
     """
     if not since:
         return []
@@ -1661,6 +1672,20 @@ def _m5_path(product_id: str, since: str | None) -> list[dict]:
         )
     except ValueError:
         return []
+    start -= start % _M5_SECONDS
+    if not_before:
+        try:
+            entry = int(
+                datetime.fromisoformat(
+                    str(not_before).replace("Z", "+00:00")
+                ).timestamp()
+            )
+        except ValueError:
+            entry = None
+        if entry is not None:
+            if entry % _M5_SECONDS:
+                entry += _M5_SECONDS - (entry % _M5_SECONDS)
+            start = max(start, entry)
     end = int(datetime.now(timezone.utc).timestamp())
     if start >= end:
         return []
@@ -1711,7 +1736,8 @@ def _entry_touched(
 
 
 def _barrier_probes(
-    side: str, product_id: str, since: str | None, spot: float
+    side: str, product_id: str, since: str | None, spot: float,
+    not_before: str | None = None,
 ) -> list[tuple[float, float]]:
     """(adverse, favourable) prices to test in order, oldest bar first.
 
@@ -1720,7 +1746,7 @@ def _barrier_probes(
     bar that spans both barriers resolve stop-first.
     """
     probes: list[tuple[float, float]] = []
-    for bar in _m5_path(product_id, since):
+    for bar in _m5_path(product_id, since, not_before):
         try:
             low = float(bar["low"])
             high = float(bar["high"])
@@ -1879,7 +1905,8 @@ def _check_sl_tp_closes(
         _update_excursions(conn, position, spot)
 
         probes = _barrier_probes(
-            side, product_id, position.get("path_checked_at"), spot
+            side, product_id, position.get("path_checked_at"), spot,
+            position.get("opened_at"),
         )
         closed = False
         for adverse, favourable in probes:

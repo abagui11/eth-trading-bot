@@ -597,6 +597,34 @@ sqlite3 /opt/eva-bot/ledger.db \
   "SELECT variant, reason, COUNT(*) FROM variant_skips GROUP BY 1,2 ORDER BY 3 DESC LIMIT 10;"
 ```
 
+**Sanity check that catches a broken exit engine:** no position may close before it opens.
+
+```bash
+sqlite3 /opt/eth-trading-agent/ledger.db \
+  "SELECT COUNT(*) FROM variant_positions
+   WHERE closed_at IS NOT NULL AND closed_at <= opened_at;"   # must be 0
+```
+
+A non-zero count, or a negative `median_hold_h` on the Eva Lab tab, means the
+M5 walk is resolving positions on bars that predate their entry. That shipped
+once, on 2026-09-14: Coinbase honours `limit` ahead of `start`, so a
+three-minute candle request returned 350 bars covering 29h and positions were
+stopped by price action from before they existed. `fetch_coinbase_candles_range`
+now filters to the requested window. The same failure is **invisible in
+`paper_trades`**, which stamps closes at cycle time rather than bar time — to
+check control, ask the function instead of the table:
+
+```bash
+cd /opt/eth-trading-agent && .venv/bin/python - <<'PY'
+import datetime as dt, paper
+since = (dt.datetime.now(dt.timezone.utc) - dt.timedelta(seconds=60)
+         ).strftime("%Y-%m-%dT%H:%M:%SZ")
+bars = paper._m5_path("BTC-USD", since)
+print(len(bars), "bars; oldest", bars[0]["ts"] if bars else "-")
+PY
+# healthy: a couple of bars. broken: 350 bars reaching ~29h back.
+```
+
 The skip table is the first place to look if a book is empty — it records *why* each trigger did not open (`no_stance`, `stance_no_trade`, `no_structure_break`, `no_open_fvg`, `price_outside_fvg`, `cooldown`, `rejected:*`). An empty `eva_day` book with thousands of `stance_no_trade` skips is the gate working, not a bug.
 
 **Kill switch** — stops all variant writes immediately; control is unaffected either way:

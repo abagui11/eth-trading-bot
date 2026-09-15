@@ -300,12 +300,23 @@ class _Bar:
     close: float
 
 
-def _m5_path(product_id: str, since: str | None) -> list[_Bar]:
-    """M5 bars since the last walk, oldest first. Empty on any failure."""
+def _m5_path(
+    product_id: str, since: str | None, entry_at: str | None = None
+) -> list[_Bar]:
+    """M5 bars since the last walk, oldest first. Empty on any failure.
+
+    Coinbase honours ``limit`` ahead of ``start``: a three-minute request comes
+    back with 350 bars spanning ~29h. The window is therefore enforced here
+    rather than trusted from the response, and the floor includes the entry so
+    a position can never resolve on a bar that opened before it existed.
+    """
     start_dt = _parse(since)
     if start_dt is None:
         return []
     start = int(start_dt.timestamp())
+    entry_dt = _parse(entry_at)
+    if entry_dt is not None:
+        start = max(start, int(entry_dt.timestamp()))
     end = int(datetime.now(timezone.utc).timestamp())
     if start >= end:
         return []
@@ -325,6 +336,8 @@ def _m5_path(product_id: str, since: str | None) -> list[_Bar]:
     for c in raw:
         ts = _parse(str(c.get("ts")))
         if ts is None:
+            continue
+        if int(ts.timestamp()) < start:
             continue
         out.append(_Bar(int(ts.timestamp()), float(c["high"]),
                         float(c["low"]), float(c["close"])))
@@ -387,7 +400,12 @@ def _resolve_one(pos: dict, bars: list[_Bar]) -> dict:
         if stop_touched:
             rem = (n_rungs - filled) / n_rungs
             realized = banked + rem * stop_r_for(filled)
-            return {"exit_price": stop_px, "reason": "stop", "r": realized,
+            # Only an exit at the opening stop is "stopped out". Once a rung is
+            # banked the stop has moved to breakeven or better, so labelling
+            # that a stop would count winners into the stopped-then-paid rate
+            # the pre-registration treats as a primary metric.
+            reason = "stop" if filled == 0 else "trail"
+            return {"exit_price": stop_px, "reason": reason, "r": realized,
                     "ts": bar.ts, "tps_hit": filled, "mfe": mfe, "mae": mae}
 
         # Targets, nearest first; stop-first already handled above.
@@ -425,7 +443,8 @@ def mark_to_market(now: datetime | None = None) -> int:
         )]
     closed = 0
     for pos in rows:
-        bars = _m5_path(str(pos["product_id"]), str(pos["path_checked_at"]))
+        bars = _m5_path(str(pos["product_id"]), str(pos["path_checked_at"]),
+                        str(pos["opened_at"]))
         if not bars:
             continue
         res = _resolve_one(pos, bars)

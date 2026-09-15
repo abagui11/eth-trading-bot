@@ -1,8 +1,20 @@
 # Eva HQ variants — pre-registration
 
 Registered **2026-09-14**, before any variant position existed. Experiment
-epoch `EVA_EXPERIMENT_EPOCH = 2026-09-14`; anything opened earlier is outside
-this analysis.
+epoch `EVA_EXPERIMENT_EPOCH = 2026-09-15T15:10:00Z`; anything closed earlier is
+outside this analysis.
+
+The epoch was re-based once, on 2026-09-15, and the hypotheses and thresholds
+below were **not** touched when it was. The first day's positions were resolved
+against M5 bars that predated their own entry — Coinbase honours `limit` ahead
+of `start`, so the walk received ~29h of history for every request — which made
+those closes artifacts of a bug rather than measurements. All 6 were deleted
+and the epoch pinned to the minute the fix shipped. Control's one in-epoch
+close was discarded on the same grounds. Re-basing an epoch is the kind of
+move that quietly launders a bad start into a fresh one, so the rule applied
+was: the reset is legitimate only because it discards data from *every* book
+including control, and because it happened before any promotion decision was
+in play.
 
 This document exists so the promotion decision is made **now**, against stated
 thresholds, rather than later against whichever book happens to be ahead. The

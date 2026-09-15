@@ -120,6 +120,12 @@ def _fetch_coinbase_candles(
     return bars[-capped:]
 
 
+def _bar_epoch(bar: dict[str, float | str]) -> int:
+    return int(
+        datetime.fromisoformat(str(bar["ts"]).replace("Z", "+00:00")).timestamp()
+    )
+
+
 def fetch_coinbase_candles_range(
     granularity: str,
     start_ts: int,
@@ -127,7 +133,16 @@ def fetch_coinbase_candles_range(
     *,
     product_id: str = PRODUCT_ID,
 ) -> list[dict[str, float | str]]:
-    """Paginate Coinbase candles between unix start/end (inclusive window)."""
+    """Paginate Coinbase candles between unix start/end (inclusive window).
+
+    The window is enforced on the way out. Coinbase honours ``limit`` ahead of
+    ``start``, so any request narrower than ``limit`` candles comes back with
+    the most recent 350 regardless of what was asked for — a three-minute M5
+    request returns ~29h. Pagination is unaffected (each full chunk is exactly
+    ``limit`` candles wide and ``end`` *is* respected), but the last or only
+    chunk of a short request over-reaches, which silently handed callers bars
+    from before the period they asked about.
+    """
     now = int(time.time())
     if end_ts > now:
         end_ts = now
@@ -159,7 +174,8 @@ def fetch_coinbase_candles_range(
         else:
             cursor = next_cursor
 
-    return sorted(all_bars.values(), key=lambda b: b["ts"])
+    ordered = sorted(all_bars.values(), key=lambda b: b["ts"])
+    return [b for b in ordered if start_ts <= _bar_epoch(b) <= end_ts]
 
 
 def _resample_h12(h1_bars: list[dict[str, float | str]], limit: int) -> list[dict[str, float | str]]:

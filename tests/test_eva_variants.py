@@ -74,15 +74,27 @@ class TestLadder:
         """TP1 banks +1/3R and the stop moves to entry, so the floor is +1/3R."""
         bars = [_bar(high=101.5, low=99.9, ts=0), _bar(high=101.0, low=95.0, ts=300)]
         res = ev._resolve_one(_pos(), bars)
-        assert res["reason"] == "stop"
+        assert res["reason"] == "trail"
         assert res["r"] == pytest.approx(1.0 / 3.0)
 
     def test_stop_after_tp2_trails_to_first_rung(self):
         bars = [_bar(high=102.5, low=99.9, ts=0), _bar(high=102.0, low=95.0, ts=300)]
         res = ev._resolve_one(_pos(), bars)
-        assert res["reason"] == "stop"
+        assert res["reason"] == "trail"
         # banked (1+2)/3, remaining third exits at TP1 = +1R
         assert res["r"] == pytest.approx((1.0 + 2.0) / 3.0 + 1.0 / 3.0)
+
+    def test_exit_after_a_rung_is_never_labelled_a_stop(self):
+        """``stopped_n`` is a primary metric; a trailed winner is not a stop.
+
+        Both engines exit at a price sitting in the stop field. Labelling the
+        trailed case ``stop`` put profitable exits into the stopped-then-paid
+        rate, which is the number the promotion decision turns on.
+        """
+        bars = [_bar(high=101.5, low=99.9, ts=0), _bar(high=101.0, low=95.0, ts=300)]
+        res = ev._resolve_one(_pos(), bars)
+        assert res["reason"] != "stop"
+        assert res["r"] > 0
 
 
 class TestTimeExit:
@@ -109,6 +121,98 @@ class TestTimeExit:
         ).strftime("%Y-%m-%dT%H:%M:%SZ")
         res = ev._resolve_one(pos, [_bar(high=100.1, low=98.0, ts=1789_000_000)])
         assert res["reason"] == "stop"
+
+
+class TestPathWindow:
+    """The seam between the candle fetch and the resolver.
+
+    Coinbase honours ``limit`` ahead of ``start``: a three-minute request comes
+    back with 350 bars covering ~29h. Unfiltered, positions resolved on price
+    action from before they were opened — in production four of the first six
+    closes had ``closed_at`` *earlier* than ``opened_at``, one by 10 hours.
+    The unit tests missed it because they fed bars straight to the resolver,
+    so the bug lived entirely in the untested join between the two.
+    """
+
+    def _fake_fetch(self, bars):
+        def fetch(granularity, start, end, product_id=None):
+            return bars
+        return fetch
+
+    def test_bars_before_the_requested_start_are_dropped(self, monkeypatch):
+        import research
+        entry_ts = 1_789_000_000
+        over_returned = [
+            {"ts": ev.datetime.fromtimestamp(entry_ts + off, tz=ev.timezone.utc)
+                     .strftime("%Y-%m-%dT%H:%M:%SZ"),
+             "high": 100.0, "low": 100.0, "close": 100.0}
+            for off in (-86_400, -3600, -300, 300, 600)
+        ]
+        monkeypatch.setattr(research, "fetch_coinbase_candles_range",
+                            self._fake_fetch(over_returned))
+        entry_iso = ev.datetime.fromtimestamp(
+            entry_ts, tz=ev.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+        bars = ev._m5_path("BTC-USD", entry_iso, entry_iso)
+        assert [b.ts for b in bars] == [entry_ts + 300, entry_ts + 600]
+
+    def test_a_position_cannot_resolve_before_it_opened(self, monkeypatch):
+        """The production symptom, as a test: no close earlier than the open."""
+        import research
+        entry_ts = 1_789_000_000
+        # A crash an hour *before* entry that would have stopped the position.
+        pre_entry_crash = {
+            "ts": ev.datetime.fromtimestamp(entry_ts - 3600, tz=ev.timezone.utc)
+                    .strftime("%Y-%m-%dT%H:%M:%SZ"),
+            "high": 100.0, "low": 90.0, "close": 95.0,
+        }
+        calm_after = {
+            "ts": ev.datetime.fromtimestamp(entry_ts + 300, tz=ev.timezone.utc)
+                    .strftime("%Y-%m-%dT%H:%M:%SZ"),
+            "high": 100.2, "low": 99.9, "close": 100.0,
+        }
+        monkeypatch.setattr(research, "fetch_coinbase_candles_range",
+                            self._fake_fetch([pre_entry_crash, calm_after]))
+        entry_iso = ev.datetime.fromtimestamp(
+            entry_ts, tz=ev.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+        bars = ev._m5_path("BTC-USD", entry_iso, entry_iso)
+        res = ev._resolve_one(_pos(opened_at=entry_iso), bars)
+        assert res.get("_progress") is True, "resolved on a pre-entry bar"
+
+    def test_the_bar_straddling_entry_is_excluded(self, monkeypatch):
+        """Its high/low include ticks from before we were in the trade."""
+        import research
+        entry_ts = 1_789_000_180  # 3 min into the bar that opened at ...000
+        straddling = {
+            "ts": ev.datetime.fromtimestamp(1_789_000_000, tz=ev.timezone.utc)
+                    .strftime("%Y-%m-%dT%H:%M:%SZ"),
+            "high": 105.0, "low": 95.0, "close": 100.0,
+        }
+        monkeypatch.setattr(research, "fetch_coinbase_candles_range",
+                            self._fake_fetch([straddling]))
+        entry_iso = ev.datetime.fromtimestamp(
+            entry_ts, tz=ev.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+        assert ev._m5_path("BTC-USD", entry_iso, entry_iso) == []
+
+
+class TestStoppedOutDefinition:
+    """One definition of "stopped" across two engines that label differently."""
+
+    def test_control_trailed_exit_is_not_counted_as_stopped(self):
+        import eva_variants_bridge as bridge
+        # paper.py reports every stop-shaped exit as stop_loss, including the
+        # ones where the stop had already trailed to breakeven.
+        trailed = {"close_reason": "stop_loss", "tps_hit": 2}
+        assert bridge.was_stopped_out(trailed) is False
+
+    def test_control_real_stop_is_counted(self):
+        import eva_variants_bridge as bridge
+        assert bridge.was_stopped_out(
+            {"close_reason": "stop_loss", "tps_hit": 0}) is True
+
+    def test_target_exit_is_not_stopped(self):
+        import eva_variants_bridge as bridge
+        assert bridge.was_stopped_out(
+            {"close_reason": "take_profit", "tps_hit": 3}) is False
 
 
 class TestExcursions:
