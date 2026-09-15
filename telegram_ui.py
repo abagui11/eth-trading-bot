@@ -223,7 +223,9 @@ POOL_WELCOME_MESSAGE = (
     "Commands:\n"
     "• /portfolio — cash, positions, P&L\n"
     "• /wallet — register the address you fund from; withdrawals return there\n"
-    "• /deposit — how to fund (credits stay manual until we confirm on the venue)\n\n"
+    "• /deposit — how to fund; your balance updates automatically once the "
+    "transfer settles\n"
+    "• /withdraw — take money out, back to your registered wallet\n\n"
     "Trade cards arrive here as private messages with *your* size on them. "
     "Anything about your money stays in this chat.\n\n"
     "Trading futures involves substantial risk of loss. Not financial advice."
@@ -430,14 +432,23 @@ def format_wallet_status(
             "someone ever gets into your Telegram, that delay is what stops "
             "them redirecting your money.",
         ]
-    # Say it rather than let a tester discover it by trying: the address is
-    # being collected now so the payout path has somewhere to send to, but
-    # that path is not open yet.
-    lines += [
-        "",
-        "Withdrawals aren't open yet — we're briefing everyone on timing "
-        "before they are. Message the admin meanwhile.",
-    ]
+    # What they can do next, said differently depending on whether the
+    # address is proven — a tester who assumes withdrawals are ready and
+    # finds out otherwise learns it at the worst possible moment.
+    if verified:
+        lines += [
+            "",
+            f"Withdrawals are open. Minimum "
+            f"${float(bot_config.POOL_MIN_WITHDRAWAL_USD):,.0f}, usually in "
+            "your wallet within a few minutes, and we message you with the "
+            "transaction once it lands. /withdraw to see what's available.",
+        ]
+    else:
+        lines += [
+            "",
+            "Withdrawals open once this address is confirmed, which happens "
+            "automatically the first time a deposit arrives from it.",
+        ]
     return "\n".join(lines)
 
 
