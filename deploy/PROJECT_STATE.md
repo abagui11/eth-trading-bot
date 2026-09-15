@@ -239,13 +239,54 @@ account (~$1,000 each) and join live trades with real money:
   a money path risks rejecting valid addresses or blessing invalid ones, to
   guard a typo class that copy-paste makes rare. The property that matters is
   proven more strongly downstream — see verification below.
-- **A wallet is `pending` until a deposit arrives from it.** `verified` is set
-  only by passing the real sender to `pool.decide_deposit(..., sender=…)`; the
-  admin's Credit tap alone does **not** set it, because the tap means funds
-  were seen arriving, not that their origin was seen. `pool.payout_target` is
-  the single place that decides where a withdrawal may go, and it refuses
-  `unverified` and in-cooldown addresses. A sender mismatch still credits (the
-  money is in the account) but leaves the wallet unproven.
+- **A wallet is `pending` until the chain says the deposit came from it.**
+  `verified` is reached only through `pool.verify_wallets_onchain`, which
+  compares the registered address against the **actual sender** of a credited
+  deposit read from Etherscan (`chain.verify_deposit`). The admin's Credit tap
+  does **not** set it, because the tap means funds were seen arriving, not
+  that their origin was seen. `pool.payout_target` is the single place that
+  decides where a withdrawal may go, and it refuses `unverified` and
+  in-cooldown addresses. A mismatch still credits — the money is in the
+  account and is the tester's — but leaves the wallet unproven and blocks
+  payouts, with both the tester and an admin told why.
+- **Chain reads (`chain.py`) answer the two questions Coinbase won't.**
+  Read-only, holds no key that could move funds, and used for exactly two
+  jobs: **who sent a deposit** (the sender Coinbase omits, which is what makes
+  return-to-source a guarantee rather than a promise) and **whether a payout
+  landed** (the status Coinbase will not return). Both come from Etherscan v2
+  `account/tokentx` filtered to the USDC contract at the API — so a worthless
+  token airdropped to the deposit address cannot be mistaken for a deposit,
+  the classic way a naive watcher credits somebody for nothing. The USDC
+  contract address is **pinned, not configurable**: a wrong value there would
+  verify against a token nobody sent, and an attacker-issued token is
+  trivially mintable. `deploy/_verify_chain.py` validates the reads against
+  the real transfers already on the deposit address, because fixtures we wrote
+  cannot catch a wrong contract address.
+- **"We could not check" and "it was not them" are kept distinct**, and this
+  is the invariant the design rests on. A lookup failure returns
+  `lookup_failed` and is retried; only `verified`, `mismatch` and
+  `wrong_destination` are terminal (`pool._TERMINAL_CHECKS`). Collapsing the
+  two would mean an Etherscan outage reads as a failed proof and locks an
+  honest tester out of their own money. Every attempt is recorded in
+  `pool_wallet_checks` (unique per proof/claim pair, updated in place) so a
+  retry refines the verdict, a mismatch is raised once rather than every
+  minute, and the sender we actually observed is on the record.
+- **Where the sender is read from matters.** `chain._from_receipt` decodes the
+  USDC `Transfer` **event**, not the transaction's `from` field: if a tester
+  funds from a smart-contract wallet or a multisig, `tx.from` is a relayer and
+  the real token sender only appears in the log. Verifying against `tx.from`
+  would refuse honest users and could attribute a transfer to the wrong one.
+  Deposits also need `chain.MIN_CONFIRMATIONS` (12) before they prove
+  anything, deep enough that a reorg undoing a credited deposit is not a
+  practical concern on mainnet.
+- **Payout settlement is confirmed at the destination.** `get_transaction`
+  404s even with transfer scope, so our own balance dropping is the only venue
+  evidence — and that proves money left, not where it went.
+  `watchdog._settle_sweep` matches an inbound transfer at the tester's address
+  on amount **and a time floor after submission**, then marks the withdrawal
+  `settled` and DMs the tester the transaction hash. The time floor is
+  load-bearing: without it an earlier withdrawal of the same size would mark
+  this one settled and hide a payout that never arrived.
 - **Deposits land at the venue and credit themselves.** `POOL_DEPOSIT_ADDRESS`
   is the Coinbase USDC deposit address, so transfers become venue equity on
   arrival — no intermediate wallet, no sweep step, no hot signing key, and no
@@ -271,7 +312,7 @@ account (~$1,000 each) and join live trades with real money:
   credited with another's money (`/assign <cb_tx_id> <id>` is the admin
   resolution); and arrival **does not verify the wallet**, since money being
   real is not evidence of who sent it — that still needs a chain lookup, and
-  it is what gates payouts.
+  it is what gates payouts — now performed by `chain.py` (above).
 - **Withdrawals: the venue gives us no safety net, so the flow fails closed.**
   Coinbase **rejects `idem` on sends outright** (`Invalid input parameter.
   Param: Idem`; only the bare `type/to/amount/currency/network` body is
@@ -423,7 +464,7 @@ Writers → stores:
 | `paper_contributions` | House seed; legacy Fund rows (migration source) | Migrate script; house seed |
 | `user_accounts` / `user_positions` / `user_trades` | Open account; Accept / late-join | Telegram My Metrics; `/me` |
 | `trade_offers` / `trade_decisions` | Hourly + watchdog after house `paper.update`; `display_summary` sibling field; offers immutable after create | Accept/Reject/See more; participation strip; missed-connection |
-| `approved_users` / `pool_accounts` / `pool_events` / `pool_intents` / `pool_stakes` / `pool_deposit_requests` / `pool_wallets` | `pool.py` only (bot Admit/wallet/deposit flows, execute fill/exit hooks, watchdog sweep) | `/portfolio`, `/wallet`, access gate, reconcile |
+| `approved_users` / `pool_accounts` / `pool_events` / `pool_intents` / `pool_stakes` / `pool_deposit_requests` / `pool_wallets` / `pool_wallet_checks` / `pool_withdrawals` | `pool.py` only (bot Admit/wallet/deposit/withdraw flows, execute fill/exit hooks, watchdog deposit/verify/payout/settle sweeps) | `/portfolio`, `/wallet`, `/withdraw`, access gate, reconcile |
 | `audit_snapshots` | hourly cycle | dashboard, chat, monitor |
 | `audit_verdicts` | hourly monitor, chat audit | dashboard |
 | `chat_audits` | chat Q&A | — |
@@ -603,6 +644,7 @@ Defaults from `bot_config.py` (non-secret tunables). Secrets and portfolio size 
 | `POOL_DEPOSIT_ADDRESS` (env) | `0xDdA1…F240` | the **Coinbase** USDC deposit address (Ethereum mainnet), so transfers become venue equity on arrival with no wallet in the middle. Verify any new value with `deploy/_check_deposit_address.py` before a tester sends — it asks Coinbase whether it generated the address, and a typo has no undo. Setting this makes two things required on `/deposit`: a **registered sending wallet** (who the money is from, and where a payout returns to) and a **transaction hash** (which transfer it was; one hash credits exactly once via a partial unique index, case- and prefix-normalized, released by a denial) |
 | `POOL_WALLET_COOLDOWN_HOURS` | `24.0` | payouts are held this long after an admin approves a change of payout address. Re-pointing the address is an account takeover's first move, so the delay is the window in which the real owner can object; it costs an honest tester a day, once, and only if they move wallets |
 | `POOL_DEPOSIT_CHAIN` (env) | unset | network named in the `/deposit` copy. Deliberately has no default — USDC sent to this address on a chain we do not control it on is unrecoverable, so the instructions say "confirm with the admin" rather than print a guess |
+| `ETHERSCAN_API_KEY` (env) | unset | read-only chain access for the two things Coinbase omits: **who sent a deposit** (which is what promotes a wallet to `verified`) and **whether a payout landed** (its status cannot be read back from the venue). Unset means no wallet can ever be proven, so `payout_target` refuses every withdrawal as `unverified` — safe, but stuck. Validate a new key with `deploy/_verify_chain.py`, which checks the reads against the transfers already on the deposit address |
 | `INVESTOR_ACCESS_TOKEN` (env) | unset | gate for the private `/investors` link. Set → the page and `/api/investors/snapshot` require `?k=<token>` once and then ride an httponly cookie; anything else **404s** (not 401, so a guess never confirms the page exists). Unset → the page stays reachable but unlisted, the same posture as `/volume` |
 | `INVESTOR_SESSION_TTL_SEC` (env) | `2592000` (30d) | lifetime of the investor cookie once the token has been presented |
 | `BETA_SIGNUP_EMAIL_TO` (env) | `abagui@republictech.io,daniel@republictech.io` | comma-separated recipients for the `[Eva beta]` signup notification from the eva.finance marketing site (`POST /api/public/beta`). The signup row in `beta_signups` is the record; the email is only a notification, and needs `RESEND_API_KEY` plus a verified-domain `ALERT_EMAIL_FROM` to deliver externally |
@@ -671,6 +713,7 @@ optimising for".
 
 | Date | Change |
 |---|---|
+| 2026-09-15 | **Chain reads close the last gap in the withdrawal path: we can now prove who sent a deposit, and see that a payout landed.** Both are things Coinbase will not tell us — inbound transfers carry no sender, and a payout's status cannot be read back — and both were blocking withdrawals outright, since `payout_target` correctly refuses every unproven wallet and nothing could make one proven. New read-only `chain.py` answers them from Etherscan v2 `account/tokentx`, holding no credential that could move money. `watchdog._wallet_verify_sweep` compares each registered address against the **actual sender** of a credited deposit and promotes the wallet to `verified`, which is what turns return-to-source from a promise into a guarantee: without it, a hijacked Telegram account could register an attacker's address at onboarding, fund from anywhere, and be paid out to an address its real owner never held. `_settle_sweep` confirms payouts by finding the arrival at the destination, so "did she get it?" stops being answered by watching our own balance drop — which proves money left, not where it went. **The invariant the whole thing rests on is that "we could not check" and "it was not them" stay distinct:** a lookup failure is retried, only `verified`/`mismatch`/`wrong_destination` are terminal, and collapsing the two would let an Etherscan outage read as a failed proof and lock an honest tester out of their own money (`test_a_lookup_failure_is_not_a_failed_proof`). Three details are load-bearing and each guards a specific way of being fooled: the sender is decoded from the USDC **`Transfer` event** rather than `tx.from`, because a tester funding from a multisig or smart-contract wallet has a relayer in `tx.from` and verifying against it would refuse honest users; the query is filtered to the USDC contract **at the API** with the contract address **pinned in code**, so a worthless airdropped token cannot be mistaken for a deposit and a wrong contract value cannot verify against a token nobody sent; and payout matching carries a **time floor after submission**, without which a tester's earlier withdrawal of the same size would mark this one settled and hide a payout that never arrived. Mismatches — almost always an honest tester funding from an exchange rather than anything dishonest — are surfaced to both parties with a route forward rather than silently refused, and recorded once in the new `pool_wallet_checks` table so the admin is not re-alerted every minute. `deploy/_verify_chain.py` checks the reads against the real transfers already on the deposit address, because fixtures we wrote ourselves cannot catch a wrong contract address. Requires `ETHERSCAN_API_KEY`; unset leaves wallets unverifiable and withdrawals refused, which is safe but stuck. 22 new cases across `tests/test_chain.py` and `WalletVerifyTests`. |
 | 2026-09-15 | **Withdrawals, built around what one real $2 payout proved rather than what the docs imply.** A Transfer-scoped CDP key now sits beside the trading key with complementary powers — trading can trade and not withdraw, payout can withdraw and not trade — so neither credential alone can take a position and move the proceeds off the venue. Getting there surfaced that **Ed25519 does not authenticate** against these endpoints despite the portal marking it "Recommended" and ECDSA "Legacy": eight structurally different JWT constructions returned a byte-identical 401, which is the signature of a rejected identity rather than a rejected signature, and switching to ECDSA worked first try. The send itself then taught three things: **Coinbase rejects `idem`**, so there is no venue-side idempotency and a resend is a second real payment; **the account is debited more than the recipient receives** ($2.00 send → $2.148356 debit, flat fee); and **a payout's status cannot be read back** (single-transaction GET 404s like the list endpoint). The flow is shaped by all three. Money is debited at *request* time inside `_write_txn` so two requests cannot spend one balance; intent is recorded *before* the API call because a crash mid-call otherwise leaves no evidence a payment exists; an ambiguous outcome becomes `unknown`, which neither refunds nor retries and halts the queue for a human, since refunding could return money that already left and retrying could send it twice; one payout goes per sweep; and admin approval only *queues*, keeping the network call out of the Telegram callback so a retry there cannot pay twice. The tester pays the fee (`amount + fee` debited) so the pool's books stay exactly level with the venue, with a $3 gas reserve trued up and refunded once the real fee lands, and `max_withdrawal_usd()` nets it off so a quoted maximum cannot fail mid-withdrawal. `POOL_MIN_WITHDRAWAL_USD = 50` keeps the flat fee under ~0.3%. Payouts go to the address frozen at request time, so a wallet change cannot redirect one in flight. **Still gated:** every withdrawal refuses on `unverified` until the chain lookup lands, because Coinbase reports no sender and paying an unproven address is how a hijacked Telegram account drains someone. 25 new cases. |
 | 2026-09-15 | **Closed a lost-update and overdraft race in the pool ledger before withdrawals get built on top of it.** `_apply_event` reads a balance, adds in Python and writes the absolute result, and sqlite begins its implicit transaction at the first *write* rather than the first read — so `check available -> decide -> write` was never atomic, on any path. The numbers, measured by disabling the new guard and re-running the tests: eight simultaneous withdrawals against a $1,000 balance **all** succeeded and left the account at **−$1,000**; ten $150 requests paid **$2,350** out of $1,000; ten concurrent $100 credits landed as **$500**, five of them silently lost with a journal that still looked plausible row by row. `pool._write_txn` now takes the write lock before the read, and every balance-moving path goes through it — `credit`, `debit`, `record_intent`, `release_intents`, `expire_stale_intents`, `open_stakes`, `book_exit`, `book_close`. `record_intent` was the same defect with a docstring claiming the opposite ("ten concurrent Accepts cannot promise the same dollars twice") — it read on one connection and reserved on another, so simultaneous Accepts each sized against the pre-reserve balance; the overlap was small only because the budget is 0.7% of a fraction, which is exactly why it would never have shown up in a balance anyone eyeballed. Two more holes closed alongside: withdrawals booked with `ref=None` sat outside the partial dedupe index (`WHERE ref IS NOT NULL`) and could be replayed and charged twice, so every balance event now carries a ref — an operation id where one exists, a unique `adhoc:` ref where the action is genuinely repeatable; and `pool.withdrawable_usd()` is now the single server-side definition of withdrawable cash, shared with the in-transaction check via `_AVAILABLE_SQL`, so a quoted "max" cannot be refused and a request cannot name its own ceiling. The four race tests use real threads on a real file-backed ledger, because every assertion in them passes with the guard removed if the calls are made one at a time — which is how a defect like this survives in a money path. 13 new cases. |
 | 2026-09-15 | **Deposits credit themselves within a minute of settling, so a tester's money is confirmed whether or not an admin is awake.** The Credit tap was the only thing standing between a real transfer and a real balance, which made the worst case "deposited at 2am, heard nothing until morning" — bad for the one moment a tester most needs certainty. `watchdog._deposit_sweep` now runs on the 60s scan, reads settled inbound transfers, credits matches and DMs the tester first, with admins moved from gatekeeper to FYI. **The design is dictated by a probe, not a guess:** `/api/v2/accounts/{id}/transactions` 404s for CDP keys, and the path that works (`.../addresses/{addr}/transactions`) returns `id`, `amount`, `status` and `network.hash` but **no sender**. Attribution by sender is therefore impossible from Coinbase alone, so it is by **transaction hash** — which is why `/deposit` requires one, and why arrival does **not** mark a wallet verified: money being real is not evidence of who sent it, and pretending otherwise would be the one error that could later pay a stranger (`test_auto_credit_does_not_claim_to_have_verified_the_wallet`). The credited amount is always Coinbase's rather than the claim, so a tester cannot move their own balance by typing a bigger number. A transfer with no matching claim is recorded and raised **once**, never apportioned — guessing an owner from an amount is how one tester gets credited with another's money — with `/assign <cb_tx_id> <telegram_id>` as the resolution. Idempotence is structural rather than careful: credits are keyed `cb_deposit:{coinbase_tx_id}` against the existing `pool_events` dedupe index and `pool_chain_deposits` is keyed on the same id, so re-reading the same rows every 60s is a no-op, a crash between the credit and the status write is recovered instead of repeated, and an impatient manual Credit followed by arrival books once. The probe also caught a first-run trap: the two transfers already on this address are **house** capital ($3,000 and $1,000 from August), so a naive watcher would have alerted on both — they are recorded as `baseline`, while a filed claim overrides the baseline so a deposit landing during the very first sweep is still credited. The sweep never raises: a deposit watcher that could take down the watchdog would stop stop-loss monitoring, which is far worse than a late credit. 15 new cases across `AutoCreditTests` and `ChainBaselineTests`. |

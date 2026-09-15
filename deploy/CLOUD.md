@@ -242,6 +242,9 @@ Optional Research topic (z-moves / digests), if you want a shared channel:
    POOL_FORUM_CHAT_ID=-1001234567890
    POOL_FORUM_RESEARCH_THREAD_ID=3
    POOL_DEPOSIT_ADDRESS=0x...
+   # Required for withdrawals: proves who sent a deposit and that a payout
+   # landed. Without it no wallet reaches `verified` and /withdraw refuses.
+   ETHERSCAN_API_KEY=...
    ```
 
 6. For the mill, leave `TELEGRAM_FORUM_CHAT_ID` **unset** so idea cards DM
@@ -350,18 +353,41 @@ real payment and nothing at the far end merges them. That shapes the rules:
   Check the USDC balance and the destination on-chain, then `/payouts resume`.
 - `/payouts` shows the queue and the halt state; `/payouts halt` stops it.
 - A payout's status **cannot be read back** from the API (single-transaction
-  GET 404s), so settlement is confirmed by the balance moving.
+  GET 404s), so `watchdog._settle_sweep` confirms it the only independent way
+  available: by finding the arrival at the tester's own address on-chain. It
+  then marks the withdrawal `settled` and DMs them the transaction hash. Our
+  balance dropping only proves the money left, not where it went.
 
 Fees: the network fee is charged **on top** of the send and paid by the
 tester, so the pool's books stay level with the venue. A $3 reserve is held at
 request time and refunded once the real fee is known (measured at ~$0.148 on
 Ethereum). Minimum withdrawal is $50 because the fee is flat.
 
-**Currently every withdrawal refuses with `unverified`.** That is correct and
-deliberate: Coinbase reports no sender for deposits, so no wallet has been
-proven to belong to its tester yet, and paying an unproven address is how a
-hijacked Telegram account drains someone. It unblocks when the chain lookup
-lands.
+#### Wallet verification gates every withdrawal
+
+A tester can only be paid at an address they have **proven** they control, and
+the proof is that their deposit arrived from it. Coinbase does not report a
+sender, so this is settled on-chain: `watchdog._wallet_verify_sweep` looks up
+the deposit's transaction, reads the actual sender, and promotes the wallet to
+`verified` if it matches what they registered. Needs `ETHERSCAN_API_KEY` —
+without it nothing can be proven and every withdrawal refuses as
+`unverified`, which is safe but stuck. Check a new key with
+`python3 deploy/_verify_chain.py`.
+
+When it does **not** match you get a `WALLET UNPROVEN` alert. This is
+usually not fraud — the common cause is a tester funding from a Coinbase or
+Binance account instead of their own wallet, so the sender is the exchange's
+hot wallet. Their deposit is credited and safe either way; only withdrawals
+are affected. Two ways out, and pick based on what you can actually confirm:
+
+- They deposit again from their own wallet, which proves it properly.
+- They re-register the address the funds truly came from — only sound if that
+  address is genuinely theirs. Never an exchange hot wallet: those funds would
+  land in a pooled account that is not theirs and be unrecoverable.
+
+A lookup failure is **not** a mismatch. An Etherscan outage leaves the wallet
+`pending` and is retried, rather than being recorded as a failed proof, so a
+bad afternoon at Etherscan never refuses an honest tester their own money.
 
 #### Credits are automatic
 

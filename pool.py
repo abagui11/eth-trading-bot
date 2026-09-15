@@ -148,6 +148,28 @@ CREATE UNIQUE INDEX IF NOT EXISTS pool_wallets_address_once
     ON pool_wallets (address)
     WHERE status IN ('pending', 'verified');
 
+-- Every attempt to prove a wallet against the chain, kept whether it passed
+-- or failed. Two reasons it is a table and not a flag: a mismatch is a thing
+-- an admin has to look at rather than an error to swallow, and "we checked
+-- and it was not them" must be distinguishable from "we could not reach
+-- Etherscan" -- otherwise an outage reads as a failed proof and refuses an
+-- honest tester's own money.
+CREATE TABLE IF NOT EXISTS pool_wallet_checks (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    telegram_id INTEGER NOT NULL,
+    address TEXT NOT NULL,          -- the registered address under test
+    txid TEXT NOT NULL,             -- the deposit offered as proof
+    outcome TEXT NOT NULL,          -- see _TERMINAL_CHECKS
+    sender TEXT,                    -- who actually sent it, when known
+    amount_usd REAL,
+    checked_at TEXT NOT NULL,
+    alerted_at TEXT
+);
+-- One row per (proof, claim) pair, updated in place, so a retry after an
+-- outage refines the verdict instead of stacking up duplicate history.
+CREATE UNIQUE INDEX IF NOT EXISTS pool_wallet_checks_once
+    ON pool_wallet_checks (txid, address);
+
 CREATE TABLE IF NOT EXISTS pool_intents (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     ref TEXT NOT NULL,          -- offer/cycle id (HQ) or mill_<idea_id> (mill)
@@ -904,12 +926,141 @@ def mark_wallet_verified(
     return {"ok": True, "telegram_id": int(row["telegram_id"]), "address": clean}
 
 
+# A verdict we will not revisit. Everything else -- an Etherscan outage, a
+# transfer not indexed yet, one still gathering confirmations -- is temporary
+# and gets retried, because refusing a wallet on a transient failure would
+# lock a tester out of their funds for an outage that was never their doing.
+_TERMINAL_CHECKS = ("verified", "mismatch", "wrong_destination")
+
+
+def wallet_proofs_to_check(limit: int = 20) -> list[dict[str, Any]]:
+    """Unproven wallets paired with a credited deposit that could prove them.
+
+    Only credited deposits count as proof. A pending claim is just a typed
+    hash, and a denied one was already judged not to be theirs.
+    """
+    with _connect() as conn:
+        rows = conn.execute(
+            "SELECT w.telegram_id, w.address, d.txid "
+            "FROM pool_wallets w "
+            "JOIN pool_deposit_requests d ON d.telegram_id = w.telegram_id "
+            "LEFT JOIN pool_wallet_checks c "
+            "       ON c.txid = d.txid AND c.address = w.address "
+            "WHERE w.status = 'pending' "
+            "  AND d.status = 'credited' AND d.txid IS NOT NULL "
+            f"  AND (c.outcome IS NULL OR c.outcome NOT IN {_TERMINAL_CHECKS!r}) "
+            "ORDER BY d.id ASC LIMIT ?",
+            (limit,),
+        ).fetchall()
+    return [{"telegram_id": int(r["telegram_id"]), "address": str(r["address"]),
+             "txid": str(r["txid"])} for r in rows]
+
+
+def _record_check(
+    telegram_id: int, address: str, txid: str, outcome: str,
+    *, sender: str | None = None, amount_usd: float | None = None,
+) -> None:
+    with _connect() as conn:
+        conn.execute(
+            "INSERT INTO pool_wallet_checks (telegram_id, address, txid, "
+            "outcome, sender, amount_usd, checked_at) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?) "
+            "ON CONFLICT(txid, address) DO UPDATE SET "
+            "outcome = excluded.outcome, sender = excluded.sender, "
+            "amount_usd = excluded.amount_usd, checked_at = excluded.checked_at",
+            (telegram_id, address, txid, outcome, sender, amount_usd, _now()),
+        )
+
+
+def mark_wallet_check_alerted(txid: str, address: str) -> None:
+    with _connect() as conn:
+        conn.execute(
+            "UPDATE pool_wallet_checks SET alerted_at = ? "
+            "WHERE txid = ? AND address = ?",
+            (_now(), txid, address),
+        )
+
+
+def wallet_check_mismatches() -> list[dict[str, Any]]:
+    """Deposits that did not come from the wallet the tester registered."""
+    with _connect() as conn:
+        rows = conn.execute(
+            "SELECT * FROM pool_wallet_checks WHERE outcome IN "
+            "('mismatch', 'wrong_destination') ORDER BY id DESC"
+        ).fetchall()
+    return [dict(r) for r in rows]
+
+
+def verify_wallets_onchain(
+    lookup: Any, *, deposit_address: str, limit: int = 20
+) -> list[dict[str, Any]]:
+    """Prove registered wallets against the chain. Returns what to report.
+
+    `lookup(txid, to_address=...)` is injected rather than imported so the
+    decision logic can be tested without a network, and so the module that
+    holds the money has no dependency on the one that talks to the internet.
+
+    The comparison that matters is one line: the address the tester registered
+    against the address that actually sent the funds. Everything around it
+    exists to keep a "no" honest — a mismatch is surfaced to an admin instead
+    of silently failing, because the usual cause is a tester funding from an
+    exchange rather than anything dishonest, and that person still needs
+    their money back.
+    """
+    events: list[dict[str, Any]] = []
+    for proof in wallet_proofs_to_check(limit):
+        address, txid = proof["address"], proof["txid"]
+        telegram_id = proof["telegram_id"]
+
+        result = lookup(txid, to_address=deposit_address)
+        if not result.get("ok"):
+            reason = str(result.get("reason") or "lookup_failed")
+            _record_check(telegram_id, address, txid, reason,
+                          sender=result.get("sender"),
+                          amount_usd=result.get("amount_usd"))
+            if reason in _TERMINAL_CHECKS:
+                events.append({"kind": reason, "telegram_id": telegram_id,
+                               "address": address, "txid": txid,
+                               "actual_to": result.get("actual_to")})
+            else:
+                logger.info(
+                    "pool: wallet %s not proven yet by %s (%s)",
+                    address, txid, reason,
+                )
+            continue
+
+        sender = normalize_address(result.get("sender"))
+        amount = float(result.get("amount_usd") or 0.0)
+
+        if sender != address:
+            _record_check(telegram_id, address, txid, "mismatch",
+                          sender=sender, amount_usd=amount)
+            logger.warning(
+                "pool: %s registered %s but tx %s came from %s",
+                telegram_id, address, txid, sender,
+            )
+            events.append({"kind": "mismatch", "telegram_id": telegram_id,
+                           "address": address, "txid": txid, "sender": sender,
+                           "amount_usd": amount})
+            continue
+
+        _record_check(telegram_id, address, txid, "verified",
+                      sender=sender, amount_usd=amount)
+        marked = mark_wallet_verified(address, txid=txid)
+        if marked.get("ok") and not marked.get("already"):
+            events.append({"kind": "verified", "telegram_id": telegram_id,
+                           "address": address, "txid": txid,
+                           "amount_usd": amount})
+    return events
+
+
 def payout_target(telegram_id: int) -> dict[str, Any]:
     """Where a withdrawal may go, or why it may not go anywhere yet.
 
-    The withdrawal path is not built; this is the single place that decides
-    the destination so that when it is, there is one answer rather than a
-    second opinion written next to it.
+    The single place that decides a destination, so there is one answer to
+    "where does this person's money go" rather than a second opinion written
+    next to it. `verified` is reached only by `verify_wallets_onchain` finding
+    the registered address as the actual sender of a credited deposit.
     """
     wallet = get_wallet(telegram_id)
     if wallet is None:

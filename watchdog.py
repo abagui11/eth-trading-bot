@@ -10,7 +10,7 @@ from __future__ import annotations
 import logging
 from dataclasses import dataclass
 from datetime import datetime, timezone
-from typing import Literal
+from typing import Any, Literal
 
 import analyze
 import bot_config
@@ -881,6 +881,155 @@ def _notify_payout_failed(uid: int, wid: int, amount: float, why: str) -> None:
         logger.exception("payout failure alert failed")
 
 
+def _wallet_verify_sweep() -> None:
+    """Prove registered wallets against the chain, and say so.
+
+    This is what makes return-to-source a guarantee rather than a promise.
+    Coinbase reports that money arrived but never who sent it, so the only
+    evidence a tester controls the address they gave us is the sender on the
+    transfer itself — and until that is checked, `payout_target` refuses every
+    withdrawal as `unverified`.
+
+    Never raises: this runs on the same 60s pass as stop-loss monitoring, and
+    a missed verification is a delayed withdrawal, while an exception here
+    would be an unwatched position.
+    """
+    import notify
+    import pool
+
+    if not bot_config.POOL_ENABLED or not config.POOL_DEPOSIT_ADDRESS:
+        return
+
+    try:
+        import chain
+
+        if not chain.configured():
+            return
+        events = pool.verify_wallets_onchain(
+            chain.verify_deposit, deposit_address=config.POOL_DEPOSIT_ADDRESS
+        )
+    except Exception:
+        logger.exception("wallet verify sweep failed — skipped")
+        return
+
+    for event in events:
+        uid = int(event["telegram_id"])
+        if event["kind"] == "verified":
+            try:
+                notify.send_pool_dm(
+                    uid,
+                    "Your wallet is verified.\n\n"
+                    f"{event['address']}\n\n"
+                    "We confirmed on-chain that your deposit came from this "
+                    "address, so it is the only place withdrawals can go. "
+                    "Use /withdraw whenever you like.",
+                )
+            except Exception:
+                logger.exception("wallet verified DM failed for %s", uid)
+            continue
+
+        # Not proven. Overwhelmingly this is an honest tester who funded from
+        # an exchange, so the tester is told what to do about it rather than
+        # just refused, and the admin can vouch for them if the money is
+        # genuinely theirs.
+        try:
+            notify.send_pool_dm(
+                uid,
+                "We could not verify your wallet yet.\n\n"
+                "Your deposit is credited and safe — this only affects "
+                "withdrawals. The funds did not arrive from the address you "
+                f"registered ({event['address']}), which usually means they "
+                "were sent from an exchange account rather than your own "
+                "wallet.\n\n"
+                "We only pay out to an address you have proven you control, "
+                "so an admin will be in touch to sort this out.",
+            )
+        except Exception:
+            logger.exception("wallet mismatch DM failed for %s", uid)
+        try:
+            notify.send_pool_admin_alert(
+                f"WALLET UNPROVEN for {uid} — withdrawals blocked.\n"
+                f"Registered: {event['address']}\n"
+                f"Actual sender: {event.get('sender') or 'unknown'}\n"
+                f"tx {event['txid']}\n\n"
+                "Likely an exchange withdrawal. They cannot withdraw until "
+                "this resolves — have them deposit from their own wallet, or "
+                "re-register the address the funds actually came from."
+            )
+            pool.mark_wallet_check_alerted(str(event["txid"]),
+                                           str(event["address"]))
+        except Exception:
+            logger.exception("wallet mismatch alert failed")
+
+
+def _settle_sweep() -> None:
+    """Confirm submitted payouts actually landed, by looking at the chain.
+
+    Coinbase will not return a payout's status — `get_transaction` 404s even
+    with transfer scope — so the destination address is the only independent
+    evidence the money arrived. Without this a payout sits in `submitted`
+    forever and "did she get it?" is answered by watching our own balance
+    drop, which proves the money left but not where it went.
+    """
+    import notify
+    import pool
+
+    if not bot_config.POOL_ENABLED:
+        return
+
+    try:
+        import chain
+
+        if not chain.configured():
+            return
+    except Exception:
+        logger.exception("settle sweep: chain unavailable")
+        return
+
+    for row in pool.pending_withdrawals("submitted"):
+        wid = int(row["id"])
+        amount = float(row["amount_usd"])
+        try:
+            since = _epoch(row["submitted_at"])
+            found = chain.confirm_payout(
+                str(row["to_address"]), amount, after_timestamp=since
+            )
+        except Exception:
+            logger.exception("settle sweep: lookup failed for #%s", wid)
+            continue
+
+        if not found.get("ok"):
+            continue
+
+        pool.mark_withdrawal_settled(wid, txid=found.get("txid"))
+        try:
+            notify.send_pool_dm(
+                int(row["telegram_id"]),
+                f"Withdrawal confirmed: ${amount:,.2f} USDC has landed in "
+                f"{row['to_address']}.\n\n"
+                f"Transaction: {found.get('txid')}",
+            )
+        except Exception:
+            logger.exception("settle DM failed for #%s", wid)
+        logger.info("pool: withdrawal #%s confirmed on-chain", wid)
+
+
+def _epoch(stamp: Any) -> int:
+    """ISO stamp to unix seconds; 0 if unreadable.
+
+    0 widens the match window rather than narrowing it, which risks matching
+    an older transfer of the same size instead of missing a real settlement —
+    the failure that leaves a tester wondering where their money went.
+    """
+    try:
+        return int(
+            datetime.strptime(str(stamp), "%Y-%m-%dT%H:%M:%SZ")
+            .replace(tzinfo=timezone.utc).timestamp()
+        )
+    except (TypeError, ValueError):
+        return 0
+
+
 def _deposit_sweep() -> None:
     """Credit arrived deposits and tell the tester, without waiting on anyone.
 
@@ -999,7 +1148,9 @@ def _pool_sweep(spots: dict[str, float] | None = None) -> None:
         )
 
     _deposit_sweep()
+    _wallet_verify_sweep()
     _payout_sweep()
+    _settle_sweep()
 
     global _pool_last_recon
     if config.EXECUTION_MODE != "live":

@@ -245,6 +245,11 @@ POOL_FORUM_RESEARCH_THREAD_ID: int | None = _optional_int(
 # the /deposit flow; the admin still credits manually once it lands.
 POOL_DEPOSIT_ADDRESS: str | None = _optional("POOL_DEPOSIT_ADDRESS")
 
+# Read-only chain access, for the two things Coinbase will not report: who
+# sent a deposit, and whether a payout landed. Unset means wallets can never
+# reach `verified`, which leaves withdrawals refused — safe, but stuck.
+ETHERSCAN_API_KEY: str | None = _optional("ETHERSCAN_API_KEY")
+
 # HMAC secret for /me magic links (falls back to bot token if unset).
 ME_TOKEN_SECRET: str = _optional("ME_TOKEN_SECRET") or TELEGRAM_BOT_TOKEN
 ME_TOKEN_TTL_SEC: int = int(os.getenv("ME_TOKEN_TTL_SEC", "3600") or "3600")

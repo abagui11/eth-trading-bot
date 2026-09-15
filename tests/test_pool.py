@@ -952,6 +952,96 @@ class DepositRequestTests(PoolTestCase):
         self.assertEqual(float(pool.get_account(ALICE)["cash_usd"]), 0.0)
 
 
+class WalletVerifyTests(PoolTestCase):
+    """Proving a wallet against the chain, which is what unlocks payouts.
+
+    Coinbase reports that a deposit arrived but never who sent it, so the
+    sender on the transfer is the only evidence a tester controls the address
+    they gave us. Two failures are being guarded here and they pull in
+    opposite directions: verifying a wallet nobody proved would let client
+    funds go to an address its owner never held, while refusing one because
+    Etherscan was down would lock an honest tester out of their own money.
+    """
+
+    def setUp(self) -> None:
+        super().setUp()
+        pool.approve_user(ALICE, admin_id=ADMIN)
+        self.wallet = self._wallet(ALICE)
+        self.txid = txhash("f")
+        req = pool.request_deposit(ALICE, 600.0, txid=self.txid)
+        pool.decide_deposit(req["request_id"], admin_id=ADMIN, approve=True)
+
+    def _verify(self, result: dict) -> list[dict]:
+        return pool.verify_wallets_onchain(
+            lambda txid, to_address: result, deposit_address=ADDRESS
+        )
+
+    def test_sender_matching_the_registered_wallet_verifies_it(self) -> None:
+        events = self._verify(
+            {"ok": True, "sender": self.wallet, "amount_usd": 600.0}
+        )
+        self.assertEqual([e["kind"] for e in events], ["verified"])
+        self.assertEqual(pool.get_wallet(ALICE)["status"], "verified")
+        self.assertTrue(pool.payout_target(ALICE)["ok"])
+
+    def test_a_different_sender_leaves_the_wallet_unproven(self) -> None:
+        """The attack: register an address you control, fund from anywhere
+        else, and have the pool pay you at an address it never saw send."""
+        events = self._verify(
+            {"ok": True, "sender": "0x" + "9" * 40, "amount_usd": 600.0}
+        )
+        self.assertEqual([e["kind"] for e in events], ["mismatch"])
+        self.assertEqual(pool.get_wallet(ALICE)["status"], "pending")
+        self.assertEqual(pool.payout_target(ALICE)["reason"], "unverified")
+
+    def test_a_lookup_failure_is_not_a_failed_proof(self) -> None:
+        """An Etherscan outage must not read as "it was not them" — that
+        would refuse a withdrawal on evidence we never actually gathered."""
+        events = self._verify({"ok": False, "reason": "lookup_failed"})
+        self.assertEqual(events, [])
+        self.assertEqual(pool.get_wallet(ALICE)["status"], "pending")
+        # And the proof is still queued, so it is retried rather than dropped.
+        self.assertEqual(len(pool.wallet_proofs_to_check()), 1)
+
+        events = self._verify(
+            {"ok": True, "sender": self.wallet, "amount_usd": 600.0}
+        )
+        self.assertEqual([e["kind"] for e in events], ["verified"])
+
+    def test_a_settled_verdict_is_not_rechecked(self) -> None:
+        self._verify({"ok": True, "sender": self.wallet, "amount_usd": 600.0})
+        self.assertEqual(pool.wallet_proofs_to_check(), [])
+
+        # Nor is a mismatch, so the admin is not re-alerted every minute.
+        pool.approve_user(BOB, admin_id=ADMIN)
+        self._wallet(BOB)
+        req = pool.request_deposit(BOB, 600.0, txid=txhash("7"))
+        self.assertTrue(req["ok"], req)
+        pool.decide_deposit(req["request_id"], admin_id=ADMIN, approve=True)
+        first = self._verify({"ok": True, "sender": "0x" + "9" * 40,
+                              "amount_usd": 600.0})
+        self.assertEqual([e["kind"] for e in first], ["mismatch"])
+        self.assertEqual(self._verify({"ok": True, "sender": "0x" + "9" * 40,
+                                       "amount_usd": 600.0}), [])
+        self.assertEqual(len(pool.wallet_check_mismatches()), 1)
+
+    def test_an_uncredited_claim_is_no_proof(self) -> None:
+        """A pending claim is a hash somebody typed. Only a credited deposit
+        is a transfer the venue confirmed, and only that can prove anything."""
+        pool.approve_user(BOB, admin_id=ADMIN)
+        self._wallet(BOB)
+        pool.request_deposit(BOB, 600.0, txid=txhash("8"))
+        self.assertEqual(
+            [p["telegram_id"] for p in pool.wallet_proofs_to_check()], [ALICE]
+        )
+
+    def test_a_deposit_to_the_wrong_address_never_verifies(self) -> None:
+        events = self._verify({"ok": False, "reason": "wrong_destination",
+                               "actual_to": "0x" + "1" * 40})
+        self.assertEqual([e["kind"] for e in events], ["wrong_destination"])
+        self.assertEqual(pool.get_wallet(ALICE)["status"], "pending")
+
+
 class DepositTxidTests(PoolTestCase):
     """The hash is which transfer arrived, and it may be claimed exactly once.
 
