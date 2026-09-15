@@ -146,8 +146,15 @@ def main() -> int:
         check("below the minimum is refused",
               pool.request_withdrawal(UID, 5.0).get("reason"),
               "below_minimum")
-        check("more than they have is refused",
+        # The per-request cap is checked before the balance, so a huge number
+        # is refused as `above_max` rather than as insufficient funds. Both
+        # limits are tested, since they refuse for different reasons and a
+        # tester deserves the one that tells them something useful.
+        check("above the per-request cap",
               pool.request_withdrawal(UID, 99_000.0).get("reason"),
+              "above_max")
+        check("within the cap but more than they have",
+              pool.request_withdrawal(UID, DEPOSIT_USD + 500.0).get("reason"),
               "insufficient_available")
 
         w = pool.request_withdrawal(UID, 100.0)
