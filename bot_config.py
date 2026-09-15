@@ -373,6 +373,39 @@ POOL_ADMIN_TELEGRAM_IDS: tuple[int, ...] = ()
 # Costs an honest tester a day, once, and only if they move wallets.
 POOL_WALLET_COOLDOWN_HOURS: float = 24.0
 
+# -- Withdrawals ------------------------------------------------------------
+# A payout costs more than it sends: the network fee rides on top, measured at
+# $0.148 on a $2.00 Ethereum USDC send. It is flat, not proportional, so it is
+# a large share of a small withdrawal. The tester is debited amount + fee so
+# the pool's books stay exactly level with the venue; the floor keeps the fee
+# under ~0.3% of anything we actually send.
+POOL_MIN_WITHDRAWAL_USD: float = 50.0
+# What we assume the fee will be when quoting a maximum, before the real one
+# is known. Deliberately above the measured $0.148: quoting a max that the
+# balance then cannot cover is worse than quoting slightly low, because it
+# fails at the moment a tester is trying to take their money out. Gas spikes,
+# so this is headroom rather than an estimate.
+POOL_WITHDRAWAL_FEE_RESERVE_USD: float = 3.00
+
+# Caps are blast-radius limits, not product policy. They exist because a bug
+# or a stolen Telegram account drains at most this much before a human sees
+# it, so they are set by what we could stand to lose in an hour, not by what a
+# tester might reasonably want.
+POOL_MAX_WITHDRAWAL_USD: float = 2_500.0        # per request
+POOL_MAX_USER_DAILY_WITHDRAWAL_USD: float = 2_500.0
+POOL_MAX_GLOBAL_DAILY_WITHDRAWAL_USD: float = 5_000.0
+
+# Coinbase offers no idempotency on sends (it rejects `idem` outright), so a
+# resend is a second real payment. One payout may be in flight at a time and
+# an ambiguous failure halts the queue until a human clears it: with no way to
+# ask the venue "did this already go?", continuing would be guessing with
+# someone else's money.
+POOL_PAYOUTS_ENABLED: bool = True
+# Withdrawals to a wallet we have not seen funds arrive from are refused.
+# Turning this off pays out to an address whose owner is unproven, which is
+# the failure that loses a tester's money to whoever took their account.
+POOL_REQUIRE_VERIFIED_WALLET: bool = True
+
 # Macro headline context (RSS + webhook advisory layer).
 MACRO_CONTEXT_ENABLED = True
 MACRO_POLL_INTERVAL_SEC = 300  # 5 minutes

@@ -343,6 +343,218 @@ class WalletRegistrationTests(PoolTestCase):
         )
 
 
+class WithdrawalTests(PoolTestCase):
+    """The payout lifecycle, and specifically the states where money is lost.
+
+    Coinbase offers no idempotency on sends, so the usual safety net is gone:
+    a resend is a second real payment. These pin the three ways that bites —
+    paying twice, refunding money that already left, and letting a tester
+    withdraw what is committed to an open trade.
+    """
+
+    def setUp(self) -> None:
+        super().setUp()
+        self._patch(bot_config, "POOL_MIN_WITHDRAWAL_USD", 50.0)
+        self._patch(bot_config, "POOL_WITHDRAWAL_FEE_RESERVE_USD", 3.0)
+        self._patch(bot_config, "POOL_MAX_WITHDRAWAL_USD", 2500.0)
+        self._patch(bot_config, "POOL_MAX_USER_DAILY_WITHDRAWAL_USD", 2500.0)
+        self._patch(bot_config, "POOL_MAX_GLOBAL_DAILY_WITHDRAWAL_USD", 5000.0)
+        self._patch(bot_config, "POOL_PAYOUTS_ENABLED", True)
+        pool.approve_user(ALICE, admin_id=ADMIN)
+        self.alice_wallet = self._wallet(ALICE)
+        pool.mark_wallet_verified(self.alice_wallet)
+        pool.credit(ALICE, 1000.0, admin_id=ADMIN, ref="seed")
+
+    def _patch(self, target, attr, value) -> None:
+        p = patch.object(target, attr, value)
+        p.start()
+        self.addCleanup(p.stop)
+
+    def test_the_debit_happens_at_request_time(self) -> None:
+        """Money is taken when the request is made, not when it is sent.
+        Otherwise a tester can queue two withdrawals against one balance."""
+        result = pool.request_withdrawal(ALICE, 500.0)
+        self.assertTrue(result["ok"], result)
+        self.assertEqual(result["debited_usd"], 503.0)   # amount + reserve
+        self.assertEqual(float(pool.get_account(ALICE)["cash_usd"]), 497.0)
+
+    def test_two_requests_cannot_spend_one_balance(self) -> None:
+        self.assertTrue(pool.request_withdrawal(ALICE, 600.0)["ok"])
+        second = pool.request_withdrawal(ALICE, 600.0)
+        self.assertEqual(second["reason"], "insufficient_available")
+        self.assertGreaterEqual(float(pool.get_account(ALICE)["cash_usd"]), 0.0)
+
+    def test_money_in_an_open_trade_cannot_be_withdrawn(self) -> None:
+        pool.record_intent("ref-1", ALICE)
+        reserved = float(pool.get_account(ALICE)["reserved_usd"])
+        self.assertGreater(reserved, 0)
+        result = pool.request_withdrawal(ALICE, 1000.0)
+        self.assertEqual(result["reason"], "insufficient_available")
+
+    def test_the_quoted_max_actually_clears(self) -> None:
+        quoted = pool.max_withdrawal_usd(ALICE)
+        self.assertTrue(pool.request_withdrawal(ALICE, quoted)["ok"])
+
+    def test_the_max_leaves_room_for_the_fee(self) -> None:
+        """Quoting the raw balance would fail at the moment someone tries to
+        take their money out, because the fee rides on top of the send."""
+        self.assertEqual(
+            pool.max_withdrawal_usd(ALICE),
+            round(pool.withdrawable_usd(ALICE) - 3.0, 2),
+        )
+
+    def test_below_the_minimum_is_refused(self) -> None:
+        result = pool.request_withdrawal(ALICE, 49.99)
+        self.assertEqual(result["reason"], "below_minimum")
+        self.assertEqual(float(pool.get_account(ALICE)["cash_usd"]), 1000.0)
+
+    def test_an_unverified_wallet_cannot_be_paid(self) -> None:
+        pool.approve_user(BOB, admin_id=ADMIN)
+        self._wallet(BOB)                      # registered, never verified
+        pool.credit(BOB, 1000.0, admin_id=ADMIN, ref="seed-bob")
+        result = pool.request_withdrawal(BOB, 100.0)
+        self.assertEqual(result["reason"], "unverified")
+        self.assertEqual(float(pool.get_account(BOB)["cash_usd"]), 1000.0)
+
+    def test_rejecting_refunds_in_full(self) -> None:
+        req = pool.request_withdrawal(ALICE, 500.0)
+        pool.decide_withdrawal(req["withdrawal_id"], admin_id=ADMIN, approve=False)
+        self.assertEqual(float(pool.get_account(ALICE)["cash_usd"]), 1000.0)
+
+    def test_a_failed_send_refunds_in_full(self) -> None:
+        req = pool.request_withdrawal(ALICE, 500.0)
+        wid = req["withdrawal_id"]
+        pool.decide_withdrawal(wid, admin_id=ADMIN, approve=True)
+        pool.mark_withdrawal_submitting(wid)
+        pool.mark_withdrawal_failed(wid, reason="venue refused")
+        self.assertEqual(float(pool.get_account(ALICE)["cash_usd"]), 1000.0)
+
+    def test_a_failed_send_refunds_only_once(self) -> None:
+        req = pool.request_withdrawal(ALICE, 500.0)
+        wid = req["withdrawal_id"]
+        pool.decide_withdrawal(wid, admin_id=ADMIN, approve=True)
+        pool.mark_withdrawal_failed(wid, reason="one")
+        pool.mark_withdrawal_failed(wid, reason="two")
+        self.assertEqual(float(pool.get_account(ALICE)["cash_usd"]), 1000.0)
+
+    def test_an_unknown_outcome_neither_refunds_nor_retries(self) -> None:
+        """Refunding could hand back money that already left; retrying could
+        send it twice. Coinbase will not say which, so it halts."""
+        req = pool.request_withdrawal(ALICE, 500.0)
+        wid = req["withdrawal_id"]
+        pool.decide_withdrawal(wid, admin_id=ADMIN, approve=True)
+        pool.mark_withdrawal_submitting(wid)
+        pool.mark_withdrawal_unknown(wid, reason="timeout after send")
+
+        self.assertEqual(float(pool.get_account(ALICE)["cash_usd"]), 497.0)
+        self.assertEqual(pool.get_withdrawal(wid)["status"], "unknown")
+        self.assertIsNotNone(pool.payouts_halted())
+        self.assertEqual(pool.pending_withdrawals("approved"), [])
+
+    def test_a_halt_blocks_new_requests_until_cleared(self) -> None:
+        pool.halt_payouts("something ambiguous")
+        self.assertEqual(pool.request_withdrawal(ALICE, 100.0)["reason"], "halted")
+        pool.resume_payouts()
+        self.assertTrue(pool.request_withdrawal(ALICE, 100.0)["ok"])
+
+    def test_only_an_approved_payout_can_be_claimed_for_sending(self) -> None:
+        """The guard that keeps two sweeps from sending the same payout."""
+        req = pool.request_withdrawal(ALICE, 500.0)
+        wid = req["withdrawal_id"]
+        self.assertFalse(pool.mark_withdrawal_submitting(wid))  # not approved
+        pool.decide_withdrawal(wid, admin_id=ADMIN, approve=True)
+        self.assertTrue(pool.mark_withdrawal_submitting(wid))
+        self.assertFalse(pool.mark_withdrawal_submitting(wid))  # already claimed
+
+    def test_the_fee_reserve_is_trued_up_to_the_real_fee(self) -> None:
+        """The reserve is headroom for a gas spike, not a charge."""
+        req = pool.request_withdrawal(ALICE, 500.0)
+        wid = req["withdrawal_id"]
+        self.assertEqual(float(pool.get_account(ALICE)["cash_usd"]), 497.0)
+
+        pool.decide_withdrawal(wid, admin_id=ADMIN, approve=True)
+        pool.mark_withdrawal_submitting(wid)
+        out = pool.mark_withdrawal_submitted(wid, cb_tx_id="cb1", fee_usd=0.148356)
+
+        self.assertAlmostEqual(out["refunded_usd"], 2.85, places=2)
+        self.assertAlmostEqual(
+            float(pool.get_account(ALICE)["cash_usd"]), 499.85, places=2
+        )
+        row = pool.get_withdrawal(wid)
+        self.assertAlmostEqual(row["debited_usd"], 500.15, places=2)
+
+    def test_the_tester_pays_the_fee_so_books_match_the_venue(self) -> None:
+        """They receive what they asked for; their balance drops by more."""
+        req = pool.request_withdrawal(ALICE, 500.0)
+        wid = req["withdrawal_id"]
+        pool.decide_withdrawal(wid, admin_id=ADMIN, approve=True)
+        pool.mark_withdrawal_submitting(wid)
+        pool.mark_withdrawal_submitted(wid, cb_tx_id="cb1", fee_usd=0.15)
+
+        row = pool.get_withdrawal(wid)
+        self.assertEqual(row["amount_usd"], 500.0)          # they receive this
+        self.assertAlmostEqual(row["debited_usd"], 500.15)  # ledger lost this
+        self.assertAlmostEqual(
+            1000.0 - float(pool.get_account(ALICE)["cash_usd"]), 500.15, places=2
+        )
+
+    def test_the_address_is_frozen_at_request_time(self) -> None:
+        """Changing the payout wallet must not redirect a payout already in
+        flight — that is what a takeover would try."""
+        req = pool.request_withdrawal(ALICE, 500.0)
+        other = "0x" + "cd" * 20
+        pool.request_wallet_change(ALICE, other)
+        pool.decide_wallet_change(ALICE, admin_id=ADMIN, approve=True)
+        self.assertEqual(pool.get_withdrawal(req["withdrawal_id"])["to_address"],
+                         self.alice_wallet.lower())
+
+    def test_caps_bound_the_daily_total_not_just_one_request(self) -> None:
+        self._patch(bot_config, "POOL_MAX_USER_DAILY_WITHDRAWAL_USD", 600.0)
+        self.assertTrue(pool.request_withdrawal(ALICE, 500.0)["ok"])
+        second = pool.request_withdrawal(ALICE, 200.0)
+        self.assertEqual(second["reason"], "user_daily_cap")
+
+    def test_a_rejected_payout_does_not_count_against_the_cap(self) -> None:
+        self._patch(bot_config, "POOL_MAX_USER_DAILY_WITHDRAWAL_USD", 600.0)
+        req = pool.request_withdrawal(ALICE, 500.0)
+        pool.decide_withdrawal(req["withdrawal_id"], admin_id=ADMIN, approve=False)
+        self.assertTrue(pool.request_withdrawal(ALICE, 500.0)["ok"])
+
+    def test_the_global_cap_bounds_everyone_together(self) -> None:
+        self._patch(bot_config, "POOL_MAX_GLOBAL_DAILY_WITHDRAWAL_USD", 600.0)
+        pool.approve_user(BOB, admin_id=ADMIN)
+        pool.mark_wallet_verified(self._wallet(BOB))
+        pool.credit(BOB, 1000.0, admin_id=ADMIN, ref="seed-bob")
+
+        self.assertTrue(pool.request_withdrawal(ALICE, 500.0)["ok"])
+        self.assertEqual(
+            pool.request_withdrawal(BOB, 500.0)["reason"], "global_daily_cap"
+        )
+
+    def test_concurrent_requests_cannot_overdraw(self) -> None:
+        import threading
+
+        barrier = threading.Barrier(6)
+        out: list = []
+        lock = threading.Lock()
+
+        def worker() -> None:
+            barrier.wait()
+            r = pool.request_withdrawal(ALICE, 500.0)
+            with lock:
+                out.append(r)
+
+        threads = [threading.Thread(target=worker) for _ in range(6)]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join(timeout=30)
+
+        winners = [r for r in out if r.get("ok")]
+        self.assertEqual(len(winners), 1, out)
+        self.assertGreaterEqual(float(pool.get_account(ALICE)["cash_usd"]), 0.0)
+
+
 class LedgerRaceTests(PoolTestCase):
     """Concurrency, run concurrently.
 

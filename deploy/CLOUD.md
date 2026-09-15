@@ -332,6 +332,37 @@ It asks Coinbase whether it generated that address, and names the account and
 network. A `NO MATCH` is not proof the address is wrong, but it *is* reason to
 confirm in the Coinbase UI before anyone sends to it.
 
+#### Withdrawals
+
+`/withdraw 100` debits the tester immediately and queues a payout; you get a
+**Send / Reject** card. Approving only *queues* it — `watchdog._payout_sweep`
+does the sending within a minute, one payout at a time. Rejecting refunds in
+full.
+
+The thing to know before you touch it: **Coinbase offers no idempotency on
+sends.** It rejects the `idem` parameter outright, so a resend is a second
+real payment and nothing at the far end merges them. That shapes the rules:
+
+- **Never resend a payout by hand.** If a send ends ambiguously the queue
+  **halts itself** and the row goes to `unknown`. It is deliberately *not*
+  refunded and *not* retried — refunding could hand back money that already
+  left, retrying could send it twice, and Coinbase will not tell you which.
+  Check the USDC balance and the destination on-chain, then `/payouts resume`.
+- `/payouts` shows the queue and the halt state; `/payouts halt` stops it.
+- A payout's status **cannot be read back** from the API (single-transaction
+  GET 404s), so settlement is confirmed by the balance moving.
+
+Fees: the network fee is charged **on top** of the send and paid by the
+tester, so the pool's books stay level with the venue. A $3 reserve is held at
+request time and refunded once the real fee is known (measured at ~$0.148 on
+Ethereum). Minimum withdrawal is $50 because the fee is flat.
+
+**Currently every withdrawal refuses with `unverified`.** That is correct and
+deliberate: Coinbase reports no sender for deposits, so no wallet has been
+proven to belong to its tester yet, and paying an unproven address is how a
+hijacked Telegram account drains someone. It unblocks when the chain lookup
+lands.
+
 #### Credits are automatic
 
 You are no longer in the path. `watchdog._deposit_sweep` runs every 60s, reads

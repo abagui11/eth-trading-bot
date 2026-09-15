@@ -477,6 +477,59 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
             await context.bot.send_message(chat_id, f"Denied {target_id}.")
         return
 
+    if data.startswith(telegram_ui.CB_POOL_WITHDRAW_PREFIX):
+        if not pool.is_admin(user_id):
+            return
+        parts = data.split(":")
+        if len(parts) != 3 or parts[1] not in ("approve", "reject"):
+            return
+        try:
+            wid = int(parts[2])
+        except ValueError:
+            return
+
+        approve = parts[1] == "approve"
+        result = pool.decide_withdrawal(wid, admin_id=user_id, approve=approve)
+        if not result.get("ok"):
+            await context.bot.send_message(
+                chat_id, f"Withdrawal #{wid}: {result.get('reason')}"
+            )
+            return
+
+        target_id = int(result["telegram_id"])
+        amount = float(result["amount_usd"])
+        if approve:
+            # The watchdog does the sending; approving only queues it. Keeping
+            # the network call out of the callback means a Telegram retry
+            # cannot become a second payment.
+            await context.bot.send_message(
+                chat_id,
+                f"Withdrawal #{wid} approved — ${amount:,.2f} will go out on "
+                "the next sweep (within a minute).",
+            )
+            try:
+                await context.bot.send_message(
+                    target_id,
+                    f"Withdrawal #{wid} approved — ${amount:,.2f} is being "
+                    "sent now. You'll get a confirmation here shortly.",
+                )
+            except Exception:
+                logger.exception("Withdrawal approval DM failed for %s", target_id)
+        else:
+            await context.bot.send_message(
+                chat_id, f"Withdrawal #{wid} rejected and refunded in full."
+            )
+            try:
+                await context.bot.send_message(
+                    target_id,
+                    f"Withdrawal #{wid} wasn't sent, and ${amount:,.2f} has "
+                    "been returned to your balance in full.\n\n"
+                    "Ask an admin if you're not sure why.",
+                )
+            except Exception:
+                logger.exception("Withdrawal rejection DM failed for %s", target_id)
+        return
+
     if data.startswith(telegram_ui.CB_POOL_WALLET_PREFIX):
         if not pool.is_admin(user_id):
             return
@@ -1017,6 +1070,7 @@ async def cmd_help(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
             "Commands:\n"
             "/portfolio — your cash, positions, and P&L\n"
             "/deposit — fund your account (sizes stay small while we prove the strategy)\n"
+            "/withdraw — take money out, back to your registered wallet\n"
             "/wallet — the address you fund from and are paid back to\n"
             "/start — welcome + how risk works\n"
             "/help — this message\n\n"
@@ -1409,6 +1463,157 @@ async def cmd_wallet(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
             logger.exception("Wallet-change admin ping failed for %s", admin_id)
 
 
+async def cmd_withdraw(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """/withdraw [amount] — take money out, back to the registered wallet."""
+    user = update.effective_user
+    if user is None or update.message is None:
+        return
+    if not bot_config.POOL_ENABLED or not pool.is_approved(user.id):
+        await _handle_gated_user(update, context)
+        return
+
+    account = pool.get_account(user.id)
+    if account is None:
+        await _reply(update, "No account yet — /deposit to get started.")
+        return
+
+    available = pool.withdrawable_usd(user.id)
+    maximum = pool.max_withdrawal_usd(user.id)
+    reserved = float(account["reserved_usd"])
+    args = context.args or []
+
+    if not args:
+        lines = [
+            "*Withdraw*",
+            "",
+            f"Available now: *${available:,.2f}*",
+        ]
+        if reserved > 0:
+            lines.append(
+                f"In open trades: ${reserved:,.2f} — free once those close."
+            )
+        lines += [
+            f"Most you can take: *${maximum:,.2f}*",
+            "",
+            f"Minimum ${float(bot_config.POOL_MIN_WITHDRAWAL_USD):,.0f}. The "
+            "network fee comes out of your balance on top of the amount, so "
+            "you receive exactly what you ask for.",
+            "",
+            "Funds go back to the wallet you registered, and nowhere else "
+            "(/wallet to check).",
+            "",
+            f"`/withdraw 100`  or  `/withdraw {maximum:.2f}` for the maximum",
+        ]
+        await _reply(update, "\n".join(lines), markdown=True)
+        return
+
+    try:
+        amount = round(float(str(args[0]).lstrip("$").replace(",", "")), 2)
+    except ValueError:
+        await _reply(update, "Usage: /withdraw 100")
+        return
+
+    result = pool.request_withdrawal(user.id, amount)
+    if not result.get("ok"):
+        await _reply(update, _withdrawal_refusal(result, maximum))
+        return
+
+    wid = int(result["withdrawal_id"])
+    await _reply(
+        update,
+        f"Withdrawal #{wid} queued: *${amount:,.2f}*\n"
+        f"To: `{result['address']}`\n\n"
+        f"${float(result['debited_usd']):,.2f} is held from your balance "
+        "(the extra covers the network fee; anything unused comes back).\n\n"
+        "You'll get a message here the moment it's sent.",
+        markdown=True,
+    )
+
+    for admin in pool.admin_ids():
+        try:
+            await context.bot.send_message(
+                admin,
+                f"Withdrawal #{wid}: *${amount:,.2f}* for "
+                f"`{user.id}` ({user.username or 'no handle'})\n"
+                f"To: `{result['address']}`\n"
+                f"Balance after hold: ${float(result['cash_usd']):,.2f}",
+                parse_mode="Markdown",
+                reply_markup=telegram_ui.pool_admin_withdrawal_keyboard(wid),
+            )
+        except Exception:
+            logger.exception("Withdrawal admin card failed for %s", admin)
+
+
+def _withdrawal_refusal(result: dict, maximum: float) -> str:
+    """Say why in terms the tester can act on, not the internal reason code."""
+    reason = result.get("reason")
+    if reason == "below_minimum":
+        return (f"Minimum withdrawal is ${float(result['minimum_usd']):,.0f} — "
+                "the network fee is flat, so smaller amounts lose too much to it.")
+    if reason == "insufficient_available":
+        return (
+            f"You have ${float(result['available_usd']):,.2f} available, and the "
+            f"most you can withdraw is ${float(result.get('max_usd') or 0):,.2f} "
+            "once the network fee is covered.\n\n"
+            "Money committed to open trades frees up when they close."
+        )
+    if reason in ("unverified", "no_wallet", "wallet_required"):
+        return (
+            "Your payout wallet isn't confirmed yet. We only send funds back to "
+            "a wallet we've seen a deposit arrive from — that's what stops "
+            "anyone who got into your Telegram redirecting your money.\n\n"
+            "/wallet to check."
+        )
+    if reason == "wallet_cooldown":
+        return ("Your payout address changed recently, so payouts are on hold "
+                "briefly. This protects you if the change wasn't yours.")
+    if reason == "user_daily_cap":
+        return (f"That would pass the daily limit "
+                f"(${float(result['cap_usd']):,.0f}). "
+                f"${float(result['already_usd']):,.2f} already went out today.")
+    if reason == "global_daily_cap":
+        return "The pool's daily withdrawal limit is reached. Try tomorrow."
+    if reason == "above_max":
+        return (f"Single withdrawals are capped at "
+                f"${float(result['maximum_usd']):,.0f}.")
+    if reason in ("halted", "disabled"):
+        return ("Withdrawals are paused while we check something. Your balance "
+                "is untouched and an admin has been alerted.")
+    return f"Couldn't queue that ({reason})."
+
+
+async def cmd_payouts(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Admin: /payouts [resume] — payout queue state and the halt switch."""
+    user = update.effective_user
+    if user is None or update.message is None or not pool.is_admin(user.id):
+        return
+
+    args = context.args or []
+    if args and str(args[0]).lower() == "resume":
+        pool.resume_payouts()
+        await _reply(update, "Payouts resumed.")
+        return
+    if args and str(args[0]).lower() == "halt":
+        pool.halt_payouts(f"halted by admin {user.id}")
+        await _reply(update, "Payouts halted.")
+        return
+
+    halted = pool.payouts_halted()
+    lines = [f"Payouts: {'HALTED — ' + halted if halted else 'running'}", ""]
+    for status in ("requested", "approved", "submitting", "submitted", "unknown"):
+        rows = pool.pending_withdrawals(status)
+        if rows:
+            lines.append(f"{status}: {len(rows)}")
+            for r in rows[:5]:
+                lines.append(
+                    f"   #{r['id']} ${float(r['amount_usd']):,.2f} → {r['telegram_id']}"
+                )
+    lines.append("")
+    lines.append(f"Out in last 24h: ${pool.withdrawn_since(None):,.2f}")
+    lines.append("\n/payouts halt  |  /payouts resume")
+    await _reply(update, "\n".join(lines))
+
+
 async def cmd_assign(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Admin: /assign <coinbase_tx_id> <telegram_id> — claim an orphan deposit.
 
@@ -1755,6 +1960,8 @@ def build_application() -> Application:
     app.add_handler(CommandHandler("deposit", cmd_deposit))
     app.add_handler(CommandHandler("wallet", cmd_wallet))
     app.add_handler(CommandHandler("assign", cmd_assign))
+    app.add_handler(CommandHandler("withdraw", cmd_withdraw))
+    app.add_handler(CommandHandler("payouts", cmd_payouts))
     app.add_handler(CommandHandler("credit", cmd_credit))
     app.add_handler(CommandHandler("debit", cmd_debit))
     app.add_handler(CommandHandler("chart", cmd_chart))

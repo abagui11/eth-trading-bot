@@ -748,6 +748,139 @@ _POOL_RECON_INTERVAL_SEC = 600
 _pool_last_recon = 0.0
 
 
+def _payout_sweep() -> None:
+    """Send one approved payout per pass. One, deliberately.
+
+    Coinbase rejects `idem` on sends, so there is no venue-side idempotency:
+    a resend is a second real payment and nothing at the far end collapses the
+    two. That removes the usual safety net, so this is built to fail closed —
+    one payout in flight at a time, intent recorded before the call, and an
+    ambiguous outcome halts the queue for a human rather than guessing.
+    """
+    import notify
+    import pool
+
+    if not bot_config.POOL_ENABLED or not bot_config.POOL_PAYOUTS_ENABLED:
+        return
+    if pool.payouts_halted():
+        return
+
+    queued = pool.pending_withdrawals("approved")
+    if not queued:
+        return
+    row = queued[0]
+    wid = int(row["id"])
+    uid = int(row["telegram_id"])
+    amount = float(row["amount_usd"])
+    address = str(row["to_address"])
+
+    try:
+        import payouts
+    except Exception:
+        logger.exception("payout sweep: client unavailable")
+        return
+
+    # Claim the row before touching the network. If the process dies after
+    # this, 'submitting' is the only sign a payment might exist.
+    if not pool.mark_withdrawal_submitting(wid):
+        return
+
+    try:
+        account = payouts.usdc_account()
+    except Exception as exc:
+        # Nothing was sent, so this is safely reversible.
+        pool.mark_withdrawal_failed(wid, reason=f"could not read account: {exc}")
+        _notify_payout_failed(uid, wid, amount, str(exc))
+        return
+
+    if account["balance"] < amount:
+        pool.mark_withdrawal_failed(
+            wid, reason=f"venue balance ${account['balance']:.2f} < ${amount:.2f}"
+        )
+        _notify_payout_failed(uid, wid, amount, "insufficient venue balance")
+        return
+
+    try:
+        sent = payouts.send(
+            account_id=account["id"], to_address=address,
+            amount_usd=amount, ref=f"withdrawal:{wid}",
+        )
+    except payouts.PayoutError as exc:
+        if exc.submitted:
+            # The request reached Coinbase and we do not know the outcome.
+            # Refunding might hand back money that left; retrying might send
+            # it twice. Neither is acceptable, so a human reconciles.
+            pool.mark_withdrawal_unknown(wid, reason=str(exc))
+            try:
+                notify.send_pool_admin_alert(
+                    f"PAYOUTS HALTED — withdrawal #{wid} outcome UNKNOWN.\n"
+                    f"${amount:,.2f} to {address}\n{str(exc)[:200]}\n\n"
+                    "The send may or may not have happened, and Coinbase "
+                    "offers no way to ask. Check the USDC balance and the "
+                    "destination on-chain before doing anything.\n"
+                    "Do NOT resend. Clear with /payouts resume once settled."
+                )
+            except Exception:
+                logger.exception("unknown-payout alert failed")
+            return
+        pool.mark_withdrawal_failed(wid, reason=str(exc))
+        _notify_payout_failed(uid, wid, amount, str(exc))
+        return
+    except Exception as exc:
+        pool.mark_withdrawal_unknown(wid, reason=f"unexpected: {exc}")
+        return
+
+    result = pool.mark_withdrawal_submitted(
+        wid, cb_tx_id=sent["id"], fee_usd=sent["fee_usd"], txid=sent.get("txid"),
+    )
+    fee = float(result.get("fee_usd") or 0)
+    refund = float(result.get("refunded_usd") or 0)
+
+    lines = [
+        f"Withdrawal sent: ${amount:,.2f} USDC.",
+        f"To: {address}",
+        f"Network fee: ${fee:,.2f}.",
+    ]
+    if refund >= 0.01:
+        lines.append(f"Fee reserve returned: ${refund:,.2f}.")
+    lines.append(
+        "It is on its way — Coinbase releases it within about 10 minutes, "
+        "then it settles on Ethereum."
+    )
+    try:
+        notify.send_pool_dm(uid, "\n".join(lines))
+    except Exception:
+        logger.exception("payout DM failed for %s", uid)
+
+    try:
+        notify.send_pool_admin_alert(
+            f"Paid out ${amount:,.2f} to {uid} (#{wid}), fee ${fee:,.2f}.\n"
+            f"coinbase tx {sent['id']}"
+        )
+    except Exception:
+        logger.exception("payout admin FYI failed")
+
+
+def _notify_payout_failed(uid: int, wid: int, amount: float, why: str) -> None:
+    import notify
+
+    try:
+        notify.send_pool_dm(
+            uid,
+            f"Withdrawal #{wid} could not be sent, so nothing left your "
+            f"balance — ${amount:,.2f} has been returned in full.\n\n"
+            "Nothing is lost; try again or ask an admin.",
+        )
+    except Exception:
+        logger.exception("payout failure DM failed for %s", uid)
+    try:
+        notify.send_pool_admin_alert(
+            f"Withdrawal #{wid} FAILED and was refunded: {why[:200]}"
+        )
+    except Exception:
+        logger.exception("payout failure alert failed")
+
+
 def _deposit_sweep() -> None:
     """Credit arrived deposits and tell the tester, without waiting on anyone.
 
@@ -866,6 +999,7 @@ def _pool_sweep(spots: dict[str, float] | None = None) -> None:
         )
 
     _deposit_sweep()
+    _payout_sweep()
 
     global _pool_last_recon
     if config.EXECUTION_MODE != "live":

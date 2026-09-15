@@ -198,6 +198,33 @@ CREATE TABLE IF NOT EXISTS pool_chain_deposits (
 CREATE INDEX IF NOT EXISTS pool_chain_deposits_txid
     ON pool_chain_deposits (txid);
 
+-- Payouts, with the money debited at request time and the venue leg tracked
+-- separately. Coinbase offers no idempotency on sends, so the row has to
+-- record that we were ABOUT to send before we send: if the process dies mid
+-- call, `submitting` is the only evidence that a payment may exist, and the
+-- alternative to that evidence is resending and paying twice.
+CREATE TABLE IF NOT EXISTS pool_withdrawals (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    telegram_id INTEGER NOT NULL,
+    amount_usd REAL NOT NULL,           -- what the tester receives
+    fee_usd REAL NOT NULL DEFAULT 0,    -- network fee, charged on top
+    debited_usd REAL NOT NULL,          -- amount + fee, what the ledger took
+    to_address TEXT NOT NULL,           -- frozen at request time
+    status TEXT NOT NULL,               -- see _WITHDRAWAL_STATES
+    cb_tx_id TEXT,
+    txid TEXT,
+    requested_at TEXT NOT NULL,
+    approved_at TEXT,
+    approved_by INTEGER,
+    submitted_at TEXT,
+    settled_at TEXT,
+    note TEXT
+);
+CREATE INDEX IF NOT EXISTS pool_withdrawals_user
+    ON pool_withdrawals (telegram_id, requested_at);
+CREATE INDEX IF NOT EXISTS pool_withdrawals_status
+    ON pool_withdrawals (status);
+
 CREATE TABLE IF NOT EXISTS pool_meta (
     key TEXT PRIMARY KEY,
     value TEXT NOT NULL
@@ -1224,6 +1251,320 @@ def assign_chain_deposit(
     )
     return {"ok": True, "telegram_id": telegram_id, "amount_usd": amount,
             "cash_usd": result.get("cash_usd")}
+
+
+# ---------------------------------------------------------------------------
+# Withdrawals
+# ---------------------------------------------------------------------------
+
+# requested -> approved -> submitting -> submitted -> settled
+#                    \-> rejected          \-> unknown (needs a human)
+#                                          \-> failed (refunded)
+_PAYOUT_HALT_KEY = "payouts_halted"
+
+
+def max_withdrawal_usd(telegram_id: int) -> float:
+    """The largest amount this tester could ask for and have it clear.
+
+    Available cash less a fee reserve, because the network fee is charged on
+    top of the send: quoting the raw balance would produce a "withdraw max"
+    that the balance cannot actually cover, failing at the exact moment
+    someone is trying to take their money out.
+    """
+    available = withdrawable_usd(telegram_id)
+    reserve = float(bot_config.POOL_WITHDRAWAL_FEE_RESERVE_USD)
+    return round(max(min(available - reserve,
+                         float(bot_config.POOL_MAX_WITHDRAWAL_USD)), 0.0), 2)
+
+
+def withdrawn_since(telegram_id: int | None, hours: float = 24.0) -> float:
+    """Sum of payouts not in a refunded state over a window, for the caps."""
+    cutoff = (datetime.now(timezone.utc) - timedelta(hours=hours)).strftime(
+        "%Y-%m-%dT%H:%M:%SZ"
+    )
+    sql = (
+        "SELECT COALESCE(SUM(debited_usd), 0) AS total FROM pool_withdrawals "
+        "WHERE requested_at >= ? AND status NOT IN ('rejected', 'failed')"
+    )
+    params: list[Any] = [cutoff]
+    if telegram_id is not None:
+        sql += " AND telegram_id = ?"
+        params.append(telegram_id)
+    with _connect() as conn:
+        row = conn.execute(sql, params).fetchone()
+    return round(float(row["total"]), 2)
+
+
+def payouts_halted() -> str | None:
+    return get_meta(_PAYOUT_HALT_KEY)
+
+
+def halt_payouts(reason: str) -> None:
+    """Stop the payout queue. Used when an outcome is unknown.
+
+    With no way to ask Coinbase whether a send already happened, continuing
+    past an ambiguous failure is guessing with someone else's money.
+    """
+    set_meta(_PAYOUT_HALT_KEY, reason)
+    logger.error("pool: PAYOUTS HALTED — %s", reason)
+
+
+def resume_payouts() -> None:
+    with _connect() as conn:
+        conn.execute("DELETE FROM pool_meta WHERE key = ?", (_PAYOUT_HALT_KEY,))
+    logger.warning("pool: payouts resumed by operator")
+
+
+def request_withdrawal(telegram_id: int, amount_usd: float) -> dict[str, Any]:
+    """Debit the tester and queue a payout. The debit happens HERE.
+
+    Taking the money at request time, inside the same transaction that checks
+    the balance, is what stops two requests spending one balance. The debit is
+    ``amount + fee reserve``; the reserve is trued up to the real fee once
+    Coinbase reports it, and refunded in full if the payout never leaves.
+    """
+    amount_usd = round(float(amount_usd), 2)
+    minimum = float(bot_config.POOL_MIN_WITHDRAWAL_USD)
+
+    halted = payouts_halted()
+    if halted:
+        return {"ok": False, "reason": "halted", "detail": halted}
+    if not bot_config.POOL_PAYOUTS_ENABLED:
+        return {"ok": False, "reason": "disabled"}
+    if not is_approved(telegram_id):
+        return {"ok": False, "reason": "not_approved"}
+    if amount_usd < minimum:
+        return {"ok": False, "reason": "below_minimum", "minimum_usd": minimum}
+    if amount_usd > float(bot_config.POOL_MAX_WITHDRAWAL_USD):
+        return {"ok": False, "reason": "above_max",
+                "maximum_usd": float(bot_config.POOL_MAX_WITHDRAWAL_USD)}
+
+    target = payout_target(telegram_id)
+    if not target.get("ok"):
+        return {"ok": False, "reason": target.get("reason", "no_payout_address"),
+                "detail": target}
+
+    reserve = float(bot_config.POOL_WITHDRAWAL_FEE_RESERVE_USD)
+    debit_total = round(amount_usd + reserve, 2)
+
+    # Caps bound the blast radius of a bug or a stolen account, so they are
+    # checked against what has already gone out today, not just this request.
+    user_today = withdrawn_since(telegram_id)
+    if user_today + debit_total > float(bot_config.POOL_MAX_USER_DAILY_WITHDRAWAL_USD):
+        return {"ok": False, "reason": "user_daily_cap",
+                "already_usd": user_today,
+                "cap_usd": float(bot_config.POOL_MAX_USER_DAILY_WITHDRAWAL_USD)}
+    global_today = withdrawn_since(None)
+    if global_today + debit_total > float(
+        bot_config.POOL_MAX_GLOBAL_DAILY_WITHDRAWAL_USD
+    ):
+        return {"ok": False, "reason": "global_daily_cap",
+                "already_usd": global_today,
+                "cap_usd": float(bot_config.POOL_MAX_GLOBAL_DAILY_WITHDRAWAL_USD)}
+
+    address = str(target["address"])
+    with _write_txn() as conn:
+        row = conn.execute(
+            f"SELECT {_AVAILABLE_SQL} AS available FROM pool_accounts "
+            "WHERE telegram_id = ?",
+            (telegram_id,),
+        ).fetchone()
+        if row is None:
+            return {"ok": False, "reason": "no_account"}
+        available = float(row["available"])
+        if debit_total > available + 1e-9:
+            return {"ok": False, "reason": "insufficient_available",
+                    "available_usd": round(available, 2),
+                    "max_usd": max(round(available - reserve, 2), 0.0),
+                    "fee_reserve_usd": reserve}
+
+        cur = conn.execute(
+            "INSERT INTO pool_withdrawals (telegram_id, amount_usd, fee_usd, "
+            "debited_usd, to_address, status, requested_at) "
+            "VALUES (?, ?, ?, ?, ?, 'requested', ?)",
+            (telegram_id, amount_usd, reserve, debit_total, address, _now()),
+        )
+        wid = int(cur.lastrowid)
+        booked = _apply_event(
+            conn, telegram_id, kind="withdrawal", amount_usd=-debit_total,
+            ref=f"withdrawal:{wid}",
+            note=f"withdrawal #{wid} to {address[:10]}…",
+        )
+        if not booked:
+            raise RuntimeError(f"withdrawal {wid} collided on its own ref")
+
+    logger.info(
+        "pool: withdrawal #%s user %s $%.2f (+$%.2f reserve) to %s",
+        wid, telegram_id, amount_usd, reserve, address,
+    )
+    return {"ok": True, "withdrawal_id": wid, "amount_usd": amount_usd,
+            "fee_reserve_usd": reserve, "debited_usd": debit_total,
+            "address": address,
+            "cash_usd": float((get_account(telegram_id) or {}).get("cash_usd") or 0)}
+
+
+def get_withdrawal(withdrawal_id: int) -> dict[str, Any] | None:
+    with _connect() as conn:
+        row = conn.execute(
+            "SELECT * FROM pool_withdrawals WHERE id = ?", (withdrawal_id,)
+        ).fetchone()
+    return dict(row) if row else None
+
+
+def pending_withdrawals(status: str = "approved") -> list[dict[str, Any]]:
+    with _connect() as conn:
+        rows = conn.execute(
+            "SELECT * FROM pool_withdrawals WHERE status = ? ORDER BY id",
+            (status,),
+        ).fetchall()
+    return [dict(r) for r in rows]
+
+
+def decide_withdrawal(
+    withdrawal_id: int, *, admin_id: int, approve: bool, note: str | None = None
+) -> dict[str, Any]:
+    """Approve a queued payout for sending, or reject and refund it."""
+    with _write_txn() as conn:
+        row = conn.execute(
+            "SELECT * FROM pool_withdrawals WHERE id = ?", (withdrawal_id,)
+        ).fetchone()
+        if row is None:
+            return {"ok": False, "reason": "not_found"}
+        if str(row["status"]) != "requested":
+            return {"ok": False, "reason": "already_decided",
+                    "status": row["status"]}
+
+        if approve:
+            conn.execute(
+                "UPDATE pool_withdrawals SET status = 'approved', approved_at = ?, "
+                "approved_by = ?, note = ? WHERE id = ?",
+                (_now(), admin_id, note, withdrawal_id),
+            )
+        else:
+            conn.execute(
+                "UPDATE pool_withdrawals SET status = 'rejected', approved_at = ?, "
+                "approved_by = ?, note = ? WHERE id = ?",
+                (_now(), admin_id, note, withdrawal_id),
+            )
+            _apply_event(
+                conn, int(row["telegram_id"]), kind="adjustment",
+                amount_usd=float(row["debited_usd"]),
+                ref=f"withdrawal:{withdrawal_id}:refund",
+                note=f"withdrawal #{withdrawal_id} rejected",
+            )
+
+    logger.info(
+        "pool: withdrawal #%s %s by %s", withdrawal_id,
+        "approved" if approve else "rejected", admin_id,
+    )
+    return {"ok": True, "withdrawal_id": withdrawal_id,
+            "telegram_id": int(row["telegram_id"]),
+            "amount_usd": float(row["amount_usd"]),
+            "approved": approve}
+
+
+def mark_withdrawal_submitting(withdrawal_id: int) -> bool:
+    """Record that a send is ABOUT to happen. Must precede the API call.
+
+    Without this row there is no evidence a payment might exist if the process
+    dies mid-call, and the only alternative to evidence is resending — which,
+    with no venue-side idempotency, pays twice.
+    """
+    with _write_txn() as conn:
+        cur = conn.execute(
+            "UPDATE pool_withdrawals SET status = 'submitting', submitted_at = ? "
+            "WHERE id = ? AND status = 'approved'",
+            (_now(), withdrawal_id),
+        )
+        return cur.rowcount > 0
+
+
+def mark_withdrawal_submitted(
+    withdrawal_id: int, *, cb_tx_id: str, fee_usd: float, txid: str | None = None
+) -> dict[str, Any]:
+    """The venue accepted it. True up the fee reserve against the real fee."""
+    with _write_txn() as conn:
+        row = conn.execute(
+            "SELECT * FROM pool_withdrawals WHERE id = ?", (withdrawal_id,)
+        ).fetchone()
+        if row is None:
+            return {"ok": False, "reason": "not_found"}
+
+        amount = float(row["amount_usd"])
+        reserved = float(row["debited_usd"])
+        actual = round(amount + float(fee_usd), 2)
+        refund = round(reserved - actual, 2)
+
+        conn.execute(
+            "UPDATE pool_withdrawals SET status = 'submitted', cb_tx_id = ?, "
+            "txid = ?, fee_usd = ?, debited_usd = ? WHERE id = ?",
+            (cb_tx_id, txid, float(fee_usd), actual, withdrawal_id),
+        )
+        if abs(refund) >= 0.01:
+            # The reserve is headroom for a gas spike, not a charge. Whatever
+            # was not needed goes straight back.
+            _apply_event(
+                conn, int(row["telegram_id"]), kind="adjustment",
+                amount_usd=refund,
+                ref=f"withdrawal:{withdrawal_id}:fee_trueup",
+                note=f"fee reserve trued up to ${fee_usd:.2f}",
+            )
+    logger.info(
+        "pool: withdrawal #%s submitted (cb %s, fee $%.4f, refund $%.2f)",
+        withdrawal_id, cb_tx_id, fee_usd, refund,
+    )
+    return {"ok": True, "refunded_usd": refund, "fee_usd": float(fee_usd)}
+
+
+def mark_withdrawal_settled(withdrawal_id: int, *, txid: str | None = None) -> None:
+    with _write_txn() as conn:
+        conn.execute(
+            "UPDATE pool_withdrawals SET status = 'settled', settled_at = ?, "
+            "txid = COALESCE(?, txid) WHERE id = ?",
+            (_now(), txid, withdrawal_id),
+        )
+
+
+def mark_withdrawal_failed(withdrawal_id: int, *, reason: str) -> dict[str, Any]:
+    """The venue refused it and no money moved. Give the tester theirs back."""
+    with _write_txn() as conn:
+        row = conn.execute(
+            "SELECT * FROM pool_withdrawals WHERE id = ?", (withdrawal_id,)
+        ).fetchone()
+        if row is None:
+            return {"ok": False, "reason": "not_found"}
+        if str(row["status"]) in ("failed", "rejected"):
+            return {"ok": False, "reason": "already_refunded"}
+
+        conn.execute(
+            "UPDATE pool_withdrawals SET status = 'failed', note = ? WHERE id = ?",
+            (reason[:300], withdrawal_id),
+        )
+        _apply_event(
+            conn, int(row["telegram_id"]), kind="adjustment",
+            amount_usd=float(row["debited_usd"]),
+            ref=f"withdrawal:{withdrawal_id}:refund",
+            note=f"payout failed: {reason[:120]}",
+        )
+    logger.warning("pool: withdrawal #%s failed and refunded — %s",
+                   withdrawal_id, reason)
+    return {"ok": True, "telegram_id": int(row["telegram_id"]),
+            "refunded_usd": float(row["debited_usd"])}
+
+
+def mark_withdrawal_unknown(withdrawal_id: int, *, reason: str) -> None:
+    """The send may or may not have happened. Do NOT refund, do NOT retry.
+
+    Refunding could hand back money that already left, and retrying could send
+    it twice — Coinbase will not tell us which. The money stays debited, the
+    queue halts, and a human reconciles against the balance.
+    """
+    with _write_txn() as conn:
+        conn.execute(
+            "UPDATE pool_withdrawals SET status = 'unknown', note = ? WHERE id = ?",
+            (reason[:300], withdrawal_id),
+        )
+    halt_payouts(f"withdrawal #{withdrawal_id} outcome unknown: {reason[:120]}")
 
 
 def get_deposit_request(request_id: int) -> dict[str, Any] | None:

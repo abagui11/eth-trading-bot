@@ -194,6 +194,7 @@ def format_fund_result(result: dict) -> str:
 CB_POOL_USER_PREFIX = "pooluser:"      # pooluser:approve:<id> / pooluser:deny:<id>
 CB_POOL_DEPOSIT_PREFIX = "pooldep:"    # pooldep:credit:<req_id> / pooldep:deny:<req_id>
 CB_POOL_WALLET_PREFIX = "poolwal:"     # poolwal:approve:<row_id> / poolwal:reject:<row_id>
+CB_POOL_WITHDRAW_PREFIX = "poolwd:"    # poolwd:approve:<id> / poolwd:reject:<id>
 CB_POOL_PORTFOLIO = "pool:portfolio"
 CB_POOL_DEPOSIT = "pool:deposit"
 
@@ -253,6 +254,23 @@ def pool_admin_wallet_keyboard(request_id: int) -> InlineKeyboardMarkup:
                 ),
                 InlineKeyboardButton(
                     "Reject", callback_data=f"{CB_POOL_WALLET_PREFIX}reject:{request_id}"
+                ),
+            ]
+        ]
+    )
+
+
+def pool_admin_withdrawal_keyboard(withdrawal_id: int) -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(
+        [
+            [
+                InlineKeyboardButton(
+                    "Send",
+                    callback_data=f"{CB_POOL_WITHDRAW_PREFIX}approve:{withdrawal_id}",
+                ),
+                InlineKeyboardButton(
+                    "Reject",
+                    callback_data=f"{CB_POOL_WITHDRAW_PREFIX}reject:{withdrawal_id}",
                 ),
             ]
         ]
