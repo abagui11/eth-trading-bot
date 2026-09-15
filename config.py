@@ -28,7 +28,10 @@ def overlay_dotenv_keys(env_path: Path, environ: dict[str, str], *keys: str) -> 
             environ[key] = raw
 
 
-overlay_dotenv_keys(_ENV_PATH, os.environ, "COINBASE_CDP_PRIVATE_KEY")
+overlay_dotenv_keys(
+    _ENV_PATH, os.environ,
+    "COINBASE_CDP_PRIVATE_KEY", "COINBASE_TRANSFER_PRIVATE_KEY",
+)
 
 _REQUIRED_KEYS = (
     "ANTHROPIC_API_KEY",
@@ -166,6 +169,13 @@ if EXECUTION_MODE not in ("off", "shadow", "live"):
 # CDP API key: View + Trade permissions ONLY — never Transfer.
 COINBASE_CDP_API_KEY_NAME: str | None = _optional("COINBASE_CDP_API_KEY_NAME")
 COINBASE_CDP_PRIVATE_KEY: str | None = _optional("COINBASE_CDP_PRIVATE_KEY")
+
+# A SECOND key, holding transfer rights and nothing else. Kept apart from the
+# trading key on purpose: the trading key can trade but not withdraw, this one
+# can withdraw but not trade, so neither credential alone can both lose money
+# in the market and move it off the venue. Only the payout path reads these.
+COINBASE_TRANSFER_KEY_NAME: str | None = _optional("COINBASE_TRANSFER_KEY_NAME")
+COINBASE_TRANSFER_PRIVATE_KEY: str | None = _optional("COINBASE_TRANSFER_PRIVATE_KEY")
 # Unused since the US-futures rework (kept so old .env files still load).
 COINBASE_DERIV_API_URL: str | None = _optional("COINBASE_DERIV_API_URL")
 
