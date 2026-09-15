@@ -194,20 +194,31 @@ def send(
     account_id: str,
     to_address: str,
     amount_usd: float,
-    idem: str,
+    ref: str,
     network: str = "ethereum",
-    description: str | None = None,
 ) -> dict[str, Any]:
     """Pay `amount_usd` USDC out to `to_address`. Returns Coinbase's record.
 
-    ``idem`` is our reference for the payout and must be **stable for the
-    logical withdrawal**, not generated per attempt: it is what makes a retry
-    after an ambiguous failure safe. Pass the withdrawal request id. It is
-    hashed into a UUID by `idem_uuid` because Coinbase requires that format.
+    **There is no venue-side idempotency.** Coinbase rejects `idem` on this
+    endpoint outright (`Invalid input parameter. Param: Idem`) and only
+    accepts the bare `type/to/amount/currency/network` body, as does
+    `description`. That is not a detail -- it means a resend is a second
+    payment with nothing at the far end to collapse it, so **this must never
+    be retried automatically**. `ref` is ours, for the log and the ledger
+    only; it is not sent.
 
-    The amount is sent as a string. Floats are not safe to hand a payments API
-    -- 0.1 + 0.2 is the cautionary tale, and here the rounding error is
-    somebody's money.
+    The caller's obligation, therefore: record the intent to pay *before*
+    calling this, and on an ambiguous failure (`PayoutError.submitted`)
+    reconcile against the balance rather than calling again.
+
+    `amount_usd` is what the recipient gets. The account is debited more than
+    that: the network fee is added on top, so the returned `debited_usd` is
+    the real cost and the one the ledger has to charge. Measured at $0.148 on
+    a $2.00 Ethereum send -- flat rather than proportional, so it is a large
+    share of a small withdrawal and rounding error on a big one.
+
+    The amount goes out as a string. Floats are not safe to hand a payments
+    API, and here the rounding error is somebody's money.
     """
     if amount_usd <= 0:
         raise PayoutError(f"refusing to send {amount_usd}")
@@ -218,29 +229,36 @@ def send(
         "amount": f"{amount_usd:.2f}",
         "currency": "USDC",
         "network": network,
-        "idem": idem_uuid(idem),
-        "description": description or "EVA withdrawal",
     }
     logger.info(
-        "payout: sending $%.2f USDC to %s (idem %s)", amount_usd, to_address, idem
+        "payout: sending $%.2f USDC to %s (ref %s)", amount_usd, to_address, ref
     )
     res = _request(
         "POST", f"/api/v2/accounts/{account_id}/transactions", body=body
     )
     data = res.get("data") or {}
     net = data.get("network") or {}
+    debited = abs(float((data.get("amount") or {}).get("amount") or 0))
     return {
         "id": str(data.get("id") or ""),
         "status": str(data.get("status") or ""),
         "network_status": str(net.get("status") or ""),
         "txid": net.get("hash"),
-        "amount": float((data.get("amount") or {}).get("amount") or 0),
+        "sent_usd": float(amount_usd),
+        "debited_usd": debited,
+        "fee_usd": round(max(debited - float(amount_usd), 0.0), 6),
         "raw": data,
     }
 
 
 def get_transaction(account_id: str, tx_id: str) -> dict[str, Any]:
-    """Poll one transfer, to follow it from `pending` to on-chain."""
+    """Read one transfer back. **404s for this key type — do not rely on it.**
+
+    Kept because the endpoint is the documented one and may open up, but every
+    read of it currently fails, so a payout's progress cannot be followed this
+    way. Confirmation has to come from the balance moving or from a chain
+    lookup of the destination.
+    """
     res = _request("GET", f"/api/v2/accounts/{account_id}/transactions/{tx_id}")
     data = res.get("data") or {}
     net = data.get("network") or {}
@@ -251,6 +269,15 @@ def get_transaction(account_id: str, tx_id: str) -> dict[str, Any]:
         "txid": net.get("hash"),
         "raw": data,
     }
+
+
+def usdc_balance() -> float:
+    """Spot USDC, the pot payouts leave from.
+
+    With transaction reads unavailable, a balance that moved by the expected
+    amount is the evidence a send actually happened.
+    """
+    return usdc_account()["balance"]
 
 
 def new_idem() -> str:

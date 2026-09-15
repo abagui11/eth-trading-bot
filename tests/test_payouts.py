@@ -139,27 +139,58 @@ class SendGuardTests(unittest.TestCase):
         for amount in (0, -1, -0.01):
             with self.assertRaises(payouts.PayoutError):
                 payouts.send(account_id="a", to_address="0x1",
-                             amount_usd=amount, idem="i")
+                             amount_usd=amount, ref="r")
 
     def test_the_amount_goes_out_as_a_fixed_string(self) -> None:
         """Floats are not safe to hand a payments API, and the rounding error
         here would be somebody's money."""
+        seen = self._send(amount_usd=10.005)
+        self.assertEqual(seen["amount"], "10.01")
+        self.assertIsInstance(seen["amount"], str)
+        self.assertEqual(seen["type"], "send")
+        self.assertEqual(seen["currency"], "USDC")
+
+    def test_no_idem_is_sent_because_coinbase_rejects_it(self) -> None:
+        """Measured, not assumed: every body carrying `idem` came back
+        'Invalid input parameter. Param: Idem', and the bare body succeeded.
+        Sending one again would fail every withdrawal."""
+        seen = self._send()
+        self.assertNotIn("idem", seen)
+        self.assertNotIn("description", seen)
+        self.assertEqual(
+            set(seen), {"type", "to", "amount", "currency", "network"}
+        )
+
+    @staticmethod
+    def _send(amount_usd: float = 10.0, debited: str = "-10.15") -> dict:
         seen: dict = {}
 
         def fake(method, path, *, params=None, body=None):
             seen.update(body or {})
             return {"data": {"id": "t1", "status": "pending",
-                             "amount": {"amount": "10.00"}}}
+                             "amount": {"amount": debited}}}
 
         with patch.object(payouts, "_request", fake):
             payouts.send(account_id="a", to_address="0xdead",
-                         amount_usd=10.005, idem="req:42")
+                         amount_usd=amount_usd, ref="withdrawal_request:42")
+        return seen
 
-        self.assertEqual(seen["amount"], "10.01")
-        self.assertIsInstance(seen["amount"], str)
-        self.assertEqual(seen["idem"], payouts.idem_uuid("req:42"))
-        self.assertEqual(seen["type"], "send")
-        self.assertEqual(seen["currency"], "USDC")
+    def test_the_fee_is_reported_because_the_debit_exceeds_the_send(self) -> None:
+        """The recipient gets the amount; the account loses more. Charging the
+        ledger only the send amount would quietly bleed the house every
+        withdrawal."""
+        def fake(method, path, *, params=None, body=None):
+            return {"data": {"id": "t1", "status": "pending",
+                             "amount": {"amount": "-2.148356"}}}
+
+        with patch.object(payouts, "_request", fake):
+            out = payouts.send(account_id="a", to_address="0xdead",
+                               amount_usd=2.0, ref="r")
+
+        self.assertEqual(out["sent_usd"], 2.0)
+        self.assertEqual(out["debited_usd"], 2.148356)
+        self.assertEqual(out["fee_usd"], 0.148356)
+        self.assertGreater(out["debited_usd"], out["sent_usd"])
 
 
 class IdemTests(unittest.TestCase):
