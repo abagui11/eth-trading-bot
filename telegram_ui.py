@@ -269,6 +269,9 @@ def pool_account_keyboard() -> InlineKeyboardMarkup:
 
 def format_deposit_instructions(*, has_pending: bool = False) -> str:
     address = config.POOL_DEPOSIT_ADDRESS or "(deposit address not configured — ask the admin)"
+    # Never guess the chain: USDC sent to this address on a network we do not
+    # control it on is unrecoverable.
+    network = config.POOL_DEPOSIT_CHAIN or "confirm with the admin before sending"
     minimum = float(bot_config.POOL_MIN_DEPOSIT_USD)
     risk_pct = float(bot_config.POOL_RISK_PCT) * 100
     example = 1000.0
@@ -281,10 +284,14 @@ def format_deposit_instructions(*, has_pending: bool = False) -> str:
         f"Example: ${example:,.0f} available → about ${example_risk:,.2f} at "
         "risk if that trade is stopped out. The rest stays available for "
         "other Accepts or sits in cash.\n",
-        f"1. Send USDC to:\n{address}",
+        f"1. Send USDC to:\n`{address}`",
+        f"   Network: {network}",
         f"2. Minimum: ${minimum:,.0f}",
-        "3. Then tell me the amount:  /deposit 1000  (optionally add the txid: "
-        "/deposit 1000 0xabc...)",
+        "3. Tell me the amount *and the transaction hash*:\n"
+        "   /deposit 1000 0x<transaction hash>",
+        "",
+        "The hash is required. Other funds arrive at that address too, so it "
+        "is what proves which transfer is yours.",
         "",
         "Your balance is credited once the funds land on the venue and an "
         "admin confirms — you'll get a message here. Trade cards will then "

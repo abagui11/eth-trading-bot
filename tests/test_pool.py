@@ -23,6 +23,15 @@ ADMIN = 111
 ALICE = 1001
 BOB = 1002
 
+# Tests run with a deposit address configured, the way production does, so the
+# txid rules are exercised rather than skipped.
+ADDRESS = "0x6549B1E2C9B3b004fca5E3C13AD8189Cf2f273B1"
+
+
+def txhash(seed: str) -> str:
+    """A well-formed 32-byte tx hash, distinct per seed."""
+    return "0x" + (seed * 64)[:64]
+
 
 class PoolTestCase(unittest.TestCase):
     def setUp(self) -> None:
@@ -30,6 +39,7 @@ class PoolTestCase(unittest.TestCase):
         db = Path(self._tmp.name) / "ledger.db"
         self._patches = [
             patch.object(config, "LEDGER_DB", db),
+            patch.object(config, "POOL_DEPOSIT_ADDRESS", ADDRESS),
             patch.object(bot_config, "POOL_ENABLED", True),
             patch.object(bot_config, "POOL_RISK_PCT", 0.007),
             patch.object(bot_config, "POOL_MIN_EQUITY_USD", 500.0),
@@ -140,7 +150,7 @@ class CashJournalTests(PoolTestCase):
 class DepositRequestTests(PoolTestCase):
     def test_request_and_one_tap_credit(self) -> None:
         pool.approve_user(ALICE, admin_id=ADMIN)
-        req = pool.request_deposit(ALICE, 800.0, txid="0xabc")
+        req = pool.request_deposit(ALICE, 800.0, txid=txhash("a"))
         self.assertTrue(req["ok"])
         result = pool.decide_deposit(req["request_id"], admin_id=ADMIN, approve=True)
         self.assertEqual(result["status"], "credited")
@@ -153,19 +163,92 @@ class DepositRequestTests(PoolTestCase):
     def test_below_minimum_and_double_pending_are_refused(self) -> None:
         pool.approve_user(ALICE, admin_id=ADMIN)
         self.assertEqual(
-            pool.request_deposit(ALICE, 100.0)["reason"], "below_minimum"
+            pool.request_deposit(ALICE, 100.0, txid=txhash("a"))["reason"],
+            "below_minimum",
         )
-        first = pool.request_deposit(ALICE, 600.0)
+        first = pool.request_deposit(ALICE, 600.0, txid=txhash("b"))
         self.assertTrue(first["ok"])
-        second = pool.request_deposit(ALICE, 700.0)
+        second = pool.request_deposit(ALICE, 700.0, txid=txhash("c"))
         self.assertEqual(second["reason"], "already_pending")
 
     def test_denied_request_moves_no_money(self) -> None:
         pool.approve_user(ALICE, admin_id=ADMIN)
-        req = pool.request_deposit(ALICE, 600.0)
+        req = pool.request_deposit(ALICE, 600.0, txid=txhash("d"))
         result = pool.decide_deposit(req["request_id"], admin_id=ADMIN, approve=False)
         self.assertEqual(result["status"], "denied")
         self.assertEqual(float(pool.get_account(ALICE)["cash_usd"]), 0.0)
+
+
+class DepositTxidTests(PoolTestCase):
+    """The deposit address is shared with the yield wallet, so the hash is the
+    only thing tying a claimed amount to a transfer that actually arrived."""
+
+    def setUp(self) -> None:
+        super().setUp()
+        pool.approve_user(ALICE, admin_id=ADMIN)
+        pool.approve_user(BOB, admin_id=ADMIN)
+
+    def test_a_hash_is_required_once_an_address_is_configured(self) -> None:
+        self.assertEqual(
+            pool.request_deposit(ALICE, 600.0)["reason"], "txid_required"
+        )
+        self.assertEqual(
+            pool.request_deposit(ALICE, 600.0, txid="not-a-hash")["reason"],
+            "txid_malformed",
+        )
+
+    def test_no_address_configured_keeps_the_hash_optional(self) -> None:
+        with patch.object(config, "POOL_DEPOSIT_ADDRESS", None):
+            self.assertTrue(pool.request_deposit(ALICE, 600.0)["ok"])
+
+    def test_one_transfer_cannot_be_claimed_twice(self) -> None:
+        """The failure this prevents: two testers credited for one deposit,
+        so the second one's balance is really the first one's money."""
+        h = txhash("e")
+        self.assertTrue(pool.request_deposit(ALICE, 600.0, txid=h)["ok"])
+
+        stolen = pool.request_deposit(BOB, 600.0, txid=h)
+        self.assertEqual(stolen["reason"], "txid_already_claimed")
+        self.assertEqual(stolen["claimed_by"], ALICE)
+
+        # Still blocked after the first one is credited, not just while pending.
+        pool.decide_deposit(
+            pool.get_deposit_request(1)["id"], admin_id=ADMIN, approve=True
+        )
+        self.assertEqual(
+            pool.request_deposit(BOB, 600.0, txid=h)["reason"],
+            "txid_already_claimed",
+        )
+        self.assertEqual(float(pool.get_account(BOB)["cash_usd"]), 0.0)
+
+    def test_case_and_prefix_do_not_launder_a_duplicate(self) -> None:
+        h = txhash("f")
+        pool.request_deposit(ALICE, 600.0, txid=h)
+        for variant in (h.upper().replace("0X", "0x"), h[2:], f"  {h}  "):
+            self.assertEqual(
+                pool.request_deposit(BOB, 600.0, txid=variant)["reason"],
+                "txid_already_claimed",
+                f"variant {variant!r} slipped past the uniqueness check",
+            )
+
+    def test_a_denied_hash_can_be_refiled(self) -> None:
+        """A typo'd amount is denied, so the real transfer must still be
+        creditable under its own hash."""
+        h = txhash("1")
+        first = pool.request_deposit(ALICE, 600.0, txid=h)
+        pool.decide_deposit(first["request_id"], admin_id=ADMIN, approve=False)
+        again = pool.request_deposit(ALICE, 900.0, txid=h)
+        self.assertTrue(again["ok"], again)
+
+    def test_pending_inbound_is_what_the_wallet_owes_testers(self) -> None:
+        self.assertEqual(pool.pending_inbound_usd(), 0.0)
+        a = pool.request_deposit(ALICE, 600.0, txid=txhash("2"))
+        pool.request_deposit(BOB, 900.0, txid=txhash("3"))
+        self.assertEqual(pool.pending_inbound_usd(), 1500.0)
+
+        # Crediting sweeps it out of "sitting in the wallet" and into cash.
+        pool.decide_deposit(a["request_id"], admin_id=ADMIN, approve=True)
+        self.assertEqual(pool.pending_inbound_usd(), 900.0)
 
 
 class IntentTests(PoolTestCase):

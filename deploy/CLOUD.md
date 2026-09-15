@@ -304,6 +304,37 @@ sudo -u ethagent /opt/eth-trading-agent/.venv/bin/python -c \
   "import pool; print(pool.debit(<test_id>, <usd>, admin_id=<your_id>, note='test reset'))"
 ```
 
+#### The deposit wallet is shared with the yield sleeve
+
+`POOL_DEPOSIT_ADDRESS` is `0x6549B1E2C9B3b004fca5E3C13AD8189Cf2f273B1`, which
+is also the wallet the `yield_gen_bot` app on **45.33.101.215** monitors. Two
+systems reading one balance is the problem to manage here, and the rule that
+keeps it safe is:
+
+> **The wallet is a doorway, not a vault.** Tester funds land there, get swept
+> to Coinbase, and only then get credited. The pool's claim is always against
+> **venue equity** — which is what `pool.reconcile` checks — never against the
+> wallet balance.
+
+Credit **after** the sweep, not on arrival on-chain. Crediting while funds are
+still in the wallet gives a tester a claim Coinbase cannot cover *and* leaves
+the money somewhere the yield sleeve may deploy it. `pool.pending_inbound_usd()`
+is the amount claimed but not yet credited — i.e. how much of that wallet is
+not house money right now — and it rides along on the admin Credit card.
+
+What is **not** enforced from this repo: `yield_gen_bot` runs on another box,
+so nothing here can stop its planner deploying an idle tester deposit. The hub's
+own Yield tab cannot misread it — `dashboard/yield_gen.py` computes NAV as Aave
+collateral − debt + Pendle PTs, which excludes idle wallet balance — but the
+`nav_eth` display figure comes from that app's `topline`, so it inherits
+whatever the app counts. Note also that `SERVICE_API_TOKENS` is **empty** on
+this server, so `/api/v1` returns 503 and the two systems are not currently
+talking at all. Publishing the pool's reserved balance for the yield planner to
+subtract needs that token set plus a change on the yield box.
+
+The durable fix is a deposit address that is **not** the yield wallet. Until
+then, keep the sweep prompt and don't leave deposits sitting.
+
 #### If the reconciler freezes intents
 
 The watchdog checks every ~10 minutes that Coinbase equity covers the sum of

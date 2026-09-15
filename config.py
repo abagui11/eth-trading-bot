@@ -220,6 +220,12 @@ POOL_ADMIN_TELEGRAM_IDS: list[int] = [
     int(x.strip()) for x in _pool_admin_raw.split(",") if x.strip()
 ]
 
+# Network the deposit address expects, e.g. "Ethereum mainnet", "Base",
+# "Arbitrum One". No default on purpose: USDC sent on the wrong chain to an
+# address you do not control there is gone, so the instructions say "confirm
+# the network with the admin" rather than name a guess.
+POOL_DEPOSIT_CHAIN: str | None = _optional("POOL_DEPOSIT_CHAIN")
+
 POOL_FORUM_CHAT_ID: int | None = _optional_int("POOL_FORUM_CHAT_ID")
 POOL_FORUM_TRADES_THREAD_ID: int | None = _optional_int("POOL_FORUM_TRADES_THREAD_ID")
 POOL_FORUM_RESEARCH_THREAD_ID: int | None = _optional_int(

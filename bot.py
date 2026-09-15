@@ -1174,6 +1174,23 @@ async def cmd_deposit(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
                 "You already have a deposit request pending review — "
                 "you'll get a message when it's credited.",
             )
+        elif reason in ("txid_required", "txid_malformed"):
+            await _reply(
+                update,
+                "Send the transaction hash with the amount so we can match "
+                "your transfer on-chain:\n\n"
+                f"/deposit {amount:,.0f} 0x<transaction hash>\n\n"
+                "Your wallet shows it as the transaction ID after the "
+                "transfer confirms. Without it we cannot tell your deposit "
+                "apart from other funds arriving at the same address.",
+            )
+        elif reason == "txid_already_claimed":
+            await _reply(
+                update,
+                "That transaction hash is already on deposit request "
+                f"#{result.get('request_id')}. If you sent a second transfer, "
+                "use that transfer's own hash.",
+            )
         else:
             await _reply(update, f"Could not file the request ({reason}).")
         return
@@ -1185,14 +1202,26 @@ async def cmd_deposit(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
         "It's credited once the funds land on the venue and an admin confirms.",
     )
     name = f"@{user.username}" if user.username else str(user.id)
-    txid_line = f"\ntxid: {txid}" if txid else ""
+    txid_line = f"\ntxid: `{result['txid']}`" if result.get("txid") else ""
+    # The deposit address is the yield sleeve's wallet, so a credit must follow
+    # the sweep to Coinbase, not the arrival on-chain: the pool's claim is
+    # against venue equity, which is what pool.reconcile checks.
+    inbound = pool.pending_inbound_usd()
+    inbound_line = (
+        f"\nUnswept tester claims on the wallet: ${inbound:,.2f}"
+        if inbound > amount
+        else ""
+    )
     for admin_id in pool.admin_ids():
         try:
             await context.bot.send_message(
                 admin_id,
                 f"Deposit request #{request_id}: {name} (id {user.id}) says they "
-                f"sent ${amount:,.2f}.{txid_line}\n"
-                "Credit only after verifying it landed on Coinbase.",
+                f"sent ${amount:,.2f}.{txid_line}{inbound_line}\n\n"
+                "Before crediting: confirm the transfer on-chain, then move it "
+                "to Coinbase. Crediting while it still sits in the wallet gives "
+                "them a claim the venue cannot cover, and leaves the funds where "
+                "the yield sleeve may deploy them.",
                 reply_markup=telegram_ui.pool_admin_deposit_keyboard(request_id),
             )
         except Exception:

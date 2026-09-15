@@ -90,6 +90,16 @@ CREATE TABLE IF NOT EXISTS pool_deposit_requests (
     decided_by INTEGER
 );
 
+-- One on-chain transfer credits exactly once. The deposit address is shared
+-- with the yield sleeve's wallet, so the txid is the only thing that tells a
+-- tester's transfer apart from house capital sitting in the same place --
+-- which makes double-crediting one hash the way a tester's balance silently
+-- becomes someone else's money. Denied requests are excluded so a hash can be
+-- re-filed after a typo'd amount.
+CREATE UNIQUE INDEX IF NOT EXISTS pool_deposit_txid_once
+    ON pool_deposit_requests (txid)
+    WHERE txid IS NOT NULL AND status != 'denied';
+
 CREATE TABLE IF NOT EXISTS pool_intents (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     ref TEXT NOT NULL,          -- offer/cycle id (HQ) or mill_<idea_id> (mill)
@@ -461,14 +471,45 @@ def debit(
 # Deposit requests — user asks, admin credits with one tap
 # ---------------------------------------------------------------------------
 
+def normalize_txid(txid: str | None) -> str | None:
+    """Lower-cased, 0x-prefixed hash, or None if it is not one.
+
+    Case and a missing prefix are the two ways the same transfer arrives
+    looking like two different ones, which would defeat the uniqueness index
+    that stops a hash being credited twice.
+    """
+    if txid is None:
+        return None
+    raw = str(txid).strip().lower()
+    if raw.startswith("0x"):
+        raw = raw[2:]
+    if len(raw) != 64 or any(c not in "0123456789abcdef" for c in raw):
+        return None
+    return f"0x{raw}"
+
+
 def request_deposit(
     telegram_id: int, amount_usd: float, *, txid: str | None = None
 ) -> dict[str, Any]:
+    """File a deposit claim for an admin to verify against the chain.
+
+    A txid is required whenever a deposit address is configured: that address
+    is shared with the yield sleeve's wallet, so without a hash there is
+    nothing connecting a claimed amount to a transfer that actually arrived.
+    """
     if not is_approved(telegram_id):
         return {"ok": False, "reason": "not_approved"}
     if amount_usd < float(bot_config.POOL_MIN_DEPOSIT_USD):
         return {"ok": False, "reason": "below_minimum",
                 "minimum_usd": float(bot_config.POOL_MIN_DEPOSIT_USD)}
+
+    clean = normalize_txid(txid)
+    if config.POOL_DEPOSIT_ADDRESS:
+        if txid is None:
+            return {"ok": False, "reason": "txid_required"}
+        if clean is None:
+            return {"ok": False, "reason": "txid_malformed"}
+
     with _connect() as conn:
         pending = conn.execute(
             "SELECT id FROM pool_deposit_requests WHERE telegram_id = ? "
@@ -478,12 +519,42 @@ def request_deposit(
         if pending is not None:
             return {"ok": False, "reason": "already_pending",
                     "request_id": int(pending["id"])}
+        if clean is not None:
+            seen = conn.execute(
+                "SELECT id, telegram_id, status FROM pool_deposit_requests "
+                "WHERE txid = ? AND status != 'denied'",
+                (clean,),
+            ).fetchone()
+            if seen is not None:
+                logger.warning(
+                    "pool: %s re-filed txid %s already on request #%s",
+                    telegram_id, clean, seen["id"],
+                )
+                return {"ok": False, "reason": "txid_already_claimed",
+                        "request_id": int(seen["id"]),
+                        "claimed_by": int(seen["telegram_id"])}
         cur = conn.execute(
             "INSERT INTO pool_deposit_requests (telegram_id, amount_usd, txid, "
             "created_at) VALUES (?, ?, ?, ?)",
-            (telegram_id, float(amount_usd), txid, _now()),
+            (telegram_id, float(amount_usd), clean, _now()),
         )
-    return {"ok": True, "request_id": int(cur.lastrowid or 0)}
+    return {"ok": True, "request_id": int(cur.lastrowid or 0), "txid": clean}
+
+
+def pending_inbound_usd() -> float:
+    """Claimed-but-uncredited deposits — how much of the wallet is not ours.
+
+    The deposit address doubles as the yield sleeve's wallet, so between a
+    tester sending funds and an admin sweeping them to the venue this is the
+    balance sitting there that belongs to a tester. Nothing spends against it;
+    it exists so the admin and the yield lane can both see it.
+    """
+    with _connect() as conn:
+        row = conn.execute(
+            "SELECT COALESCE(SUM(amount_usd), 0) AS total FROM "
+            "pool_deposit_requests WHERE status = 'pending'"
+        ).fetchone()
+    return float(row["total"] or 0.0)
 
 
 def get_deposit_request(request_id: int) -> dict[str, Any] | None:
