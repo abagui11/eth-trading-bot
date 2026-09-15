@@ -748,6 +748,92 @@ _POOL_RECON_INTERVAL_SEC = 600
 _pool_last_recon = 0.0
 
 
+def _deposit_sweep() -> None:
+    """Credit arrived deposits and tell the tester, without waiting on anyone.
+
+    Runs on the 60s scan, so a tester hears back within a minute of Coinbase
+    settling their transfer rather than whenever an admin next looks at their
+    phone. The admin is still told — they are just no longer in the way.
+
+    Never raises: a deposit watcher that can take down the watchdog would stop
+    stop-loss monitoring, which is a far worse failure than a late credit.
+    """
+    import notify
+    import pool
+
+    if not bot_config.POOL_ENABLED or not config.POOL_DEPOSIT_ADDRESS:
+        return
+
+    try:
+        from coinbase_deriv import get_gateway
+
+        transfers = get_gateway().get_inbound_transfers(config.POOL_DEPOSIT_ADDRESS)
+    except Exception:
+        logger.exception("deposit sweep: could not read transfers — skipped")
+        return
+
+    try:
+        events = pool.observe_chain_deposits(transfers)
+    except Exception:
+        logger.exception("deposit sweep: crediting failed")
+        return
+
+    for event in events:
+        if event["kind"] == "credited":
+            amount = float(event["amount_usd"])
+            # The tester first, before the admin FYI: the whole point of this
+            # path is that their money is confirmed the moment it is real.
+            lines = [
+                f"Deposit received: ${amount:,.2f} USDC.",
+                f"Cash balance: ${float(event['cash_usd']):,.2f}.",
+            ]
+            if event.get("mismatch"):
+                lines.append(
+                    f"(You said ${float(event['claimed_usd']):,.2f} — we credited "
+                    "what actually arrived.)"
+                )
+            lines.append(
+                "This was confirmed automatically against the exchange, not by "
+                "hand. You can Accept trade cards now — /portfolio any time."
+            )
+            try:
+                notify.send_pool_dm(int(event["telegram_id"]), "\n".join(lines))
+            except Exception:
+                logger.exception("deposit DM failed for %s", event["telegram_id"])
+
+            mismatch = (
+                f"\nClaimed ${float(event['claimed_usd']):,.2f}, arrived "
+                f"${amount:,.2f} — CHECK THIS."
+                if event.get("mismatch") else ""
+            )
+            try:
+                notify.send_pool_admin_alert(
+                    f"Auto-credited ${amount:,.2f} to {event['telegram_id']} "
+                    f"(request #{event['request_id']}).{mismatch}\n"
+                    f"coinbase tx {event['cb_tx_id']}"
+                )
+            except Exception:
+                logger.exception("deposit admin FYI failed")
+
+        elif event["kind"] == "unmatched" and not event.get("alerted"):
+            # Somebody's money is on the venue and nothing says whose. It is
+            # deliberately not apportioned — a guess here credits one tester
+            # with another's funds.
+            try:
+                notify.send_pool_admin_alert(
+                    f"UNCLAIMED deposit: ${float(event['amount_usd']):,.2f} USDC "
+                    "arrived with no matching /deposit claim.\n"
+                    f"coinbase tx {event['cb_tx_id']}\n"
+                    f"tx hash {event.get('txid')}\n\n"
+                    "Nobody has been credited. If you know whose it is, assign "
+                    "it with:\n"
+                    f"/assign {event['cb_tx_id']} <telegram_id>"
+                )
+                pool.mark_chain_deposit_alerted(str(event["cb_tx_id"]))
+            except Exception:
+                logger.exception("unmatched deposit alert failed")
+
+
 def _pool_sweep(spots: dict[str, float] | None = None) -> None:
     """Tester-pool upkeep on the scan cadence.
 
@@ -778,6 +864,8 @@ def _pool_sweep(spots: dict[str, float] | None = None) -> None:
             f"passed. Your ${float(intent['risk_usd']):,.2f} is back in your "
             "available balance. Nothing was risked.",
         )
+
+    _deposit_sweep()
 
     global _pool_last_recon
     if config.EXECUTION_MODE != "live":

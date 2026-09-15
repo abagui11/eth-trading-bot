@@ -1266,8 +1266,9 @@ async def cmd_deposit(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
     request_id = int(result["request_id"])
     await _reply(
         update,
-        f"Deposit request #{request_id} filed for ${amount:,.2f}. "
-        "It's credited once the funds land on the venue and an admin confirms.",
+        f"Got it — watching the exchange for that transfer (#{request_id}).\n\n"
+        "You'll be credited automatically the moment it settles, and I'll "
+        "message you here with your balance. Nothing else for you to do.",
     )
     name = f"@{user.username}" if user.username else str(user.id)
     txid_line = f"\ntxid: `{result['txid']}`" if result.get("txid") else ""
@@ -1290,10 +1291,10 @@ async def cmd_deposit(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
                 admin_id,
                 f"Deposit request #{request_id}: {name} (id {user.id}) says they "
                 f"sent ${amount:,.2f}.{txid_line}{wallet_line}{inbound_line}\n\n"
-                "Before crediting: confirm on-chain that the amount matches and "
-                "that the sender is the registered wallet above. A mismatch is "
-                "still creditable — the money is there — but the wallet stays "
-                "unverified, and an unverified wallet cannot be paid out to.",
+                "FYI only — the watcher credits this automatically the moment "
+                "the transfer settles on Coinbase, and tells them. Credit below "
+                "only if you want it booked before it has arrived, which gives "
+                "them a claim the venue cannot yet cover.",
                 reply_markup=telegram_ui.pool_admin_deposit_keyboard(request_id),
             )
         except Exception:
@@ -1406,6 +1407,56 @@ async def cmd_wallet(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
             )
         except Exception:
             logger.exception("Wallet-change admin ping failed for %s", admin_id)
+
+
+async def cmd_assign(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Admin: /assign <coinbase_tx_id> <telegram_id> — claim an orphan deposit.
+
+    For a transfer that arrived without a usable hash, which the watcher
+    records but deliberately refuses to apportion.
+    """
+    user = update.effective_user
+    if user is None or update.message is None or not pool.is_admin(user.id):
+        return
+
+    args = context.args or []
+    if len(args) < 2:
+        pending = pool.unmatched_chain_deposits()
+        if not pending:
+            await _reply(update, "No unclaimed deposits.")
+            return
+        lines = ["Unclaimed deposits:\n"]
+        for row in pending:
+            lines.append(
+                f"${float(row['amount_usd']):,.2f} — {row['cb_tx_id']}\n"
+                f"   hash {row['txid']}  seen {row['first_seen_at']}"
+            )
+        lines.append("\n/assign <coinbase_tx_id> <telegram_id>")
+        await _reply(update, "\n".join(lines))
+        return
+
+    try:
+        target = int(args[1])
+    except ValueError:
+        await _reply(update, "Usage: /assign <coinbase_tx_id> <telegram_id>")
+        return
+
+    result = pool.assign_chain_deposit(str(args[0]), target, admin_id=user.id)
+    if not result.get("ok"):
+        await _reply(update, f"Could not assign it ({result.get('reason')}).")
+        return
+
+    amount = float(result["amount_usd"])
+    await _reply(update, f"Assigned ${amount:,.2f} to {target}.")
+    try:
+        await context.bot.send_message(
+            target,
+            f"Deposit received: ${amount:,.2f} USDC.\n"
+            f"Cash balance: ${float(result.get('cash_usd') or 0):,.2f}.\n\n"
+            "You can Accept trade cards now — /portfolio any time.",
+        )
+    except Exception:
+        logger.exception("Assign DM failed for %s", target)
 
 
 async def cmd_credit(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -1703,6 +1754,7 @@ def build_application() -> Application:
     app.add_handler(CommandHandler("portfolio", cmd_portfolio))
     app.add_handler(CommandHandler("deposit", cmd_deposit))
     app.add_handler(CommandHandler("wallet", cmd_wallet))
+    app.add_handler(CommandHandler("assign", cmd_assign))
     app.add_handler(CommandHandler("credit", cmd_credit))
     app.add_handler(CommandHandler("debit", cmd_debit))
     app.add_handler(CommandHandler("chart", cmd_chart))

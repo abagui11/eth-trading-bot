@@ -211,9 +211,9 @@ edit, no restart:
    (Portfolio / Deposit), and a **one-time invite link** to the forum group.
 3. **They** register the wallet they'll send from (`/wallet 0x…`), then
    `/deposit` for the address, send USDC, and file `/deposit 1000 <txid>`.
-   You get a **Credit / Deny** card — tap Credit once the amount is visible on
-   Coinbase and the sender matches their registered wallet. Their cash is live
-   the moment you tap.
+   **Nothing is needed from you** — the watcher credits them within a minute
+   of the transfer settling and DMs them their new balance. You get an FYI,
+   plus a ping if a transfer arrives that nobody claimed.
 4. From then on their Accepts in the Trades topic join live fills with
    pooled sizing; `/portfolio` shows their real book. `/credit <id> <usd>`
    and `/debit <id> <usd>` are the admin escape hatches (a debit can never
@@ -332,13 +332,29 @@ It asks Coinbase whether it generated that address, and names the account and
 network. A `NO MATCH` is not proof the address is wrong, but it *is* reason to
 confirm in the Coinbase UI before anyone sends to it.
 
-Credits are still a manual tap, and what you are confirming has changed: not
-that funds were swept, but that the **amount matches** and the **sender is the
-tester's registered wallet**. A sender mismatch is still creditable — the money
-is in the account — but the wallet stays unverified and cannot be paid out to.
-`pool.pending_inbound_usd()` is the amount claimed but not yet credited, i.e.
-the slice of apparent house residual that is really a tester's, and it rides
-along on the admin Credit card.
+#### Credits are automatic
+
+You are no longer in the path. `watchdog._deposit_sweep` runs every 60s, reads
+settled inbound transfers on the deposit address, and credits any whose
+**transaction hash** matches a filed `/deposit` claim — the tester is DM'd
+within a minute of settlement, and you get an FYI. The Credit card still
+exists, but tapping it now means "book this *before* it has arrived", which
+gives a tester a claim the venue cannot yet cover. Normally, leave it alone.
+
+Coinbase reports **no sender** for an incoming transfer, which is why the hash
+is the attribution key and why arrival does not verify a wallet. Two things
+follow that are worth knowing before you get an alert about them:
+
+- **An unclaimed transfer is never apportioned.** Money that arrives with no
+  matching claim is recorded and you are pinged once. Nobody is credited,
+  because guessing an owner from an amount is how one tester ends up with
+  another's money. Resolve it with `/assign <coinbase_tx_id> <telegram_id>`
+  (bare `/assign` lists what is outstanding).
+- **The credited amount is Coinbase's, not the tester's claim.** If they say
+  $1,000 and send $900, they get $900 and you get a CHECK THIS alert.
+
+`pool.pending_inbound_usd()` is still the amount claimed but not yet credited,
+i.e. the slice of apparent house residual that is really a tester's.
 
 #### Registered wallets and return-to-source
 

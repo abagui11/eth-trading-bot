@@ -330,17 +330,16 @@ def format_deposit_instructions(
         "4. Tell me the amount *and the transaction hash*:\n"
         "   /deposit 1000 0x<transaction hash>",
         "",
-        "Both matter: sending from your registered wallet is how the transfer "
-        "is matched to you, and the hash is how we tell one deposit from "
-        "another. Send from an exchange account instead and we may not be "
-        "able to credit it.",
+        "*The hash is what credits you.* We watch the exchange for it and "
+        "credit your balance automatically the moment your transfer settles — "
+        "usually a few minutes, no waiting on anyone. Send from your "
+        "registered wallet so we can also confirm the wallet is yours.",
         "",
         f"Only USDC, only on {network}. Anything else sent to that address "
         "may be unrecoverable — by us or by anyone.",
         "",
-        "Funds arrive at the trading venue directly. Your balance is credited "
-        "once an admin confirms, and you'll get a message here. Trade cards "
-        "will then show the dollar risk *your* Accept would take.",
+        "You'll get a message here the second it lands, with your new balance. "
+        "Trade cards will then show the dollar risk *your* Accept would take.",
     ]
     if has_pending:
         lines.append("")

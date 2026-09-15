@@ -342,6 +342,191 @@ class WalletRegistrationTests(PoolTestCase):
         )
 
 
+class AutoCreditTests(PoolTestCase):
+    """Crediting a deposit with no human in the loop.
+
+    Coinbase does not report a sender for an incoming transfer, so attribution
+    is by transaction hash and nothing else. These tests pin the three ways
+    that could go wrong: paying twice, paying the wrong person, and paying on
+    an amount the tester chose rather than the one that arrived.
+    """
+
+    def setUp(self) -> None:
+        super().setUp()
+        pool.approve_user(ALICE, admin_id=ADMIN)
+        pool.approve_user(BOB, admin_id=ADMIN)
+        self._wallet(ALICE)
+        self._wallet(BOB)
+        # Past the baseline, so tests exercise the live path. A first sweep
+        # with no transfers establishes it without side effects.
+        pool.observe_chain_deposits([])
+
+    @staticmethod
+    def _transfer(cb_id: str, amount: float, txid: str | None) -> dict:
+        return {"id": cb_id, "amount": amount, "currency": "USDC",
+                "txid": txid, "network": "ethereum",
+                "created_at": "2026-09-15T20:00:00Z"}
+
+    def test_a_claimed_transfer_credits_itself(self) -> None:
+        h = txhash("a")
+        req = pool.request_deposit(ALICE, 1000.0, txid=h)
+        events = pool.observe_chain_deposits([self._transfer("cb1", 1000.0, h)])
+
+        self.assertEqual([e["kind"] for e in events], ["credited"])
+        self.assertEqual(events[0]["telegram_id"], ALICE)
+        self.assertEqual(float(pool.get_account(ALICE)["cash_usd"]), 1000.0)
+        # The claim is closed, so the admin card cannot pay it a second time.
+        self.assertEqual(
+            pool.get_deposit_request(req["request_id"])["status"], "credited"
+        )
+        self.assertFalse(
+            pool.decide_deposit(req["request_id"], admin_id=ADMIN, approve=True)["ok"]
+        )
+        self.assertEqual(float(pool.get_account(ALICE)["cash_usd"]), 1000.0)
+
+    def test_re_running_the_sweep_pays_once(self) -> None:
+        """The sweep runs every 60s over a list that still contains old rows,
+        so idempotence is not an edge case — it is the normal path."""
+        h = txhash("b")
+        pool.request_deposit(ALICE, 1000.0, txid=h)
+        transfers = [self._transfer("cb2", 1000.0, h)]
+        for _ in range(5):
+            pool.observe_chain_deposits(transfers)
+        self.assertEqual(float(pool.get_account(ALICE)["cash_usd"]), 1000.0)
+
+    def test_the_venue_amount_wins_over_the_claim(self) -> None:
+        """A tester must not be able to move their own balance by typing a
+        bigger number than they sent."""
+        h = txhash("c")
+        pool.request_deposit(ALICE, 5000.0, txid=h)   # claims $5,000
+        events = pool.observe_chain_deposits([self._transfer("cb3", 900.0, h)])
+        self.assertEqual(float(pool.get_account(ALICE)["cash_usd"]), 900.0)
+        self.assertTrue(events[0]["mismatch"])
+        self.assertEqual(events[0]["claimed_usd"], 5000.0)
+
+    def test_a_hash_claimed_by_someone_else_cannot_be_hijacked(self) -> None:
+        h = txhash("d")
+        pool.request_deposit(ALICE, 1000.0, txid=h)
+        # Bob cannot even file it; the txid index refuses him first.
+        self.assertEqual(
+            pool.request_deposit(BOB, 1000.0, txid=h)["reason"],
+            "txid_already_claimed",
+        )
+        pool.observe_chain_deposits([self._transfer("cb4", 1000.0, h)])
+        self.assertEqual(float(pool.get_account(ALICE)["cash_usd"]), 1000.0)
+        self.assertEqual(float(pool.get_account(BOB)["cash_usd"]), 0.0)
+
+    def test_an_unclaimed_transfer_is_flagged_never_apportioned(self) -> None:
+        """Guessing an owner from an amount is how one tester is credited with
+        another's money."""
+        events = pool.observe_chain_deposits(
+            [self._transfer("cb5", 2500.0, txhash("e"))]
+        )
+        self.assertEqual([e["kind"] for e in events], ["unmatched"])
+        self.assertEqual(float(pool.get_account(ALICE)["cash_usd"]), 0.0)
+        self.assertEqual(float(pool.get_account(BOB)["cash_usd"]), 0.0)
+        self.assertEqual(pool.total_tester_cash(), 0.0)
+        self.assertEqual(len(pool.unmatched_chain_deposits()), 1)
+
+    def test_an_unclaimed_transfer_is_raised_once_not_every_minute(self) -> None:
+        pool.observe_chain_deposits([self._transfer("cb6", 100.0, txhash("f"))])
+        pool.mark_chain_deposit_alerted("cb6")
+        again = pool.observe_chain_deposits(
+            [self._transfer("cb6", 100.0, txhash("f"))]
+        )
+        self.assertTrue(again[0]["alerted"])
+
+    def test_an_orphan_can_be_assigned_and_only_pays_once(self) -> None:
+        pool.observe_chain_deposits([self._transfer("cb7", 750.0, txhash("1"))])
+        result = pool.assign_chain_deposit("cb7", ALICE, admin_id=ADMIN)
+        self.assertTrue(result["ok"], result)
+        self.assertEqual(float(pool.get_account(ALICE)["cash_usd"]), 750.0)
+
+        twice = pool.assign_chain_deposit("cb7", BOB, admin_id=ADMIN)
+        self.assertEqual(twice["reason"], "already_credited")
+        self.assertEqual(float(pool.get_account(BOB)["cash_usd"]), 0.0)
+        # And the sweep must not re-credit an assigned transfer either.
+        pool.observe_chain_deposits([self._transfer("cb7", 750.0, txhash("1"))])
+        self.assertEqual(float(pool.get_account(ALICE)["cash_usd"]), 750.0)
+
+    def test_a_manual_credit_then_arrival_does_not_double_pay(self) -> None:
+        """An impatient admin taps Credit, then the transfer lands. The ledger
+        must not book it twice, and nobody should be alerted about an orphan."""
+        h = txhash("2")
+        req = pool.request_deposit(ALICE, 600.0, txid=h)
+        pool.decide_deposit(req["request_id"], admin_id=ADMIN, approve=True)
+        self.assertEqual(float(pool.get_account(ALICE)["cash_usd"]), 600.0)
+
+        events = pool.observe_chain_deposits([self._transfer("cb8", 600.0, h)])
+        self.assertEqual(float(pool.get_account(ALICE)["cash_usd"]), 600.0)
+        self.assertEqual(events, [])
+
+    def test_outbound_and_unsettled_transfers_are_ignored(self) -> None:
+        h = txhash("3")
+        pool.request_deposit(ALICE, 600.0, txid=h)
+        # A negative amount is money leaving; the gateway filters unsettled
+        # rows, so a zero/negative here stands for anything not an arrival.
+        pool.observe_chain_deposits([self._transfer("cb9", -600.0, h)])
+        self.assertEqual(float(pool.get_account(ALICE)["cash_usd"]), 0.0)
+
+    def test_a_transfer_with_no_hash_is_never_guessed_at(self) -> None:
+        pool.request_deposit(ALICE, 600.0, txid=txhash("4"))
+        events = pool.observe_chain_deposits([self._transfer("cb10", 600.0, None)])
+        self.assertEqual([e["kind"] for e in events], ["unmatched"])
+        self.assertEqual(float(pool.get_account(ALICE)["cash_usd"]), 0.0)
+
+    def test_auto_credit_does_not_claim_to_have_verified_the_wallet(self) -> None:
+        """Coinbase reports no sender, so arrival proves the money is real but
+        not who sent it. Withdrawals depend on that distinction."""
+        h = txhash("5")
+        pool.request_deposit(ALICE, 1000.0, txid=h)
+        pool.observe_chain_deposits([self._transfer("cb11", 1000.0, h)])
+        self.assertEqual(pool.get_wallet(ALICE)["status"], "pending")
+        self.assertEqual(pool.payout_target(ALICE)["reason"], "unverified")
+
+
+class ChainBaselineTests(PoolTestCase):
+    def test_the_first_sweep_does_not_touch_pre_existing_transfers(self) -> None:
+        """Two house deposits ($3,000 and $1,000) already sit on this address.
+        A watcher that treated history as unclaimed tester money would alert on
+        both, and any amount-matching would hand them to whoever asked."""
+        pool.approve_user(ALICE, admin_id=ADMIN)
+        history = [
+            {"id": "old1", "amount": 3000.0, "currency": "USDC",
+             "txid": txhash("9"), "network": "ethereum", "created_at": ""},
+            {"id": "old2", "amount": 1000.0, "currency": "USDC",
+             "txid": txhash("8"), "network": "ethereum", "created_at": ""},
+        ]
+        events = pool.observe_chain_deposits(history)
+        self.assertEqual(events, [])
+        self.assertEqual(pool.unmatched_chain_deposits(), [])
+        self.assertEqual(pool.total_tester_cash(), 0.0)
+
+    def test_a_claim_beats_the_baseline_on_the_very_first_sweep(self) -> None:
+        """A deposit landing during the first sweep must still be credited,
+        not buried as history."""
+        pool.approve_user(ALICE, admin_id=ADMIN)
+        self._wallet(ALICE)
+        h = txhash("7")
+        pool.request_deposit(ALICE, 800.0, txid=h)
+        events = pool.observe_chain_deposits([
+            {"id": "old3", "amount": 3000.0, "currency": "USDC",
+             "txid": txhash("6"), "network": "ethereum", "created_at": ""},
+            {"id": "new1", "amount": 800.0, "currency": "USDC",
+             "txid": h, "network": "ethereum", "created_at": ""},
+        ])
+        self.assertEqual([e["kind"] for e in events], ["credited"])
+        self.assertEqual(float(pool.get_account(ALICE)["cash_usd"]), 800.0)
+
+    def test_history_is_only_baselined_once(self) -> None:
+        pool.observe_chain_deposits([])
+        events = pool.observe_chain_deposits([
+            {"id": "later", "amount": 500.0, "currency": "USDC",
+             "txid": txhash("5"), "network": "ethereum", "created_at": ""},
+        ])
+        self.assertEqual([e["kind"] for e in events], ["unmatched"])
+
+
 class DepositRequestTests(PoolTestCase):
     def setUp(self) -> None:
         super().setUp()

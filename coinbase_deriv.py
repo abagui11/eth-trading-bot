@@ -306,6 +306,84 @@ class DerivGateway:
             "truncated": bool(res.get("has_next")),
         }
 
+    def _deposit_address_ids(self, address: str) -> tuple[str, str] | None:
+        """(account_id, address_id) for a configured deposit address.
+
+        Discovered rather than configured, so a wrong id cannot be pasted into
+        `.env` alongside the address. Cached because the watcher asks once a
+        minute and these never move.
+        """
+        want = str(address).strip().lower()
+        if getattr(self, "_dep_ids", None) and self._dep_ids[0] == want:
+            return self._dep_ids[1]
+
+        accounts = self._request("GET", "/api/v2/accounts", params={"limit": 100})
+        for acct in accounts.get("data") or []:
+            acct_id = acct.get("id")
+            if not acct_id:
+                continue
+            try:
+                res = self._request(
+                    "GET", f"/api/v2/accounts/{acct_id}/addresses",
+                    params={"limit": 100},
+                )
+            except GatewayError:
+                continue
+            for addr in res.get("data") or []:
+                if str(addr.get("address") or "").strip().lower() == want:
+                    found = (str(acct_id), str(addr.get("id")))
+                    self._dep_ids = (want, found)
+                    return found
+        return None
+
+    def get_inbound_transfers(self, address: str) -> list[dict[str, Any]]:
+        """Settled incoming transfers on a deposit address.
+
+        Note what this endpoint does **not** return: the sender. Coinbase
+        reports `id`, `amount`, `status` and `network.hash`, and nothing about
+        where the funds came from, so a transfer cannot be attributed to a
+        person by its origin — only by its hash. That constraint is why the
+        deposit flow requires a tester to supply the hash.
+
+        `/api/v2/accounts/{id}/transactions` 404s for CDP keys; the
+        address-scoped path is the one that works. Only `completed` rows with
+        a positive amount are returned: Coinbase labels both directions
+        `SEND`, and the sign is what separates money arriving from money
+        leaving.
+        """
+        ids = self._deposit_address_ids(address)
+        if ids is None:
+            raise GatewayError(f"coinbase does not report {address} as a deposit address")
+        acct_id, addr_id = ids
+        res = self._request(
+            "GET", f"/api/v2/accounts/{acct_id}/addresses/{addr_id}/transactions",
+            params={"limit": 100},
+        )
+
+        out: list[dict[str, Any]] = []
+        for row in res.get("data") or []:
+            amount = row.get("amount") or {}
+            try:
+                value = float(amount.get("value") or 0)
+            except (TypeError, ValueError):
+                continue
+            if value <= 0:
+                continue
+            net = row.get("network") or {}
+            if str(row.get("status")) != "completed":
+                continue
+            if str(net.get("status") or "completed") != "completed":
+                continue
+            out.append({
+                "id": str(row.get("id") or ""),
+                "amount": value,
+                "currency": str(amount.get("currency") or ""),
+                "txid": str(net.get("hash") or "") or None,
+                "network": str(net.get("name") or ""),
+                "created_at": str(row.get("created_at") or ""),
+            })
+        return out
+
     def get_position(self, instrument: str) -> dict[str, Any]:
         """Signed size in UNDERLYING units + mark, matching the old interface."""
         try:

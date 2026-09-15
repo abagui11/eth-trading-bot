@@ -160,6 +160,27 @@ CREATE TABLE IF NOT EXISTS pool_stakes (
 CREATE UNIQUE INDEX IF NOT EXISTS pool_stakes_once
     ON pool_stakes (live_trade_id, telegram_id);
 
+-- Every settled transfer Coinbase reports on the deposit address, matched to
+-- a tester or not. Keyed on Coinbase's own transaction id, which is what makes
+-- auto-crediting safe to retry: the row either exists or it does not, so a
+-- restart mid-sweep cannot pay anyone twice.
+CREATE TABLE IF NOT EXISTS pool_chain_deposits (
+    cb_tx_id TEXT PRIMARY KEY,
+    txid TEXT,                              -- network.hash, normalized
+    amount_usd REAL NOT NULL,               -- Coinbase's figure, not the claim
+    currency TEXT,
+    network TEXT,
+    status TEXT NOT NULL,                   -- unmatched | credited | baseline
+    telegram_id INTEGER,
+    deposit_request_id INTEGER,
+    first_seen_at TEXT NOT NULL,
+    credited_at TEXT,
+    alerted_at TEXT,
+    note TEXT
+);
+CREATE INDEX IF NOT EXISTS pool_chain_deposits_txid
+    ON pool_chain_deposits (txid);
+
 CREATE TABLE IF NOT EXISTS pool_meta (
     key TEXT PRIMARY KEY,
     value TEXT NOT NULL
@@ -168,6 +189,7 @@ CREATE TABLE IF NOT EXISTS pool_meta (
 
 _FROZEN_KEY = "intents_frozen"
 _RECON_KEY = "last_reconcile"
+_CHAIN_BASELINE_KEY = "chain_deposits_baselined"
 
 
 def _now() -> str:
@@ -846,6 +868,236 @@ def pending_inbound_usd() -> float:
             "pool_deposit_requests WHERE status = 'pending'"
         ).fetchone()
     return float(row["total"] or 0.0)
+
+
+# ---------------------------------------------------------------------------
+# Automatic crediting — a tester should not wait on someone being awake
+# ---------------------------------------------------------------------------
+
+def observe_chain_deposits(transfers: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Credit arrived transfers against filed claims. Returns what happened.
+
+    Attribution is by **transaction hash**, because Coinbase does not report a
+    sender for an incoming transfer (see `get_inbound_transfers`). The tester
+    supplies the hash on `/deposit`; this matches it and credits **Coinbase's**
+    amount, never the claimed one — the venue's number is the one the pool's
+    obligation is measured against, and a tester who mistypes their amount
+    must not be able to move their own balance.
+
+    A transfer with no matching claim is recorded and flagged, never
+    apportioned. Guessing an owner from an amount is how one tester gets
+    credited with another's money, and the two transfers already on this
+    address are house capital, which is exactly the kind of thing a guess
+    would hand to whoever asked most recently.
+
+    Nothing here is destructive or order-dependent: every credit is keyed on
+    Coinbase's transaction id, so re-running over the same list is a no-op.
+    """
+    events: list[dict[str, Any]] = []
+    first_run = get_meta(_CHAIN_BASELINE_KEY) is None
+    now = _now()
+
+    for transfer in transfers:
+        cb_id = str(transfer.get("id") or "")
+        if not cb_id:
+            continue
+        amount = float(transfer.get("amount") or 0)
+        if amount <= 0:
+            continue
+        txid = normalize_txid(transfer.get("txid"))
+
+        # Match on the hash, whatever state the claim is in: an admin may have
+        # credited it by hand already, and that must read as settled rather
+        # than as an orphan to alert about.
+        claim = None
+        if txid:
+            with _connect() as conn:
+                claim = conn.execute(
+                    "SELECT * FROM pool_deposit_requests WHERE txid = ? AND "
+                    "status != 'denied' ORDER BY id DESC LIMIT 1",
+                    (txid,),
+                ).fetchone()
+
+        with _connect() as conn:
+            known = conn.execute(
+                "SELECT * FROM pool_chain_deposits WHERE cb_tx_id = ?", (cb_id,)
+            ).fetchone()
+            if known is None:
+                # Transfers already on the address when the watcher first runs
+                # are house capital, not unclaimed tester money, and flagging
+                # them would only raise alerts about history nobody can act
+                # on. A filed claim overrides that: it is positive evidence
+                # the transfer is a tester's, so a deposit that lands during
+                # the very first sweep is still credited rather than buried.
+                baseline = first_run and claim is None
+                conn.execute(
+                    "INSERT INTO pool_chain_deposits (cb_tx_id, txid, amount_usd, "
+                    "currency, network, status, first_seen_at, note) "
+                    "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                    (cb_id, txid, amount, transfer.get("currency"),
+                     transfer.get("network"),
+                     "baseline" if baseline else "unmatched", now,
+                     "pre-existing at watcher start" if baseline else None),
+                )
+                known = conn.execute(
+                    "SELECT * FROM pool_chain_deposits WHERE cb_tx_id = ?",
+                    (cb_id,),
+                ).fetchone()
+
+        if str(known["status"]) in ("credited", "baseline"):
+            continue
+
+        if claim is None:
+            events.append({
+                "kind": "unmatched", "cb_tx_id": cb_id, "txid": txid,
+                "amount_usd": amount,
+                "alerted": bool(known["alerted_at"]),
+            })
+            continue
+
+        telegram_id = int(claim["telegram_id"])
+        request_id = int(claim["id"])
+        claimed = float(claim["amount_usd"])
+
+        if str(claim["status"]) == "credited":
+            # Already paid in by hand. Link the rows so the audit trail shows
+            # which on-chain transfer that credit was for, and never re-credit.
+            with _connect() as conn:
+                conn.execute(
+                    "UPDATE pool_chain_deposits SET status = 'credited', "
+                    "telegram_id = ?, deposit_request_id = ?, credited_at = ?, "
+                    "note = 'credited manually before the watcher saw it' "
+                    "WHERE cb_tx_id = ?",
+                    (telegram_id, request_id, now, cb_id),
+                )
+            continue
+
+        result = credit(
+            telegram_id,
+            amount,
+            admin_id=0,  # 0 = the system, not a person
+            ref=f"cb_deposit:{cb_id}",
+            note=f"auto-credited on arrival, coinbase tx {cb_id}",
+        )
+        if not result.get("ok"):
+            if result.get("reason") != "duplicate":
+                logger.error(
+                    "pool: auto-credit failed for %s (%s): %s",
+                    telegram_id, cb_id, result.get("reason"),
+                )
+                continue
+            # The money is already booked under this ref and only the status
+            # write was lost -- a crash between the two. Settle the row so the
+            # sweep stops retrying, and stay quiet: the tester was told the
+            # first time.
+            logger.warning(
+                "pool: coinbase tx %s was already booked; settling the row", cb_id
+            )
+            with _connect() as conn:
+                conn.execute(
+                    "UPDATE pool_chain_deposits SET status = 'credited', "
+                    "telegram_id = ?, deposit_request_id = ?, credited_at = ?, "
+                    "note = 'recovered: event existed, status write was lost' "
+                    "WHERE cb_tx_id = ?",
+                    (telegram_id, request_id, now, cb_id),
+                )
+                conn.execute(
+                    "UPDATE pool_deposit_requests SET status = 'credited', "
+                    "decided_at = ?, decided_by = 0 WHERE id = ? AND status = 'pending'",
+                    (now, request_id),
+                )
+            continue
+
+        with _connect() as conn:
+            conn.execute(
+                "UPDATE pool_chain_deposits SET status = 'credited', "
+                "telegram_id = ?, deposit_request_id = ?, credited_at = ? "
+                "WHERE cb_tx_id = ?",
+                (telegram_id, request_id, now, cb_id),
+            )
+            conn.execute(
+                "UPDATE pool_deposit_requests SET status = 'credited', "
+                "decided_at = ?, decided_by = 0 WHERE id = ? AND status = 'pending'",
+                (now, request_id),
+            )
+        logger.info(
+            "pool: auto-credited %s $%.2f from coinbase tx %s",
+            telegram_id, amount, cb_id,
+        )
+        events.append({
+            "kind": "credited", "cb_tx_id": cb_id, "txid": txid,
+            "telegram_id": telegram_id, "request_id": request_id,
+            "amount_usd": amount, "claimed_usd": claimed,
+            "mismatch": abs(amount - claimed) > 0.01,
+            "cash_usd": float(result.get("cash_usd") or 0.0),
+        })
+
+    if first_run:
+        set_meta(_CHAIN_BASELINE_KEY, now)
+    return events
+
+
+def mark_chain_deposit_alerted(cb_tx_id: str) -> None:
+    """Remember an unmatched transfer was reported, so it is raised once."""
+    with _connect() as conn:
+        conn.execute(
+            "UPDATE pool_chain_deposits SET alerted_at = ? WHERE cb_tx_id = ?",
+            (_now(), cb_tx_id),
+        )
+
+
+def unmatched_chain_deposits() -> list[dict[str, Any]]:
+    """Arrived transfers nobody has claimed — money owed to someone unknown."""
+    with _connect() as conn:
+        rows = conn.execute(
+            "SELECT * FROM pool_chain_deposits WHERE status = 'unmatched' "
+            "ORDER BY first_seen_at"
+        ).fetchall()
+    return [dict(r) for r in rows]
+
+
+def assign_chain_deposit(
+    cb_tx_id: str, telegram_id: int, *, admin_id: int
+) -> dict[str, Any]:
+    """Credit an unmatched transfer to a tester, on an admin's say-so.
+
+    The escape hatch for a deposit sent without a hash, or with a mistyped
+    one. Credits Coinbase's amount for the same reason the automatic path
+    does, and goes through the same idempotency key so a transfer assigned
+    twice still only pays once.
+    """
+    with _connect() as conn:
+        row = conn.execute(
+            "SELECT * FROM pool_chain_deposits WHERE cb_tx_id = ?", (cb_tx_id,)
+        ).fetchone()
+    if row is None:
+        return {"ok": False, "reason": "not_found"}
+    if str(row["status"]) == "credited":
+        return {"ok": False, "reason": "already_credited",
+                "telegram_id": row["telegram_id"]}
+    if not is_approved(telegram_id):
+        return {"ok": False, "reason": "not_approved"}
+
+    amount = float(row["amount_usd"])
+    result = credit(
+        telegram_id, amount, admin_id=admin_id,
+        ref=f"cb_deposit:{cb_tx_id}",
+        note=f"assigned by {admin_id}, coinbase tx {cb_tx_id}",
+    )
+    if not result.get("ok"):
+        return result
+    with _connect() as conn:
+        conn.execute(
+            "UPDATE pool_chain_deposits SET status = 'credited', telegram_id = ?, "
+            "credited_at = ?, note = ? WHERE cb_tx_id = ?",
+            (telegram_id, _now(), f"assigned by admin {admin_id}", cb_tx_id),
+        )
+    logger.info(
+        "pool: %s assigned coinbase tx %s ($%.2f) to %s",
+        admin_id, cb_tx_id, amount, telegram_id,
+    )
+    return {"ok": True, "telegram_id": telegram_id, "amount_usd": amount,
+            "cash_usd": result.get("cash_usd")}
 
 
 def get_deposit_request(request_id: int) -> dict[str, Any] | None:
