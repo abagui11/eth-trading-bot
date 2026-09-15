@@ -396,6 +396,23 @@ A lookup failure is **not** a mismatch. An Etherscan outage leaves the wallet
 `pending` and is retried, rather than being recorded as a failed proof, so a
 bad afternoon at Etherscan never refuses an honest tester their own money.
 
+#### Rehearsing the whole thing
+
+`deploy/_rehearse_tester.py` walks one tester from `/start` to settled
+withdrawal — registration, deposit claim, auto-credit, on-chain verification,
+the caps, the refund, and settlement — plus the exchange-deposit mismatch. It
+calls the shipped sweeps rather than reimplementing them and prints the exact
+DMs a tester and an admin would receive, so it doubles as a copy review.
+
+The chain reads are **real**: real Etherscan lookups against the real
+transfers on the deposit address and the real $2 payout. The ledger is a
+scratch file, so no balance moves and the reconciler never sees a claim
+without venue cash behind it. Safe to run any time.
+
+It cannot prove the two things that need money in motion — a brand-new deposit
+arriving at Coinbase, and a brand-new payout leaving. Each has been
+demonstrated separately with real funds.
+
 #### Credits are automatic
 
 You are no longer in the path. `watchdog._deposit_sweep` runs every 60s, reads
