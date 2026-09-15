@@ -271,8 +271,12 @@ class DerivGateway:
         - ``total_pending_transfers_amount`` — may have left one pot without
           having arrived in the other, so it is not safely attributable.
 
-        ``tradeable_usd`` is the separate operational question: how much can
-        actually margin a position right now, which is the futures pot only.
+        The operational question is separate and needs two numbers, not one.
+        ``collateral_usd`` is what actually sits in the CFM pot ($68.67 here);
+        ``buying_power_usd`` is what Coinbase will *let* a position draw on
+        ($3,737.92), because it counts the spot USDC as futures collateral at
+        trade time. Reporting only the first would say the desk is out of money
+        when it is not.
         """
         spot_usd = 0.0
         wallets: dict[str, float] = {}
@@ -296,7 +300,8 @@ class DerivGateway:
             "total_usd": spot_usd + futures_usd,
             "spot_usd": spot_usd,
             "futures_usd": futures_usd,
-            "tradeable_usd": futures_usd,
+            "collateral_usd": futures_usd,
+            "buying_power_usd": float(summary.get("available_funds") or 0.0),
             "wallets": wallets,
             "truncated": bool(res.get("has_next")),
         }

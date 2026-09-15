@@ -1056,7 +1056,6 @@ def total_tester_cash() -> float:
 def reconcile(
     venue_assets_usd: float,
     *,
-    tradeable_usd: float | None = None,
     breakdown: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """The fiduciary floor check: the venue must cover every tester's claim.
@@ -1072,10 +1071,9 @@ def reconcile(
     futures pot alone made the first credited deposit look like a shortfall
     on a perfectly solvent account — see ``DerivGateway.get_cash_assets``.
 
-    ``tradeable_usd`` is recorded but never gates the check: cash awaiting an
-    internal transfer into futures collateral is still the tester's money, so
-    it must not read as missing. It is here so ops can see when claims are
-    covered but not yet deployable.
+    ``breakdown`` (where the cash sits, and what the venue will lend against
+    it) is recorded but never gates the check — solvency and deployability are
+    different questions, and cash in the wrong pot is still the tester's money.
     """
     testers = total_tester_cash()
     headroom = float(venue_assets_usd) - testers
@@ -1083,7 +1081,6 @@ def reconcile(
     snapshot = {
         "at": _now(),
         "venue_assets_usd": round(float(venue_assets_usd), 2),
-        "tradeable_usd": None if tradeable_usd is None else round(float(tradeable_usd), 2),
         "tester_cash_usd": round(testers, 2),
         "house_residual_usd": round(headroom, 2),
         "breakdown": breakdown or {},

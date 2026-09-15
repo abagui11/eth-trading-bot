@@ -49,10 +49,10 @@ def main() -> int:
         verdict = "OK" if h >= -tol else "FREEZE + page ops"
         print(f"    {label}: headroom ${h:>10,.2f}  -> {verdict}")
 
-    print(f"\ntradeable (futures collateral): ${assets['tradeable_usd']:,.2f}")
-    if assets["tradeable_usd"] < claims + 1000.0:
-        print("    NOTE: covered but not deployable — a spot->futures transfer is")
-        print("    needed before that cash can margin a position. Not a shortfall.")
+    # Deployability is a separate question from solvency, and needs both
+    # numbers: the CFM pot is small, but Coinbase lends against the spot USDC.
+    print(f"\nCFM collateral:       ${assets['collateral_usd']:,.2f}")
+    print(f"futures buying power: ${assets['buying_power_usd']:,.2f}")
     return 0
 
 

@@ -811,10 +811,11 @@ def _pool_sweep(spots: dict[str, float] | None = None) -> None:
 
     snapshot = pool.reconcile(
         total,
-        tradeable_usd=float(assets.get("tradeable_usd") or 0.0),
         breakdown={
             "spot_usd": round(float(assets.get("spot_usd") or 0.0), 2),
             "futures_usd": round(float(assets.get("futures_usd") or 0.0), 2),
+            "collateral_usd": round(float(assets.get("collateral_usd") or 0.0), 2),
+            "buying_power_usd": round(float(assets.get("buying_power_usd") or 0.0), 2),
         },
     )
     if not snapshot["ok"] and not was_frozen:

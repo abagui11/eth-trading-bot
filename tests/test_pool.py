@@ -481,21 +481,20 @@ class ReconcileTests(PoolTestCase):
         """
         self._fund(ALICE, 1000.0)
         snapshot = pool.reconcile(
-            3578.96 + 68.67, tradeable_usd=68.67,
-            breakdown={"spot_usd": 3578.96, "futures_usd": 68.67},
+            3578.96 + 68.67,
+            breakdown={"spot_usd": 3578.96, "futures_usd": 68.67, "collateral_usd": 68.67},
         )
         self.assertTrue(snapshot["ok"], snapshot)
         self.assertIsNone(pool.intents_frozen())
-        # Recorded so ops can see claims are covered but not yet deployable,
-        # without that gating the check.
-        self.assertEqual(snapshot["tradeable_usd"], 68.67)
-        self.assertLess(snapshot["tradeable_usd"], snapshot["tester_cash_usd"])
+        # Collateral is a fraction of the claim and that is fine: where the
+        # cash sits is recorded, never a solvency verdict.
+        self.assertLess(snapshot["breakdown"]["collateral_usd"], snapshot["tester_cash_usd"])
 
     def test_the_snapshot_carries_where_the_money_sits(self) -> None:
         self._fund(ALICE, 600.0)
         snapshot = pool.reconcile(
-            1000.0, tradeable_usd=200.0,
-            breakdown={"spot_usd": 800.0, "futures_usd": 200.0},
+            1000.0,
+            breakdown={"spot_usd": 800.0, "futures_usd": 200.0, "buying_power_usd": 950.0},
         )
         self.assertEqual(snapshot["venue_assets_usd"], 1000.0)
         self.assertEqual(snapshot["breakdown"]["spot_usd"], 800.0)
@@ -557,9 +556,16 @@ class CashAssetsTests(unittest.TestCase):
         self.assertAlmostEqual(assets["spot_usd"], 3578.96, places=2)
         self.assertAlmostEqual(assets["futures_usd"], 68.67, places=2)
         self.assertAlmostEqual(assets["total_usd"], 3647.63, places=2)
-        # Tradeable is the futures pot alone — the operational question, kept
-        # apart from the solvency one.
-        self.assertAlmostEqual(assets["tradeable_usd"], 68.67, places=2)
+
+    def test_collateral_and_buying_power_are_reported_separately(self) -> None:
+        """Only $68.67 sits in CFM, but Coinbase lends against the spot USDC.
+
+        Reporting the collateral figure alone would read as a desk that is out
+        of money while it in fact has $3,737.92 of capacity.
+        """
+        assets = self._gateway().get_cash_assets()
+        self.assertAlmostEqual(assets["collateral_usd"], 68.67, places=2)
+        self.assertAlmostEqual(assets["buying_power_usd"], 3737.92, places=2)
 
     def test_cbi_balance_is_not_added_on_top_of_the_wallets(self) -> None:
         """cbi_usd_balance is a view of the same consumer spot money.
@@ -620,7 +626,8 @@ class ReconcileSkipTests(PoolTestCase):
         gw = MagicMock()
         gw.get_cash_assets.return_value = {
             "total_usd": 0.0, "spot_usd": 0.0, "futures_usd": 0.0,
-            "tradeable_usd": 0.0, "wallets": {}, "truncated": False,
+            "collateral_usd": 0.0, "buying_power_usd": 0.0,
+            "wallets": {}, "truncated": False,
         }
         reconcile = self._run_sweep(lambda: gw)
         reconcile.assert_not_called()
@@ -631,12 +638,15 @@ class ReconcileSkipTests(PoolTestCase):
         gw = MagicMock()
         gw.get_cash_assets.return_value = {
             "total_usd": 3647.63, "spot_usd": 3578.96, "futures_usd": 68.67,
-            "tradeable_usd": 68.67, "wallets": {}, "truncated": False,
+            "collateral_usd": 68.67, "buying_power_usd": 3737.92,
+            "wallets": {}, "truncated": False,
         }
         reconcile = self._run_sweep(lambda: gw)
         reconcile.assert_called_once()
         self.assertAlmostEqual(reconcile.call_args.args[0], 3647.63, places=2)
-        self.assertAlmostEqual(reconcile.call_args.kwargs["tradeable_usd"], 68.67, places=2)
+        breakdown = reconcile.call_args.kwargs["breakdown"]
+        self.assertAlmostEqual(breakdown["spot_usd"], 3578.96, places=2)
+        self.assertAlmostEqual(breakdown["buying_power_usd"], 3737.92, places=2)
 
 
 class PortfolioTests(PoolTestCase):
