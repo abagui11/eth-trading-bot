@@ -77,6 +77,7 @@ class VaultPolicy:
     premium_gated: bool
     qty_floors: dict[str, float]
     risk_pct: float
+    derisked_slot_exempt: int
 
 
 def policy() -> VaultPolicy:
@@ -94,6 +95,7 @@ def policy() -> VaultPolicy:
         premium_gated=bool(bot_config.HQ_IDEAS_INTERNAL_ONLY),
         qty_floors=dict(bot_config.LIVE_PRODUCT_QTY_FLOORS),
         risk_pct=float(bot_config.LIVE_HQ_RISK_PCT),
+        derisked_slot_exempt=int(bot_config.LIVE_DERISKED_SLOT_EXEMPT_HQ),
     )
 
 
@@ -111,6 +113,7 @@ def policy_public(p: VaultPolicy | None = None) -> dict[str, Any]:
         "max_open": p.max_open,
         "max_leverage": p.max_leverage,
         "max_per_product": p.max_per_product,
+        "derisked_slot_exempt": p.derisked_slot_exempt,
         "daily_loss_limit_usd": p.daily_loss_limit_usd,
         "scale_ins_allowed": p.scale_ins_allowed,
         "allowed_products": list(p.allowed_products),
@@ -228,27 +231,103 @@ def open_allocations() -> list[dict[str, Any]]:
     return [dict(r) for r in rows]
 
 
+def _open_notional(trade: dict[str, Any]) -> float:
+    """Exposure still on the exchange, not the size the clip opened at.
+
+    A scale-out leaves part of the clip behind; carrying its original notional
+    counted capital the sleeve had already got back, so a book that had banked
+    half its size still read as fully deployed. Rows written before partial
+    exits existed have no ``qty_open`` and 0 is a real value, so ``None`` is
+    the only signal to fall back on the full size.
+    """
+    qty = float(trade.get("qty") or 0)
+    raw_open = trade.get("qty_open")
+    qty_open = qty if raw_open is None else float(raw_open)
+    return qty_open * float(trade.get("entry") or 0)
+
+
+def is_de_risked(trade: dict[str, Any]) -> bool:
+    """Has this position banked a rung *and* trailed its stop past breakeven?
+
+    Both halves matter. A stop sitting at the entry on an untouched trade is
+    just a tight thesis, not a de-risked one; and a position with size banked
+    but a stop still below entry can give the whole thing back. Together they
+    mean the remainder cannot close for a loss, which is what makes charging it
+    a sleeve slot a tax on idea flow rather than a risk control.
+    """
+    qty = float(trade.get("qty") or 0)
+    raw_open = trade.get("qty_open")
+    qty_open = qty if raw_open is None else float(raw_open)
+    if qty <= 0 or qty_open <= 0 or qty_open >= qty - 1e-12:
+        return False
+    stop = trade.get("stop_loss")
+    entry = float(trade.get("entry") or 0)
+    if stop is None or entry <= 0:
+        return False
+    stop = float(stop)
+    return stop >= entry if str(trade.get("side")) == "long" else stop <= entry
+
+
 def _exposure_rows() -> list[dict[str, Any]]:
-    """Open vault names plus live HQ fills not yet booked into the vault."""
-    rows = open_allocations()
-    seen = {str(r.get("cycle_id") or "") for r in rows}
-    seen.discard("")
-    for trade in live_ledger.get_open_trades(source="hq"):
+    """Open vault names plus live HQ fills not yet booked into the vault.
+
+    Each row carries ``de_risked`` so the slot count can excuse a runner the
+    stop has already taken the risk out of. A vault name with no live fill
+    behind it is never de-risked: nothing has banked, so nothing is locked.
+    """
+    live_trades = live_ledger.get_open_trades(source="hq")
+    live_by_cycle = {
+        str(t.get("cycle_id")): t for t in live_trades if t.get("cycle_id")
+    }
+
+    rows: list[dict[str, Any]] = []
+    seen: set[str] = set()
+    for alloc in open_allocations():
+        row = dict(alloc)
+        cycle_id = str(row.get("cycle_id") or "")
+        live = live_by_cycle.get(cycle_id)
+        row["de_risked"] = bool(live and is_de_risked(live))
+        if live is not None:
+            row["notional_usd"] = _open_notional(live)
+        rows.append(row)
+        if cycle_id:
+            seen.add(cycle_id)
+
+    for trade in live_trades:
         cycle_id = str(trade.get("cycle_id") or "")
         if cycle_id and cycle_id in seen:
             continue
-        qty = float(trade.get("qty") or 0)
-        entry = float(trade.get("entry") or 0)
         rows.append(
             {
                 "cycle_id": cycle_id,
                 "product_id": trade.get("product_id"),
-                "notional_usd": qty * entry,
+                "notional_usd": _open_notional(trade),
+                "de_risked": is_de_risked(trade),
             }
         )
         if cycle_id:
             seen.add(cycle_id)
     return rows
+
+
+def slot_rows(
+    opens: list[dict[str, Any]], p: VaultPolicy | None = None
+) -> list[dict[str, Any]]:
+    """The open names that occupy a sleeve slot.
+
+    Up to ``derisked_slot_exempt`` runners are excused. Their notional is still
+    counted everywhere else, so `max_leverage` — the cap that actually bounds
+    the book — is unaffected by the exemption.
+    """
+    p = p or policy()
+    budget = max(0, int(p.derisked_slot_exempt))
+    kept: list[dict[str, Any]] = []
+    for row in opens:
+        if budget and row.get("de_risked"):
+            budget -= 1
+            continue
+        kept.append(row)
+    return kept
 
 
 def propose(
@@ -294,9 +373,12 @@ def propose(
     if pnl <= -p.daily_loss_limit_usd:
         return skip(f"daily_loss:{pnl:.2f}")
 
-    if len(opens) >= p.max_open:
+    # Slots are counted over the names still carrying risk; exposure is counted
+    # over all of them.
+    slots = slot_rows(opens, p)
+    if len(slots) >= p.max_open:
         return skip("sleeve_full")
-    same = [r for r in opens if str(r.get("product_id")) == product_id]
+    same = [r for r in slots if str(r.get("product_id")) == product_id]
     if len(same) >= p.max_per_product:
         return skip(f"product_open:{product_id}")
 

@@ -229,7 +229,9 @@ def _notify(row: dict[str, Any], outcome: str, **facts: Any) -> None:
     this, so a Telegram failure must not take it down. An unsent notice leaves
     the subscriber exactly where they were before this existed.
     """
-    if not recipients_of(row):
+    # Forum mode answers the card in the Trades topic even when no DM
+    # audience was recorded, so the check is "anyone to tell", not "any DMs".
+    if not recipients_of(row) and not config.POOL_FORUM_CHAT_ID:
         return
     try:
         import notify as notify_mod

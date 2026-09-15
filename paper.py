@@ -9,6 +9,7 @@ from datetime import datetime, timezone
 
 import bot_config
 import config
+import ladder
 from models import Suggestion
 
 LONG_ACTIONS = {"spot_buy", "deriv_buy"}
@@ -1217,19 +1218,33 @@ def _format_exit_plan(position: dict) -> str:
                 f"(currently {'below' if spot <= sl_f else 'above'} spot)."
             )
 
-    for idx, tp in enumerate(tps, start=1):
-        tp_f = float(tp)
-        if side == "short":
-            status = "hit" if spot <= tp_f else "pending"
+    # Rung sizes come from the ladder rather than being quoted as 1/N: the
+    # split is even only when the size divides evenly by the traded unit, and a
+    # position too small to split closes fully at a target well short of the
+    # last one the plan named.
+    ordered = _ordered_take_profits(side, tps)
+    tps_hit = int(position.get("tps_hit") or 0)
+    plan = _ladder_plan(position, ordered[tps_hit:])
+    shares = {round(price, 8): share for price, share in plan}
+    direction = "downside" if side == "short" else "upside"
+    last_rung = tps_hit + len(plan)
+
+    for idx, tp_f in enumerate(ordered, start=1):
+        hit = spot <= tp_f if side == "short" else spot >= tp_f
+        share = shares.get(round(tp_f, 8))
+        if idx <= tps_hit:
+            lines.append(f"TP{idx} at ${tp_f:,.2f} — already filled.")
+        elif share is None:
             lines.append(
-                f"TP{idx} at ${tp_f:,.2f} — scale out ~1/{max(len(tps), 1)} on downside ({status})."
+                f"TP{idx} at ${tp_f:,.2f} — too far for this size to reach; "
+                f"the position closes fully at TP{last_rung}."
             )
         else:
-            status = "hit" if spot >= tp_f else "pending"
             lines.append(
-                f"TP{idx} at ${tp_f:,.2f} — scale out ~1/{max(len(tps), 1)} on upside ({status})."
+                f"TP{idx} at ${tp_f:,.2f} — scale out {share * 100:.0f}% of the "
+                f"position on the {direction} ({'hit' if hit else 'pending'})."
             )
-    if len(tps) >= 2:
+    if len(plan) >= 2:
         lines.append(
             "After each target fills, the stop trails to that target so the runner locks it."
         )
@@ -1935,6 +1950,22 @@ def _check_sl_tp_closes(
     return cash
 
 
+def _ladder_plan(position: dict, levels: list[float]) -> list[tuple[float, float]]:
+    """Rung prices and each rung's share of the size still open.
+
+    Recomputed from what remains rather than stored, which is what keeps it
+    consistent as rungs fill: four contracts over three targets plan 1/1/2, and
+    the three-contract remainder over the two targets left plans 1/2 — the same
+    ladder, reached from the current row.
+    """
+    if not bot_config.PAPER_LADDER_MATCHES_LIVE:
+        return ladder.weights(levels)
+    unit = bot_config.ladder_unit(_pos_product(position))
+    if not unit:
+        return ladder.weights(levels)
+    return ladder.weights(levels, units=ladder.unit_count(_pos_qty(position), unit))
+
+
 def _fill_reached_targets(
     conn: sqlite3.Connection,
     cash: float,
@@ -1971,23 +2002,27 @@ def _fill_reached_targets(
         if eth_qty <= 0:
             return cash, position, False
 
-        tp_price = ordered_tps[tps_hit]
+        plan = _ladder_plan(position, ordered_tps[tps_hit:])
+        if not plan:
+            return cash, position, False
+
+        tp_price, share = plan[0]
         if not _tp_level_hit(side, price, tp_price):
             return cash, position, False
 
-        remaining_levels = len(ordered_tps) - tps_hit
-        if remaining_levels <= 1:
+        # One rung left takes everything still open — including when the plan
+        # named further targets the remaining size is too small to split for.
+        if len(plan) == 1:
             cash = _close_position_at_market(
                 conn, cash, position, tp_price, cycle_id, "take_profit", spots=spots
             )
             return cash, None, True
 
-        close_qty = eth_qty / remaining_levels
         cash = _reduce_position(
             conn,
             cash,
             position,
-            close_qty,
+            eth_qty * share,
             tp_price,
             cycle_id,
             "take_profit",

@@ -211,3 +211,149 @@ class VaultTests(unittest.TestCase):
     def test_skipped_cycles_do_not_hit_the_feed(self) -> None:
         vault.take(_sug(action="no_trade"), cycle_id="c-skip")
         self.assertEqual(vault.stream()["ideas"], [])
+
+
+def _open_row(**overrides) -> dict:
+    """An open HQ position that has banked a rung and trailed past breakeven."""
+    row = {
+        "cycle_id": "c-runner",
+        "product_id": "ETH-USD",
+        "side": "long",
+        "qty": 0.4,
+        "qty_open": 0.2,
+        "entry": 2400.0,
+        "stop_loss": 2400.0,
+        "notional_usd": 960.0,
+    }
+    row.update(overrides)
+    return row
+
+
+class DeRiskedRunnerTests(unittest.TestCase):
+    """A runner the stop has taken the risk out of must not hold a slot.
+
+    Eva's median TP1 takes 20.4 hours, so a position that has banked a rung and
+    trailed to breakeven can occupy one of four slots for days while being
+    unable to lose money. Charging it a slot is a tax on idea flow, not a risk
+    control — but its notional still has to count, because leverage is what
+    actually bounds the book.
+    """
+
+    def test_banked_and_trailed_to_breakeven_is_de_risked(self) -> None:
+        self.assertTrue(vault.is_de_risked(_open_row()))
+
+    def test_a_trailed_stop_with_nothing_banked_is_not(self) -> None:
+        """A stop at entry on an untouched trade is a tight thesis, not a runner."""
+        self.assertFalse(vault.is_de_risked(_open_row(qty_open=0.4)))
+
+    def test_banked_size_with_the_stop_still_below_entry_is_not(self) -> None:
+        self.assertFalse(vault.is_de_risked(_open_row(stop_loss=2380.0)))
+
+    def test_a_short_is_de_risked_by_a_stop_at_or_under_entry(self) -> None:
+        short = _open_row(side="short", stop_loss=2400.0)
+        self.assertTrue(vault.is_de_risked(short))
+        self.assertFalse(vault.is_de_risked(_open_row(side="short", stop_loss=2420.0)))
+
+    def test_a_row_with_no_stop_or_no_size_is_not(self) -> None:
+        self.assertFalse(vault.is_de_risked(_open_row(stop_loss=None)))
+        self.assertFalse(vault.is_de_risked(_open_row(qty=0.0)))
+
+    def test_a_full_sleeve_of_runners_still_admits_an_idea(self) -> None:
+        # Half-banked runners, so the sleeve has capital back as well as slots.
+        opens = [
+            _open_row(
+                cycle_id=f"c{i}",
+                de_risked=True,
+                product_id="BTC-USD",
+                notional_usd=480.0,
+            )
+            for i in range(4)
+        ]
+        with patch.object(bot_config, "LIVE_DERISKED_SLOT_EXEMPT_HQ", 2):
+            decision = vault.propose(_sug(), open_rows=opens)
+        self.assertTrue(decision["admitted"], decision.get("skip_reason"))
+
+    def test_only_the_exempt_budget_is_excused(self) -> None:
+        """Four open, three de-risked, budget of two — two still hold slots."""
+        opens = [_open_row(cycle_id=f"c{i}", de_risked=i < 3) for i in range(4)]
+        with (
+            patch.object(bot_config, "LIVE_DERISKED_SLOT_EXEMPT_HQ", 2),
+            patch.object(bot_config, "LIVE_MAX_OPEN_HQ", 2),
+        ):
+            decision = vault.propose(_sug(), open_rows=opens)
+        self.assertFalse(decision["admitted"])
+        self.assertEqual(decision["skip_reason"], "sleeve_full")
+
+    def test_the_exemption_also_frees_the_per_product_cap(self) -> None:
+        opens = [
+            _open_row(cycle_id="c0", product_id="ETH-USD", de_risked=True),
+            _open_row(cycle_id="c1", product_id="ETH-USD", de_risked=False),
+        ]
+        with (
+            patch.object(bot_config, "LIVE_DERISKED_SLOT_EXEMPT_HQ", 2),
+            patch.object(bot_config, "LIVE_MAX_PER_PRODUCT_HQ", 2),
+        ):
+            decision = vault.propose(_sug(product_id="ETH-USD"), open_rows=opens)
+        self.assertTrue(decision["admitted"], decision.get("skip_reason"))
+
+    def test_an_excused_runner_still_counts_against_leverage(self) -> None:
+        """The exemption frees a slot, never capital."""
+        opens = [
+            _open_row(cycle_id="c0", notional_usd=1000.0, de_risked=True),
+            _open_row(cycle_id="c1", product_id="BTC-USD", notional_usd=1000.0),
+        ]
+        with (
+            patch.object(bot_config, "LIVE_DERISKED_SLOT_EXEMPT_HQ", 2),
+            patch.object(bot_config, "LIVE_MAX_LEVERAGE", 1.0),
+        ):
+            decision = vault.propose(_sug(), open_rows=opens)
+        self.assertFalse(decision["admitted"])
+        self.assertEqual(decision["skip_reason"], "heat_cap")
+
+    def test_zero_budget_disables_the_exemption(self) -> None:
+        opens = [_open_row(cycle_id=f"c{i}", de_risked=True) for i in range(4)]
+        with patch.object(bot_config, "LIVE_DERISKED_SLOT_EXEMPT_HQ", 0):
+            decision = vault.propose(_sug(), open_rows=opens)
+        self.assertFalse(decision["admitted"])
+        self.assertEqual(decision["skip_reason"], "sleeve_full")
+
+    def test_exposure_rows_flag_a_live_runner(self) -> None:
+        """`de_risked` has to survive the vault-row / live-row join."""
+        tmpdir = tempfile.TemporaryDirectory(ignore_cleanup_errors=True)
+        self.addCleanup(tmpdir.cleanup)
+        patcher = patch.object(config, "LEDGER_DB", Path(tmpdir.name) / "ledger.db")
+        patcher.start()
+        self.addCleanup(patcher.stop)
+        live_ledger.init_db()
+        vault.init_db()
+
+        trade_id = live_ledger.record_open(
+            cycle_id="c-live",
+            source="hq",
+            product_id="ETH-USD",
+            instrument="ETH-27JUN25-CDE",
+            side="long",
+            qty=0.4,
+            entry=2400.0,
+            stop_loss=2380.0,
+            take_profits_json="[2450.0, 2500.0]",
+            order_id="o1",
+            stop_order_id="s1",
+        )
+        rows = vault._exposure_rows()
+        self.assertEqual([r["de_risked"] for r in rows], [False])
+        self.assertAlmostEqual(rows[0]["notional_usd"], 960.0)
+
+        live_ledger.record_partial_exit(
+            trade_id,
+            exit_qty=0.1,
+            exit_price=2450.0,
+            pnl_usd=5.0,
+            order_id="tp1",
+            reason="take_profit",
+        )
+        live_ledger.set_stop_loss(trade_id, 2400.0)
+        rows = vault._exposure_rows()
+        self.assertEqual([r["de_risked"] for r in rows], [True])
+        # A banked rung gives the sleeve its capital back.
+        self.assertAlmostEqual(rows[0]["notional_usd"], 720.0)

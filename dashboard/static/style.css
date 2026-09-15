@@ -1192,6 +1192,12 @@ a.news-title:hover {
   background: rgba(14, 122, 82, 0.08);
 }
 
+/* Planned but never placed — reads as a level, not as a live order. */
+.levels-strip .level-tp-unarmed {
+  border-style: dashed;
+  opacity: 0.6;
+}
+
 .exit-legs {
   margin: 0 0 12px;
 }

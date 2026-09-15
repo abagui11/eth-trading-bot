@@ -48,14 +48,56 @@ def _drop_truncated_id_typos(ids: set[int]) -> list[int]:
     return kept
 
 
+def _pool_approved(user_id: int) -> bool:
+    """DB-backed product approvals (tester pool Admit flow)."""
+    try:
+        import pool
+
+        return pool.is_approved(user_id)
+    except Exception:
+        return False
+
+
 def is_allowed(user_id: int) -> bool:
-    if not config.PAYWALL_ENABLED:
+    """May this user talk to the product?
+
+    The env allowlist and a pool Admit both grant access. When the tester
+    pool is on, the product is approval-gated: an unknown user gets the
+    pending-approval flow instead of the open beta. With both paywall and
+    pool off, behaviour is unchanged (everyone in).
+    """
+    if user_id in load_allowed_ids():
         return True
-    return user_id in load_allowed_ids()
+    if _pool_approved(user_id):
+        return True
+    if config.PAYWALL_ENABLED:
+        return False
+    import bot_config
+
+    if bot_config.POOL_ENABLED:
+        return False
+    return True
 
 
 def broadcast_recipient_ids() -> list[int]:
     """Telegram user IDs that receive hourly trade DMs."""
+    import bot_config
+
+    if bot_config.POOL_ENABLED:
+        # Approval-gated product: cards go to admitted users (plus allowlist),
+        # not to everyone who ever messaged the bot.
+        try:
+            import pool
+
+            ids = {
+                int(a["telegram_id"])
+                for a in pool.list_accounts()
+                if pool.is_approved(int(a["telegram_id"]))
+            }
+        except Exception:
+            ids = set()
+        ids.update(load_allowed_ids())
+        return _drop_truncated_id_typos(ids)
     if not config.PAYWALL_ENABLED:
         ids = {row["telegram_id"] for row in list_subscribers()}
         ids.update(load_allowed_ids())

@@ -1,0 +1,54 @@
+eva.finance {
+	encode zstd gzip
+
+	# Marketing-site API. The dashboard mounts these routes under
+	# /api/public/*; the site calls them same-origin at /api/* so the browser
+	# never makes a cross-origin request and no CORS header is involved.
+	# handle_path strips /api, the rewrite puts back the public prefix:
+	#   /api/strategies -> /strategies -> /api/public/strategies
+	handle_path /api/* {
+		rewrite * /api/public{path}
+		reverse_proxy localhost:8080
+	}
+
+	handle {
+		root * /var/www/eva-web
+		# Astro builds flat files (beta.html, docs/whitepaper.html), so clean
+		# URLs need the .html fallback. Deliberately no /404.html fallback
+		# here: falling back to it would serve the error page with a 200 and
+		# make every typo look like a real page to crawlers. Let the miss
+		# become a 404 and hand it to handle_errors below.
+		try_files {path} {path}/index.html {path}.html
+		file_server
+	}
+
+	handle_errors {
+		root * /var/www/eva-web
+		rewrite * /404.html
+		file_server {
+			status {err.status_code}
+		}
+	}
+
+	header {
+		Strict-Transport-Security "max-age=31536000; includeSubDomains"
+		X-Content-Type-Options "nosniff"
+		Referrer-Policy "strict-origin-when-cross-origin"
+		X-Frame-Options "SAMEORIGIN"
+		-Server
+	}
+
+	# Astro fingerprints these filenames, so they are safe to pin.
+	header /_astro/* Cache-Control "public, max-age=31536000, immutable"
+	header /brand/* Cache-Control "public, max-age=604800"
+	header /case-studies/* Cache-Control "public, max-age=86400"
+
+	log {
+		output file /var/log/caddy/eva-finance.log
+		format json
+	}
+}
+
+www.eva.finance {
+	redir https://eva.finance{uri} permanent
+}

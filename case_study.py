@@ -1176,10 +1176,12 @@ def render_case_study(
     )
     pnl = float(facts.get("pnl_usd") or 0)
     pnl_color = "#3fb950" if pnl >= 0 else "#f85149"
+    size = float(facts.get("notional_usd") or 0)
+    size_bit = f"${size:,.0f}  ·  " if size > 0 else ""
     fig.text(
         0.98,
         0.975,
-        f"{side}  {pnl:+,.0f} USD  ({float(facts.get('pnl_pct') or 0):+.1f}%)",
+        f"{side}  {size_bit}${pnl:+,.0f}  ({float(facts.get('pnl_pct') or 0):+.1f}%)",
         color=pnl_color,
         fontsize=12,
         fontweight="bold",

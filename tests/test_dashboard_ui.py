@@ -221,7 +221,9 @@ class DashboardUiSmokeTests(unittest.TestCase):
         self.assertIn("trade-thumb", live_card)
         # Spot 2000 vs entry 1900 on 0.4 qty — the mark the table never showed.
         self.assertIn("mark $2000.00", live_card)
-        self.assertIn("+40.00", live_card)
+        self.assertIn("$+40.00", live_card)
+        self.assertIn("$760", live_card)
+        self.assertIn('class="trade-size"', live_card)
         self.assertIn("auto", live_card)
 
     def test_trade_cards_use_button_accordion_collapsed(self) -> None:

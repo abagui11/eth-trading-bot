@@ -744,6 +744,61 @@ def _prepare_context(
     return ctx, data, live_spot, daily_bars
 
 
+_POOL_RECON_INTERVAL_SEC = 600
+_pool_last_recon = 0.0
+
+
+def _pool_sweep(spots: dict[str, float] | None = None) -> None:
+    """Tester-pool upkeep on the scan cadence.
+
+    1. Intents whose ref can no longer fire (pending plan replaced/expired,
+       mill idea filled without them, order refused) get their reserve back
+       and the tester a DM — an Accept must never just go quiet.
+    2. Every ~10 minutes, check the venue's equity covers the sum of tester
+       claims. A shortfall freezes NEW intents and alerts ops; balances are
+       never touched.
+    """
+    import time as _time
+
+    import live_pending
+    import notify
+    import pool
+    import trade_ideas_bridge
+
+    active: set[str] = {
+        str(r.get("cycle_id") or "") for r in live_pending.get_pending()
+    }
+    active |= trade_ideas_bridge.pool_active_mill_refs()
+    released = pool.expire_stale_intents(active)
+    for intent in released:
+        notify.send_pool_dm(
+            int(intent["telegram_id"]),
+            "That order never fired — it was replaced, expired, or the setup "
+            f"passed. Your ${float(intent['risk_usd']):,.2f} is back in your "
+            "available balance. Nothing was risked.",
+        )
+
+    global _pool_last_recon
+    if config.EXECUTION_MODE != "live":
+        return
+    now = _time.time()
+    if now - _pool_last_recon < _POOL_RECON_INTERVAL_SEC:
+        return
+    _pool_last_recon = now
+    from coinbase_deriv import get_gateway
+
+    was_frozen = bool(pool.intents_frozen())
+    equity = float(get_gateway().get_account_summary().get("equity") or 0.0)
+    snapshot = pool.reconcile(equity)
+    if not snapshot["ok"] and not was_frozen:
+        notify.send_pool_admin_alert(
+            "POOL RECONCILE FAILED — new intents frozen.\n"
+            f"Venue equity ${snapshot['venue_equity_usd']:,.2f} vs tester claims "
+            f"${snapshot['tester_cash_usd']:,.2f}.\n"
+            "Audit pool_events against Coinbase, then unfreeze via pool.unfreeze_intents()."
+        )
+
+
 def run_watchdog() -> list[Suggestion] | None:
     """Run one watchdog scan; fire at most once per configured product."""
     if not bot_config.WATCHDOG_ENABLED:
@@ -791,6 +846,14 @@ def run_watchdog() -> list[Suggestion] | None:
         live_exec.sync_live_positions()
     except Exception:
         logger.exception("Live position sync failed")
+
+    # Tester pool upkeep: release intents whose order can no longer fire, and
+    # verify the venue still covers every tester's claim.
+    if bot_config.POOL_ENABLED:
+        try:
+            _pool_sweep(spots)
+        except Exception:
+            logger.exception("Pool sweep failed")
 
     try:
         import case_study

@@ -30,6 +30,7 @@ from typing import Any
 
 import bot_config
 import config
+import ladder
 import live_ledger
 from coinbase_deriv import INSTRUMENT_MAP, GatewayError, get_gateway
 from models import Suggestion
@@ -49,31 +50,10 @@ def _today() -> str:
 # Exit ladder — take-profits are exchange-resting, not just ledger metadata
 # ---------------------------------------------------------------------------
 
-def _ordered_tps(side: str, take_profits: list[float] | None, entry: float) -> list[float]:
-    """Targets in the order price would reach them, wrong-side levels dropped."""
-    levels = [float(tp) for tp in (take_profits or []) if tp]
-    if side == "long":
-        return sorted(tp for tp in levels if tp > entry)
-    return sorted((tp for tp in levels if tp < entry), reverse=True)
-
-
-def _tp_ladder(contracts: int, levels: list[float]) -> list[tuple[float, int]]:
-    """Whole-contract scale-out plan as ``(price, contracts)`` rungs.
-
-    Contracts are indivisible, so a clip with fewer contracts than targets
-    can't use the whole ladder. It banks at the *nearest* targets rather than
-    skipping early profit — a one-contract clip closes fully at TP1.
-    """
-    if contracts <= 0 or not levels:
-        return []
-    used = levels[: min(contracts, len(levels))]
-    rungs = len(used)
-    base, extra = divmod(contracts, rungs)
-    # The remainder rides the furthest targets, so the runner is the last rung.
-    return [
-        (price, base + (1 if i >= rungs - extra else 0))
-        for i, price in enumerate(used)
-    ]
+# The ladder itself lives in `ladder.py` so the paper book exits on the same
+# rungs. These names are the long-standing local spelling of it.
+_ordered_tps = ladder.ordered_targets
+_tp_ladder = ladder.contract_rungs
 
 
 def _armable_tps(
@@ -184,8 +164,8 @@ def arm_exits(
         logger.exception("Exit ladder: contract sizing failed (%s)", instrument)
         contracts, csize = 0, 0.0
 
-    ladder = _tp_ladder(contracts, _ordered_tps(side, take_profits, entry))
-    if not ladder:
+    rungs = _tp_ladder(contracts, _ordered_tps(side, take_profits, entry))
+    if not rungs:
         logger.info("Exit ladder: no usable targets for %s — plain stop", label)
         return _arm_plain_stop(gw, instrument, closing, qty, stop_loss, label, result)
 
@@ -197,7 +177,7 @@ def arm_exits(
 
     placed: list[str] = []
     try:
-        for rung, (price, n) in enumerate(ladder, start=1):
+        for rung, (price, n) in enumerate(rungs, start=1):
             leg_qty = n * csize
             if mark and _tp_reached(side, mark, price):
                 # Target already through: bank it now instead of resting an
@@ -1016,6 +996,131 @@ def _force_close_mill_for_hq(gw: Any, trade: dict[str, Any], instrument: str) ->
 
 
 # ---------------------------------------------------------------------------
+# Tester pool hooks — stakes ride the house fill; every failure is contained
+# ---------------------------------------------------------------------------
+
+def _pool_dm(telegram_id: int, text: str) -> None:
+    """Account-lane DM straight over the HTTP API — thread-safe, never raises."""
+    try:
+        import requests as _rq
+
+        _rq.post(
+            f"https://api.telegram.org/bot{config.TELEGRAM_BOT_TOKEN}/sendMessage",
+            json={"chat_id": int(telegram_id), "text": text[:4096]},
+            timeout=10,
+        )
+    except Exception:
+        logger.exception("Pool DM failed for %s", telegram_id)
+
+
+def _pool_open_stakes(
+    trade_id: int,
+    ref: str,
+    *,
+    fill_qty: float,
+    fill_price: float,
+    stop_loss: float,
+    house_qty: float,
+    product_id: str,
+    side: str,
+) -> None:
+    """Attach tester stakes to a fresh live fill and tell each tester theirs.
+
+    House and tester budgets are both measured at the actual fill (risk per
+    unit = |fill − stop|), so the split cannot be gamed by drift between the
+    planned entry and the print.
+    """
+    if not bot_config.POOL_ENABLED or not ref:
+        return
+    try:
+        import pool
+
+        rpu = abs(fill_price - stop_loss)
+        stakes = pool.open_stakes(
+            trade_id,
+            ref,
+            fill_qty=fill_qty,
+            fill_price=fill_price,
+            risk_per_unit=rpu,
+            house_risk_usd=rpu * house_qty,
+        )
+    except Exception:
+        logger.exception("pool stake open failed for trade #%s (%s)", trade_id, ref)
+        return
+    label = bot_config.product_label(product_id)
+    for stake in stakes:
+        _pool_dm(
+            int(stake["telegram_id"]),
+            f"You're in — {label} {side} filled @ {fill_price:,.2f}.\n"
+            f"Your size: ${float(stake['cost_usd']):,.2f} "
+            f"({float(stake['share_frac']) * 100:.1f}% of the position) · "
+            f"risk ${float(stake['risk_usd']):,.2f} at the stop.\n"
+            "Exits are automatic — you'll get a message as each one fills. "
+            "/portfolio any time.",
+        )
+
+
+def _pool_book_exit(
+    trade_id: int,
+    *,
+    exit_qty: float,
+    exit_price: float,
+    pnl_usd: float,
+    order_id: str,
+    reason: str,
+    qty_total: float,
+) -> None:
+    """Credit tester stakes their share of one booked exit leg."""
+    if not bot_config.POOL_ENABLED:
+        return
+    try:
+        import pool
+
+        booked = pool.book_exit(
+            trade_id,
+            exit_qty=exit_qty,
+            exit_price=exit_price,
+            pnl_usd=pnl_usd,
+            order_id=str(order_id),
+            reason=reason,
+            qty_total=qty_total,
+        )
+    except Exception:
+        logger.exception("pool exit booking failed for trade #%s", trade_id)
+        return
+    nice = "Target hit" if reason == "take_profit" else (
+        "Stopped" if reason == "stop_loss" else "Position reduced"
+    )
+    for leg in booked:
+        _pool_dm(
+            int(leg["telegram_id"]),
+            f"{nice} @ {exit_price:,.2f} — your share: "
+            f"${float(leg['pnl_usd']):+,.2f} (banked). /portfolio for the full picture.",
+        )
+
+
+def _pool_book_close(trade_id: int, row: dict[str, Any], *, reason: str) -> None:
+    """Finalise stakes when the trade fully closes; DM each tester the total."""
+    if not bot_config.POOL_ENABLED:
+        return
+    try:
+        import pool
+
+        closed = pool.book_close(trade_id, close_reason=reason)
+    except Exception:
+        logger.exception("pool close booking failed for trade #%s", trade_id)
+        return
+    label = bot_config.product_label(str(row.get("product_id") or ""))
+    for stake in closed:
+        _pool_dm(
+            int(stake["telegram_id"]),
+            f"Trade closed — {label} {row.get('side')} ({reason}).\n"
+            f"Your total on this trade: ${float(stake['realized_pnl_usd']):+,.2f}. "
+            "Funds are back in your available balance.",
+        )
+
+
+# ---------------------------------------------------------------------------
 # Core entry
 # ---------------------------------------------------------------------------
 
@@ -1144,6 +1249,34 @@ def _execute(
             )
             return None
 
+    # --- Tester pool: budgets accepted on this ref add size to the order ----
+    # One aggregate market order, virtual pro-rata shares. Whole contracts
+    # only; budgets that cannot afford an extra contract still buy ownership
+    # of the fill via the split in _pool_open_stakes.
+    house_qty = qty
+    pool_ref = str(cycle_id or "")
+    if bot_config.POOL_ENABLED and mode == "live" and pool_ref:
+        try:
+            import pool
+
+            fill_ref = spot_price if spot_price and spot_price > 0 else float(entry)
+            rpu = abs(float(fill_ref) - float(suggestion.stop_loss))
+            extra_qty, intents = pool.extra_contracts_for(
+                pool_ref,
+                risk_per_unit=rpu,
+                floor=bot_config.LIVE_PRODUCT_QTY_FLOORS.get(product_id),
+            )
+            if extra_qty > 0:
+                qty += extra_qty
+                notional += extra_qty * float(fill_ref)
+                logger.info(
+                    "pool: %s adds %.4f %s to the house order (%d intent(s))",
+                    pool_ref, extra_qty, product_id, len(intents),
+                )
+        except Exception:
+            logger.exception("pool sizing failed for %s — house-only order", pool_ref)
+            qty = house_qty
+
     order_payload = {
         "product_id": product_id,
         "instrument": instrument,
@@ -1222,6 +1355,12 @@ def _execute(
 
     stop_order_id = exits.get("stop_order_id") or ""
 
+    # The whole ladder the analysis produced, and the subset this clip could
+    # afford to rest. Recording both keeps the armed list authoritative for the
+    # trail while leaving the dropped targets visible instead of silently gone.
+    planned = _ordered_tps(side, list(suggestion.take_profits or []), fill_price)
+    armed = _armable_tps(product_id, side, qty, fill_price, suggestion.take_profits)
+
     trade_id = live_ledger.record_open(
         cycle_id=cycle_id,
         source=source,
@@ -1231,9 +1370,8 @@ def _execute(
         qty=qty,
         entry=fill_price,
         stop_loss=float(suggestion.stop_loss),
-        take_profits_json=json.dumps(
-            _armable_tps(product_id, side, qty, fill_price, suggestion.take_profits)
-        ),
+        take_profits_json=json.dumps(armed),
+        plan_take_profits_json=json.dumps(planned),
         order_id=order_id or None,
         stop_order_id=stop_order_id or None,
         notes=f"ob:{ob_ref}" if ob_ref else None,
@@ -1242,17 +1380,42 @@ def _execute(
         exit_order_ids=exits.get("exit_order_ids") or [],
     )
 
+    # Tester stakes attach to the row before any exits book against it, so a
+    # gap-through leg banked at arm time credits them too.
+    _pool_open_stakes(
+        trade_id,
+        pool_ref,
+        fill_qty=qty,
+        fill_price=fill_price,
+        stop_loss=float(suggestion.stop_loss),
+        house_qty=house_qty,
+        product_id=product_id,
+        side=side,
+    )
+
     # A target already through the market is banked during arming, so book it
     # against the row that was just written.
     direction = 1.0 if side == "long" else -1.0
     for leg in exits.get("realized") or []:
+        leg_pnl = (float(leg["price"]) - fill_price) * float(leg["qty"]) * direction
         live_ledger.record_partial_exit(
             trade_id,
             exit_qty=float(leg["qty"]),
             exit_price=float(leg["price"]),
-            pnl_usd=(float(leg["price"]) - fill_price) * float(leg["qty"]) * direction,
+            pnl_usd=leg_pnl,
             order_id=leg.get("order_id"),
             reason="take_profit",
+        )
+        _pool_book_exit(
+            trade_id,
+            exit_qty=float(leg["qty"]),
+            exit_price=float(leg["price"]),
+            pnl_usd=leg_pnl,
+            # Gap-through legs may carry no venue order id; the target price
+            # keys them uniquely for the idempotent journal.
+            order_id=str(leg.get("order_id") or f"arm:{trade_id}:{leg.get('target')}"),
+            reason="take_profit",
+            qty_total=qty,
         )
 
     # A gap-through target banks at arm time, which already earns the trail.
@@ -1286,6 +1449,14 @@ def _execute(
             lines.append(f"{n_resting} target(s) resting on the exchange")
         elif exits.get("mode") == "stop_only":
             lines.append("NO take-profit orders — stop only, targets need manual arming")
+        if len(planned) > len(armed):
+            floor = bot_config.LIVE_PRODUCT_QTY_FLOORS.get(product_id) or 0
+            held = int(round(qty / floor)) if floor else 0
+            dropped = ", ".join(f"{tp:,.2f}" for tp in planned[len(armed):])
+            lines.append(
+                f"{held} contract(s) can only rest {len(armed)} of "
+                f"{len(planned)} planned targets — not armed: {dropped}"
+            )
         for leg in exits.get("realized") or []:
             lines.append(
                 f"banked {leg['qty']:.4f} at {float(leg['price']):,.2f} "
@@ -1604,6 +1775,15 @@ def _reconcile_trade(gw: Any, trade: dict[str, Any]) -> None:
             reason=reason,
         ):
             exits.append((qty, price, reason))
+            _pool_book_exit(
+                trade_id,
+                exit_qty=qty,
+                exit_price=price,
+                pnl_usd=pnl,
+                order_id=oid,
+                reason=reason,
+                qty_total=float(trade["qty"]),
+            )
             logger.info(
                 "Live trade #%s exit leg booked: %.4f @ %.2f (%s, pnl %.2f)",
                 trade_id, qty, price, reason, pnl,
@@ -1659,6 +1839,7 @@ def _close_out(
     live_ledger.record_close(
         trade_id, exit_price=avg_exit, pnl_usd=0.0, close_reason=reason
     )
+    _pool_book_close(trade_id, row, reason=reason)
     _cancel_exit_orders(gw, row)
     total = float(row.get("realized_pnl_usd") or 0.0)
     logger.info(
@@ -1732,6 +1913,15 @@ def _reconcile_flat_instrument(gw: Any, instrument: str) -> None:
             pnl_usd=pnl,
             order_id=f"flat:{trade_id}",
             reason="exchange_close",
+        )
+        _pool_book_exit(
+            trade_id,
+            exit_qty=qty_open,
+            exit_price=exit_price,
+            pnl_usd=pnl,
+            order_id=f"flat:{trade_id}",
+            reason="exchange_close",
+            qty_total=float(trade["qty"]),
         )
         row = live_ledger.get_trade(trade_id) or {}
         _close_out(gw, trade_id, row, reason="exchange_close")
@@ -1812,8 +2002,16 @@ def _sleeve_status(source: str) -> str:
                 f"sleeve {cap['open']}/{cap['max_open']} open · "
                 f"${cap['open_notional_usd']:,.0f} of ${cap['sleeve_usd']:,.0f}"
             )
-        open_n = len(live_ledger.get_open_trades(source=source))
-        return f"sleeve {open_n}/{bot_config.LIVE_MAX_OPEN_HQ} open"
+        import vault
+
+        trades = live_ledger.get_open_trades(source=source)
+        runners = sum(1 for t in trades if vault.is_de_risked(t))
+        line = f"sleeve {len(trades)}/{bot_config.LIVE_MAX_OPEN_HQ} open"
+        if runners:
+            # These are the ones not charged a slot, so the count above can
+            # read as full while the sleeve still admits a new idea.
+            line += f" ({runners} de-risked)"
+        return line
     except Exception:
         logger.exception("Sleeve status for alert failed (%s)", source)
         return ""

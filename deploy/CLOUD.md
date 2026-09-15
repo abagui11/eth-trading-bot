@@ -200,6 +200,123 @@ sudo systemctl restart eth-agent
 
 Tell them to `/start` the bot again.
 
+### Tester pool flow (`bot_config.POOL_ENABLED = True`)
+
+The pool replaces both flows above with an **in-band Admit tap** — no `.env`
+edit, no restart:
+
+1. **They** open the bot and send anything. Their request lands in
+   `approved_users` and every pool admin gets a DM card with **Admit / Deny**.
+2. **You** tap Admit. They get the welcome DM, the Account keyboard
+   (Portfolio / Deposit), and a **one-time invite link** to the forum group.
+3. **They** `/deposit`, send USDC to `POOL_DEPOSIT_ADDRESS`, then
+   `/deposit 1000 <txid>`. You get a **Credit / Deny** card — tap Credit
+   **only after the funds are visible on Coinbase**. Their cash is live the
+   moment you tap.
+4. From then on their Accepts in the Trades topic join live fills with
+   pooled sizing; `/portfolio` shows their real book. `/credit <id> <usd>`
+   and `/debit <id> <usd>` are the admin escape hatches (a debit can never
+   touch margin reserved in open trades).
+
+#### One-time forum setup
+
+With ``POOL_ENABLED``, **trade cards are personal DMs** so each card can show
+that tester's Accept risk and position size. Leave `POOL_FORUM_*` / mill
+`TELEGRAM_FORUM_*` unset for trades, or use the forum only for Research
+alerts. If you still set a Trades forum id, the hub ignores it for HQ cards
+while the pool is on.
+
+Optional Research topic (z-moves / digests), if you want a shared channel:
+
+1. Create a private Telegram group → group settings → enable **Topics**.
+2. Create a **Research** topic (Trades optional / unused while pool DMs).
+3. Add the bot as **admin** with *Manage Topics* and *Invite Users via Link*.
+4. Read the ids: post one message in the topic, then
+   `curl "https://api.telegram.org/bot<token>/getUpdates"` — `chat.id` is the
+   (negative) group id, `message_thread_id` the topic id.
+5. In `/opt/eth-trading-agent/.env`:
+
+   ```env
+   # Optional — Research pushes only while POOL_ENABLED (trade cards stay DMs)
+   POOL_FORUM_CHAT_ID=-1001234567890
+   POOL_FORUM_RESEARCH_THREAD_ID=3
+   POOL_DEPOSIT_ADDRESS=0x...
+   ```
+
+6. For the mill, leave `TELEGRAM_FORUM_CHAT_ID` **unset** so idea cards DM
+   approved subscribers (same audience as HQ). Set it only if you want mill
+   cards in a shared topic *without* per-user size lines.
+
+#### Turning the pool on (done 2026-09-15 — kept as the runbook)
+
+Two things must be in place **before** the flag flips, because both fail
+silently and one of them is a lockout you cannot undo from Telegram.
+
+1. **An admin id must resolve.** With `POOL_ADMIN_TELEGRAM_IDS` empty in both
+   `bot_config.py` and `.env`, no `INTERNAL_TELEGRAM_IDS`, and no
+   `TELEGRAM_ADMIN_CHAT_ID`, `pool.admin_ids()` returns `[]` — the Admit and
+   Credit cards go nowhere and nobody can ever be let into the product. Set
+   your **Telegram user id** (not a chat id, no minus sign):
+
+   ```env
+   POOL_ADMIN_TELEGRAM_IDS=2037245798
+   ```
+
+   Check it: `@userinfobot` or `@getidsbot` on Telegram replies with your id.
+   Comma-separate for several admins; every one of them gets every card.
+
+2. **Grandfather the existing users in.** Turning the pool on makes
+   `access.is_allowed` approval-gated, so anyone already using the bot is
+   locked out until Admitted. On this box `ALLOWED_TELEGRAM_IDS` is empty —
+   it has run paywall-off since the beta, so the `subscribers` table *is* the
+   access list. The bootstrap admits both sources as approved, zero-balance
+   accounts. It never moves money and is idempotent:
+
+   ```bash
+   cd /opt/eth-trading-agent
+   sudo -u ethagent .venv/bin/python deploy/pool_bootstrap.py --dry-run
+   sudo -u ethagent .venv/bin/python deploy/pool_bootstrap.py --apply
+   ```
+
+Then deploy and restart both services. Verify:
+
+```bash
+sudo -u ethagent /opt/eth-trading-agent/.venv/bin/python -c \
+  "import pool, access; print('admins', pool.admin_ids()); \
+   print('recipients', access.broadcast_recipient_ids())"
+```
+
+`admins` must be non-empty and `recipients` must still list everyone who was
+getting cards yesterday. Trading is unaffected while every account is
+unfunded: `extra_contracts_for` returns 0, so house order size, levels and
+exits are identical to before the flip.
+
+#### Adding a test account
+
+Use a **second Telegram account** (a spare number, or Telegram Desktop signed
+in as another user) rather than your own — your admin id short-circuits the
+approval path, so testing with it never exercises the gate. From the test
+account, `/start` the bot, Admit it from your admin account, then
+`/deposit` and tap Credit to give it play money. To reset it:
+
+```bash
+sudo -u ethagent /opt/eth-trading-agent/.venv/bin/python -c \
+  "import pool; print(pool.debit(<test_id>, <usd>, admin_id=<your_id>, note='test reset'))"
+```
+
+#### If the reconciler freezes intents
+
+The watchdog checks every ~10 minutes that Coinbase equity covers the sum of
+tester cash. On a shortfall past `POOL_RECON_TOLERANCE_USD` it freezes NEW
+Accepts (open trades keep booking exits; nothing is auto-adjusted) and DMs
+the admins. Audit `pool_events` against the Coinbase ledger, fix the cause
+(usually an uncredited deposit or an unrecorded manual withdrawal — use
+`/credit` / `/debit` to book it), then:
+
+```bash
+sudo -u ethagent /opt/eth-trading-agent/.venv/bin/python -c "import pool; pool.unfreeze_intents()"
+```
+
 ---
 
 ## Part 3 — Day-to-day operations

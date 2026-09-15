@@ -349,32 +349,70 @@ def build_card_body(
 
     lines.extend(["", summary])
 
-    # Account-aware sizing / open-account nudge.
+    # Account-aware sizing: live pool risk when the tester pool is on,
+    # otherwise the personal demo book.
     import user_books  # local import avoids circular import at module load
 
     if telegram_id is not None and tp1 is not None:
-        sizing = user_books.compute_user_notional(
-            telegram_id,
-            entry,
-            deploy_pct=suggestion.deploy_pct,
-        )
-        if sizing.get("ok"):
-            rr_usd = user_books.prospective_risk_reward_usd(
-                entry=entry,
-                stop_loss=stop,
-                take_profit=tp1,
-                side=side_label(suggestion.action),
-                notional_usd=float(sizing["notional_usd"]),
-            )
-            lines.append("")
-            lines.append(f"Your demo size ≈ ${float(sizing['notional_usd']):,.0f}")
-            lines.append(
-                f"Est. TP1 ≈ ${rr_usd['reward_usd']:,.0f} · "
-                f"Est. SL ≈ ${rr_usd['risk_usd']:,.0f}"
-            )
+        if bot_config.POOL_ENABLED:
+            import pool
+
+            if pool.is_approved(int(telegram_id)):
+                prosp = pool.prospective_accept(
+                    int(telegram_id), entry=entry, stop_loss=stop
+                )
+                lines.append("")
+                if prosp.get("ok"):
+                    risk_pct = float(prosp["risk_pct"]) * 100
+                    lines.append(
+                        f"Your Accept ≈ ${float(prosp['risk_usd']):,.2f} at risk "
+                        f"({risk_pct:.1f}% of ${float(prosp['available_usd']):,.0f} available)"
+                    )
+                    lines.append(
+                        f"≈ ${float(prosp['notional_usd']):,.0f} position size at this stop"
+                    )
+                elif prosp.get("reason") == "below_min_equity":
+                    lines.append(
+                        f"Fund at least ${float(prosp.get('minimum_usd') or 0):,.0f} "
+                        "(/deposit) to join live Accepts."
+                    )
+                elif prosp.get("reason") == "no_available_cash":
+                    lines.append(
+                        "No available cash right now — other Accepts may be reserved. "
+                        "/portfolio for the breakdown."
+                    )
+                else:
+                    lines.append(
+                        "Fund with /deposit to join this trade with live size "
+                        f"(about {bot_config.POOL_RISK_PCT * 100:.1f}% of available "
+                        "cash at risk per Accept)."
+                    )
+            else:
+                lines.append("")
+                lines.append("Access required to Accept with live size.")
         else:
-            lines.append("")
-            lines.append("Open a demo account to Accept with your demo cash.")
+            sizing = user_books.compute_user_notional(
+                telegram_id,
+                entry,
+                deploy_pct=suggestion.deploy_pct,
+            )
+            if sizing.get("ok"):
+                rr_usd = user_books.prospective_risk_reward_usd(
+                    entry=entry,
+                    stop_loss=stop,
+                    take_profit=tp1,
+                    side=side_label(suggestion.action),
+                    notional_usd=float(sizing["notional_usd"]),
+                )
+                lines.append("")
+                lines.append(f"Your demo size ≈ ${float(sizing['notional_usd']):,.0f}")
+                lines.append(
+                    f"Est. TP1 ≈ ${rr_usd['reward_usd']:,.0f} · "
+                    f"Est. SL ≈ ${rr_usd['risk_usd']:,.0f}"
+                )
+            else:
+                lines.append("")
+                lines.append("Open a demo account to Accept with your demo cash.")
     elif suggestion.size:
         lines.append("")
         lines.append(f"Agent size: ${suggestion.size:,.2f}")

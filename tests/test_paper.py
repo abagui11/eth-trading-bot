@@ -29,9 +29,17 @@ class PaperPositionTests(unittest.TestCase):
         # Outcome chart render hits Coinbase OHLC — keep unit tests offline.
         self._outcome_patch = patch.object(paper, "flush_pending_outcome_charts")
         self._outcome_patch.start()
+        # The M5 barrier path walk fetches real candles since opened_at; these
+        # tests pin ladder math on spot marks, so real September bars replayed
+        # over fictional $1,8xx levels would close everything on the spot.
+        self._candles_patch = patch(
+            "research.fetch_coinbase_candles_range", return_value=[]
+        )
+        self._candles_patch.start()
         paper.init_db()
 
     def tearDown(self) -> None:
+        self._candles_patch.stop()
         self._outcome_patch.stop()
         self._max_patch.stop()
         self._portfolio_patch.stop()
@@ -414,7 +422,12 @@ class PaperPositionTests(unittest.TestCase):
         closed = paper.get_closed_trades(limit=1)
         self.assertEqual(closed[0]["close_reason"], "stop_loss")
 
-    def test_tp1_scales_out_one_third_and_trails_sl_to_breakeven(self) -> None:
+    def test_tp1_scales_out_its_rung_and_trails_sl_to_breakeven(self) -> None:
+        """0.75 ETH is 7 nano contracts, so the ladder is 2/2/3 — not thirds.
+
+        Paper follows the rungs the live sleeve could actually place, so the
+        runner carries the extra contract the split cannot divide evenly.
+        """
         paper.restore_open_position(
             action="spot_buy",
             entry=1803.0,
@@ -432,12 +445,12 @@ class PaperPositionTests(unittest.TestCase):
         )
         positions = paper.get_open_positions(1831.62)
         self.assertEqual(len(positions), 1)
-        self.assertAlmostEqual(positions[0]["eth_qty"], 0.50, places=4)
+        self.assertAlmostEqual(positions[0]["eth_qty"], 0.75 * 5 / 7, places=4)
         self.assertAlmostEqual(float(positions[0]["stop_loss"]), 1803.0, places=2)
         self.assertEqual(int(positions[0]["tps_hit"]), 1)
         closed = paper.get_closed_trades(limit=1)
         self.assertEqual(closed[0]["close_reason"], "take_profit")
-        self.assertAlmostEqual(closed[0]["eth_qty"], 0.25, places=4)
+        self.assertAlmostEqual(closed[0]["eth_qty"], 0.75 * 2 / 7, places=4)
         self.assertAlmostEqual(closed[0]["exit"], 1831.62, places=2)
 
     def test_tp2_scales_out_and_trails_sl_to_tp1(self) -> None:
@@ -461,11 +474,12 @@ class PaperPositionTests(unittest.TestCase):
         )
         positions = paper.get_open_positions(1844.67)
         self.assertEqual(len(positions), 1)
-        self.assertAlmostEqual(positions[0]["eth_qty"], 0.25, places=4)
+        # Three of the seven contracts ride to the last target.
+        self.assertAlmostEqual(positions[0]["eth_qty"], 0.75 * 3 / 7, places=4)
         self.assertAlmostEqual(float(positions[0]["stop_loss"]), 1831.62, places=2)
         self.assertEqual(int(positions[0]["tps_hit"]), 2)
 
-    def test_tp3_closes_remaining_third(self) -> None:
+    def test_tp3_closes_the_runner(self) -> None:
         paper.restore_open_position(
             action="spot_buy",
             entry=1803.0,
@@ -486,9 +500,10 @@ class PaperPositionTests(unittest.TestCase):
         tp_closes = [c for c in closed if c["close_reason"] == "take_profit"]
         self.assertEqual(len(tp_closes), 3)
         qtys = sorted(c["eth_qty"] for c in tp_closes)
-        self.assertAlmostEqual(qtys[0], 0.25, places=4)
-        self.assertAlmostEqual(qtys[1], 0.25, places=4)
-        self.assertAlmostEqual(qtys[2], 0.25, places=4)
+        self.assertAlmostEqual(qtys[0], 0.75 * 2 / 7, places=4)
+        self.assertAlmostEqual(qtys[1], 0.75 * 2 / 7, places=4)
+        self.assertAlmostEqual(qtys[2], 0.75 * 3 / 7, places=4)
+        self.assertAlmostEqual(sum(qtys), 0.75, places=4)
 
     def test_single_tp_still_closes_full_position(self) -> None:
         paper.restore_open_position(
@@ -942,7 +957,7 @@ class PaperBarrierPathTests(unittest.TestCase):
 
         positions = paper.get_open_positions(1805.0)
         self.assertEqual(len(positions), 1)
-        self.assertAlmostEqual(positions[0]["eth_qty"], 0.50, places=4)
+        self.assertAlmostEqual(positions[0]["eth_qty"], 0.75 * 5 / 7, places=4)
         self.assertAlmostEqual(float(positions[0]["stop_loss"]), 1800.0, places=2)
 
     def test_a_position_with_no_recorded_window_checks_spot_only(self) -> None:

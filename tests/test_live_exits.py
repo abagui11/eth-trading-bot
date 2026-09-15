@@ -595,6 +595,54 @@ class LedgerDbTestCase(unittest.TestCase):
         return live_ledger.record_open(**kwargs)
 
 
+class PlannedVsArmedLedgerTests(LedgerDbTestCase):
+    """A clip too small for the whole ladder must not lose the plan's targets.
+
+    `take_profits_json` is what actually rests, so the trail and the reconcile
+    have to keep reading it. Recording the full plan beside it is what lets the
+    dashboard show a target Eva named but the sleeve could not afford, instead
+    of a one-contract BTC idea reading as though it only ever had one target.
+    """
+
+    def test_the_plan_and_the_armed_subset_are_kept_apart(self) -> None:
+        tid = self._open_trade(
+            product_id="BTC-USD",
+            qty=0.01,
+            entry=80000.0,
+            take_profits_json=json.dumps(
+                live_exec._armable_tps(
+                    "BTC-USD", "long", 0.01, 80000.0, [81000.0, 82000.0, 83000.0]
+                )
+            ),
+            plan_take_profits_json=json.dumps([81000.0, 82000.0, 83000.0]),
+        )
+        row = live_ledger.get_trade(tid)
+        self.assertEqual(json.loads(row["take_profits_json"]), [81000.0])
+        self.assertEqual(
+            json.loads(row["plan_take_profits_json"]), [81000.0, 82000.0, 83000.0]
+        )
+
+    def test_a_caller_that_does_not_distinguish_them_records_the_armed_list(self) -> None:
+        row = live_ledger.get_trade(self._open_trade())
+        self.assertEqual(row["plan_take_profits_json"], row["take_profits_json"])
+
+    def test_the_trail_still_reads_only_what_was_armed(self) -> None:
+        """One contract is one rung, so a TP1 fill closes it — nothing to trail."""
+        tid = self._open_trade(
+            product_id="BTC-USD",
+            qty=0.01,
+            entry=80000.0,
+            take_profits_json=json.dumps([81000.0]),
+            plan_take_profits_json=json.dumps([81000.0, 82000.0, 83000.0]),
+        )
+        row = live_ledger.get_trade(tid)
+        ordered = live_exec._ordered_tps(
+            "long", live_exec._as_tp_list(row["take_profits_json"]), 80000.0
+        )
+        self.assertEqual(ordered, [81000.0])
+        self.assertEqual(live_exec._trailed_stop(80000.0, ordered, 1), 80000.0)
+
+
 class PartialExitLedgerTests(LedgerDbTestCase):
     def test_partial_exit_banks_pnl_and_reduces_open_size(self) -> None:
         tid = self._open_trade()

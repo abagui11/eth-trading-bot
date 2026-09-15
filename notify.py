@@ -23,6 +23,25 @@ from models import Suggestion
 logger = logging.getLogger(__name__)
 
 
+def forum_trades_target() -> tuple[int, int | None] | None:
+    """(chat_id, thread_id) for the forum Trades topic, or None for DM mode.
+
+    The hybrid UX posts each trade card ONCE into the private forum group
+    instead of DM-per-subscriber. Unset env falls back to DM broadcast so dev
+    boxes without a forum keep working.
+    """
+    if not config.POOL_FORUM_CHAT_ID:
+        return None
+    return (config.POOL_FORUM_CHAT_ID, config.POOL_FORUM_TRADES_THREAD_ID)
+
+
+def forum_research_target() -> tuple[int, int | None] | None:
+    """(chat_id, thread_id) for the forum Research topic, or None for DM mode."""
+    if not config.POOL_FORUM_CHAT_ID:
+        return None
+    return (config.POOL_FORUM_CHAT_ID, config.POOL_FORUM_RESEARCH_THREAD_ID)
+
+
 def format_rationale_text(rationale: str) -> str:
     """Normalize paragraph breaks for Telegram readability."""
     text = rationale.strip()
@@ -180,11 +199,12 @@ def format_pending_notice(
 async def send_pending_notice_async(
     row: dict, *, outcome: str, **facts: object
 ) -> int:
-    """DM the people who got the card, and only them."""
+    """Answer the card where it was made: forum topic, plus any DM recipients."""
     import live_pending
 
     recipients = live_pending.recipients_of(row)
-    if not recipients:
+    forum = forum_trades_target()
+    if not recipients and forum is None:
         return 0
 
     text = format_pending_notice(row, outcome=outcome, **facts)  # type: ignore[arg-type]
@@ -193,6 +213,18 @@ async def send_pending_notice_async(
 
     bot = Bot(token=config.TELEGRAM_BOT_TOKEN)
     sent = 0
+    if forum is not None:
+        chat_id, thread_id = forum
+        try:
+            await bot.send_message(
+                chat_id=chat_id,
+                text=marked,
+                parse_mode=ParseMode.HTML,
+                message_thread_id=thread_id,
+            )
+            sent += 1
+        except Exception:
+            logger.exception("Pending notice failed for forum %s", chat_id)
     for user_id in recipients:
         try:
             await bot.send_message(
@@ -202,11 +234,10 @@ async def send_pending_notice_async(
         except Exception:
             logger.exception("Pending notice failed for user %s", user_id)
     logger.info(
-        "live: %s pending %s notice sent to %d/%d recipients",
+        "live: %s pending %s notice sent to %d target(s)",
         row.get("product_id"),
         outcome,
         sent,
-        len(recipients),
     )
     return sent
 
@@ -257,8 +288,9 @@ async def send_photo_with_caption(
     caption: str,
     *,
     reply_markup=None,
+    message_thread_id: int | None = None,
 ) -> None:
-    """Send a chart image with caption to a chat."""
+    """Send a chart image with caption to a chat (or forum topic)."""
     path = Path(chart_path)
     if not path.exists():
         raise FileNotFoundError(f"Chart not found: {chart_path}")
@@ -269,6 +301,7 @@ async def send_photo_with_caption(
             photo=photo,
             caption=caption[:1024],
             reply_markup=reply_markup,
+            message_thread_id=message_thread_id,
         )
 
 
@@ -285,18 +318,26 @@ async def send_suggestion_to_chat(
     include_full_rationale: bool = False,
     resting: bool | None = None,
     spot: float | None = None,
+    message_thread_id: int | None = None,
+    personalize: bool = True,
 ) -> None:
-    """Send the concise decision card; optionally include full detail (ops/resend)."""
+    """Send the concise decision card; optionally include full detail (ops/resend).
+
+    ``personalize=False`` drops the per-user demo-size copy — a card posted
+    once into a shared forum topic cannot name any one person's size.
+    """
     paths = _decision_chart_only(chart_paths) if not include_full_rationale else (
         [chart_paths] if isinstance(chart_paths, str) else list(chart_paths[:3])
     )
     paths = [p for p in paths if p and p != "watchdog"]
     tid = telegram_id
-    if tid is None:
+    if tid is None and personalize:
         try:
             tid = int(str(chat_id).strip())
         except ValueError:
             tid = None
+    if not personalize:
+        tid = None
 
     summary = display_summary_text
     if summary is None and offer_id:
@@ -324,11 +365,16 @@ async def send_suggestion_to_chat(
             text=caption,
             reply_markup=keyboard,
             parse_mode=ParseMode.HTML,
+            message_thread_id=message_thread_id,
         )
         if include_full_rationale:
             rationale_message = build_rationale_message(suggestion, pnl_footer)
             if rationale_message:
-                await bot.send_message(chat_id=chat_id, text=rationale_message)
+                await bot.send_message(
+                    chat_id=chat_id,
+                    text=rationale_message,
+                    message_thread_id=message_thread_id,
+                )
         return
 
     for i, chart_path in enumerate(paths):
@@ -350,6 +396,7 @@ async def send_suggestion_to_chat(
                     caption=photo_caption,
                     reply_markup=markup,
                     parse_mode=ParseMode.HTML,
+                    message_thread_id=message_thread_id,
                 )
         except Exception:
             logger.exception(
@@ -362,7 +409,11 @@ async def send_suggestion_to_chat(
     if include_full_rationale:
         rationale_message = build_rationale_message(suggestion, pnl_footer)
         if rationale_message:
-            await bot.send_message(chat_id=chat_id, text=rationale_message)
+            await bot.send_message(
+                chat_id=chat_id,
+                text=rationale_message,
+                message_thread_id=message_thread_id,
+            )
 
 
 async def send_offer_details_to_chat(
@@ -457,14 +508,64 @@ async def broadcast_to_subscribers(
 
     Returns the ids that actually received it. A resting plan is followed up
     when it fills or is pulled, and only this set saw the promise.
+
+    Forum mode (POOL_FORUM_CHAT_ID set, non-internal cards): the card posts
+    ONCE into the Trades topic — everyone in the group sees the same message
+    and Accept attributes to whoever tapped it. The admin still gets a DM
+    copy, and pending follow-ups post back into the same topic.
+
+    When the tester pool is on (``POOL_ENABLED``), trade cards stay personal
+    DMs even if a forum is configured — each card needs that user's Accept
+    risk and position size on it.
     """
     footer = pnl_footer or paper.format_pnl_footer()
+
+    forum = forum_trades_target()
+    if forum is not None and not internal_only and not bot_config.POOL_ENABLED:
+        chat_id, thread_id = forum
+        sent = set()
+        try:
+            await send_suggestion_to_chat(
+                bot,
+                chat_id,
+                suggestion,
+                chart_paths,
+                footer,
+                offer_id=offer_id,
+                display_summary_text=display_summary_text,
+                resting=resting,
+                spot=spot,
+                message_thread_id=thread_id,
+                personalize=False,
+            )
+            logger.info("Sent suggestion to forum %s topic %s", chat_id, thread_id)
+        except Exception:
+            logger.exception("Failed to send to forum %s", chat_id)
+
+        admin_chat = config.TELEGRAM_ADMIN_CHAT_ID or config.TELEGRAM_CHAT_ID
+        if admin_chat:
+            try:
+                await send_suggestion_to_chat(
+                    bot,
+                    admin_chat,
+                    suggestion,
+                    chart_paths,
+                    footer,
+                    offer_id=offer_id,
+                    display_summary_text=display_summary_text,
+                    resting=resting,
+                    spot=spot,
+                )
+            except Exception:
+                logger.exception("Failed to send to admin chat %s", admin_chat)
+        return sent
+
     recipients = (
         access.internal_recipient_ids()
         if internal_only
         else access.broadcast_recipient_ids()
     )
-    sent: set[int] = set()
+    sent = set()
 
     for user_id in recipients:
         if user_id in sent:
@@ -727,11 +828,30 @@ def broadcast_text(
 
 
 async def broadcast_plain_text_async(text: str) -> None:
-    """DM raw text to every broadcast recipient (alerts that are not trade offers)."""
+    """Research-labelled pushes (z-moves, digests): forum Research topic when
+    configured, otherwise DM every broadcast recipient as before."""
     bot = Bot(token=config.TELEGRAM_BOT_TOKEN)
+    body = text.strip()[:4096]
+
+    forum = forum_research_target()
+    if forum is not None:
+        chat_id, thread_id = forum
+        try:
+            await bot.send_message(
+                chat_id=chat_id, text=body, message_thread_id=thread_id
+            )
+        except Exception:
+            logger.exception("Failed to send plain broadcast to forum %s", chat_id)
+        admin_chat = config.TELEGRAM_ADMIN_CHAT_ID or config.TELEGRAM_CHAT_ID
+        if admin_chat:
+            try:
+                await bot.send_message(chat_id=admin_chat, text=body)
+            except Exception:
+                logger.exception("Plain broadcast admin copy failed")
+        return
+
     recipients = access.broadcast_recipient_ids()
     sent: set[int] = set()
-    body = text.strip()[:4096]
     for user_id in recipients:
         if user_id in sent:
             continue
@@ -896,6 +1016,47 @@ def send_macro_pulse_alert(
         asyncio.run(_run())
     except Exception:
         logger.exception("Failed to send macro pulse alert")
+
+
+# ---------------------------------------------------------------------------
+# Tester pool — Account-lane DMs (personal money stays out of the forum)
+# ---------------------------------------------------------------------------
+
+async def send_pool_dm_async(telegram_id: int, text: str) -> bool:
+    bot = Bot(token=config.TELEGRAM_BOT_TOKEN)
+    try:
+        await bot.send_message(chat_id=int(telegram_id), text=text.strip()[:4096])
+        return True
+    except Exception:
+        logger.exception("Pool DM failed for user %s", telegram_id)
+        return False
+
+
+def send_pool_dm(telegram_id: int, text: str) -> bool:
+    """Sync wrapper — safe from executor/watchdog threads. Never raises."""
+    try:
+        return asyncio.run(send_pool_dm_async(telegram_id, text))
+    except Exception:
+        logger.exception("Pool DM wrapper failed for user %s", telegram_id)
+        return False
+
+
+def send_pool_admin_alert(text: str) -> None:
+    """Alert every pool admin by DM. Never raises."""
+    import pool
+
+    async def _run() -> None:
+        bot = Bot(token=config.TELEGRAM_BOT_TOKEN)
+        for admin_id in pool.admin_ids():
+            try:
+                await bot.send_message(chat_id=admin_id, text=text.strip()[:4096])
+            except Exception:
+                logger.exception("Pool admin alert failed for %s", admin_id)
+
+    try:
+        asyncio.run(_run())
+    except Exception:
+        logger.exception("Pool admin alert failed")
 
 
 def _latest_output_chart() -> Path:

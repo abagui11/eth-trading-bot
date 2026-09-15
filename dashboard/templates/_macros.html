@@ -67,7 +67,10 @@
         {% endif %}
       </span>
       <span class="trade-pnl {{ 'pos-row' if t.is_winner else 'neg-row' }}">
-        {{ "%+.2f"|format(t.pnl_usd) }}
+        {% if t.size_usd is not none %}
+        <span class="trade-size">${{ "%.0f"|format(t.size_usd) }}</span>
+        {% endif %}
+        ${{ "%+.2f"|format(t.pnl_usd) }}
         <span class="trade-pnl-pct">({{ "%+.1f"|format(t.pnl_pct) }}%)</span>
       </span>
       <span class="trade-meta sub">
@@ -154,6 +157,16 @@
         {% elif rung.pct_from_entry is not none %}
         <span class="level-note">{{ "%+.1f"|format(rung.pct_from_entry) }}%</span>
         {% endif %}
+      </div>
+      {% endfor %}
+      {#- Targets the plan named that the clip was too small to rest. Whole
+          contracts, so a clip with fewer contracts than targets banks at the
+          nearest ones and never reaches these. -#}
+      {% for tp in (t.unarmed_take_profits or []) %}
+      <div class="level level-tp-unarmed">
+        <span class="label">TP{{ (t.tp_count or 0) + loop.index }}</span>
+        <span class="value">${{ "%.2f"|format(tp) }}</span>
+        <span class="level-note" title="The clip holds fewer contracts than the plan has targets, so this one was never placed.">planned · not armed</span>
       </div>
       {% endfor %}
       {% else %}

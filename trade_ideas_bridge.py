@@ -243,6 +243,57 @@ def is_fill_operator(user_id: int) -> bool:
     return int(user_id) in tuple(bot_config.LIVE_MILL_FILL_TELEGRAM_IDS)
 
 
+def idea_pool_open(idea_id: int) -> bool:
+    """Can a tester's pool intent still join this idea's future live fill?
+
+    True while the card is in a live status and no clip has filled yet. Once
+    it fills (or expires) the fill moment has passed — pooled model, late
+    Accepts are missed, never chased.
+    """
+    conn = _connect()
+    if conn is None:
+        return False
+    try:
+        with conn:
+            row = conn.execute(
+                "SELECT status, live_fill_type FROM ideas WHERE id = ?",
+                (int(idea_id),),
+            ).fetchone()
+    except sqlite3.Error:
+        logger.exception("idea_pool_open read failed for #%s", idea_id)
+        return False
+    finally:
+        conn.close()
+    if row is None:
+        return False
+    if row["live_fill_type"] is not None:
+        return False
+    return str(row["status"] or "") in _LIVE_STATUSES
+
+
+def pool_active_mill_refs() -> set[str]:
+    """Intent refs (mill_<id>) that can still fire — for the stale-intent sweep."""
+    conn = _connect()
+    if conn is None:
+        return set()
+    try:
+        with conn:
+            rows = conn.execute(
+                f"""
+                SELECT id FROM ideas
+                WHERE status IN ({", ".join("?" * len(_LIVE_STATUSES))})
+                  AND live_fill_type IS NULL
+                """,
+                _LIVE_STATUSES,
+            ).fetchall()
+    except sqlite3.Error:
+        logger.exception("pool_active_mill_refs read failed")
+        return set()
+    finally:
+        conn.close()
+    return {f"mill_{int(r['id'])}" for r in rows}
+
+
 def _mark_idea_live_fill(
     conn: sqlite3.Connection, idea_id: int, fill_type: str, filled_by: int | None
 ) -> None:

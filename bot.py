@@ -25,6 +25,7 @@ import critic
 import ledger
 import notify
 import paper
+import pool
 import research
 import telegram_ui
 import trade_ideas_bridge
@@ -124,6 +125,102 @@ async def _reply(update: Update, text: str) -> None:
     if update.message is None:
         return
     await update.message.reply_text(text)
+
+
+async def _notify_admins_new_user(context: ContextTypes.DEFAULT_TYPE, user) -> None:
+    """Ping every pool admin with an Admit/Deny card for a new requester."""
+    name = f"@{user.username}" if user.username else (user.full_name or "unknown")
+    text = f"New user wants in: {name} (id {user.id})"
+    for admin_id in pool.admin_ids():
+        try:
+            await context.bot.send_message(
+                admin_id,
+                text,
+                reply_markup=telegram_ui.pool_admin_access_keyboard(user.id),
+            )
+        except Exception:
+            logger.exception("Admin access ping failed for %s", admin_id)
+
+
+async def _handle_gated_user(
+    update: Update, context: ContextTypes.DEFAULT_TYPE
+) -> None:
+    """What a not-yet-allowed user sees. With the pool on, first contact files
+    an access request and pings the admins; afterwards they see 'pending'."""
+    user = update.effective_user
+    if user is None:
+        return
+    if not bot_config.POOL_ENABLED:
+        await _reply(update, PAYWALL_MESSAGE)
+        return
+    status = pool.request_access(user.id, _username(update))
+    if status == "denied":
+        await _reply(update, telegram_ui.DENIED_MESSAGE)
+        return
+    if status == "new":
+        await _notify_admins_new_user(context, user)
+    await _reply(update, telegram_ui.PENDING_APPROVAL_MESSAGE)
+
+
+def _pool_intent_reply(result: dict, *, risk_label: str = "risk") -> str:
+    """User-facing text for a pool.record_intent verdict."""
+    if result.get("ok"):
+        risk = float(result["risk_usd"])
+        pct = float(bot_config.POOL_RISK_PCT) * 100
+        return (
+            f"You're in if it fills.\n\n"
+            f"Reserved: ${risk:,.2f} at risk ({pct:.1f}% of your available cash). "
+            "That is the most this trade can cost you if stopped out — not your "
+            "full balance. Same fill price as the house; exits are automatic.\n\n"
+            "I'll DM you when it fills or gets pulled. /portfolio any time."
+        )
+    reason = result.get("reason")
+    if reason == "already_recorded":
+        return "Already recorded — you're on this order."
+    if reason == "frozen":
+        return (
+            "New trade joins are paused while we verify the books. Your balance "
+            "is safe; try again later."
+        )
+    if reason == "below_min_equity":
+        return (
+            f"Pool trades need at least ${float(result.get('minimum_usd') or 0):,.0f} "
+            "cash. /deposit to top up."
+        )
+    if reason in ("not_funded", "no_available_cash"):
+        return "No available cash for this one — /portfolio shows what's reserved."
+    return f"Could not join ({reason})."
+
+
+def _pool_hq_accept(offer_id: str, user_id: int) -> str:
+    """A funded tester's Accept on an HQ card → pool intent (sync, executor)."""
+    import live_pending
+
+    offer = user_books.get_offer(offer_id)
+    if offer is None:
+        return "Could not find that trade offer."
+    product_id = str(offer.get("product_id") or "")
+    waiting = live_pending.get_pending(product_id)
+    row = next(
+        (r for r in waiting if str(r.get("cycle_id") or "") == str(offer_id)), None
+    )
+    if row is None:
+        return (
+            "This order has already gone on or been pulled — your Accept came "
+            "after the window, so you're not in this trade. The next card is "
+            "never far."
+        )
+    return _pool_intent_reply(pool.record_intent(str(offer_id), user_id))
+
+
+def _pool_mill_accept(idea_id: int, user_id: int) -> str:
+    """A funded tester's Accept on a mill card → pool intent (sync, executor)."""
+    if not trade_ideas_bridge.idea_pool_open(idea_id):
+        return (
+            "This idea has already filled or expired — your Accept came after "
+            "the window, so you're not in this one."
+        )
+    return _pool_intent_reply(pool.record_intent(f"mill_{idea_id}", user_id))
 
 
 async def _handle_chart(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -261,7 +358,19 @@ async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     access.register_user(user.id, _username(update))
 
     if not access.is_allowed(user.id):
-        await _reply(update, PAYWALL_MESSAGE)
+        await _handle_gated_user(update, context)
+        return
+
+    if bot_config.POOL_ENABLED and pool.is_approved(user.id):
+        p = pool.portfolio(user.id)
+        lines = [telegram_ui.POOL_WELCOME_MESSAGE]
+        if p.get("ok") and float(p.get("cash_usd") or 0) > 0:
+            lines.append("")
+            lines.append(telegram_ui.format_portfolio(p))
+        await update.message.reply_text(
+            "\n".join(lines)[:4096],
+            reply_markup=telegram_ui.pool_account_keyboard(),
+        )
         return
 
     spots = research.get_spot_prices()
@@ -305,15 +414,147 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
     query = update.callback_query
     if query is None or query.from_user is None:
         return
-    await query.answer()
     user_id = query.from_user.id
     access.register_user(user_id, query.from_user.username)
     if not access.is_allowed(user_id):
-        await query.edit_message_text(PAYWALL_MESSAGE)
+        # Never edit the message: in the forum group the card is shared, and
+        # editing it would blank the trade for everyone else.
+        try:
+            await query.answer(
+                text="Access is invite-only — message the bot directly to request it.",
+                show_alert=True,
+            )
+        except Exception:
+            logger.debug("Gate answer failed", exc_info=True)
         return
+    await query.answer()
 
     data = query.data or ""
     chat_id = query.message.chat_id if query.message else user_id
+
+    # --- Tester pool: admin Admit/Deny, deposit decisions, Account buttons ---
+    if data.startswith(telegram_ui.CB_POOL_USER_PREFIX):
+        if not pool.is_admin(user_id):
+            return
+        parts = data.split(":")
+        if len(parts) != 3 or parts[1] not in ("approve", "deny"):
+            return
+        try:
+            target_id = int(parts[2])
+        except ValueError:
+            return
+        if parts[1] == "approve":
+            pool.approve_user(target_id, admin_id=user_id)
+            invite_line = ""
+            if config.POOL_FORUM_CHAT_ID:
+                try:
+                    link = await context.bot.create_chat_invite_link(
+                        chat_id=config.POOL_FORUM_CHAT_ID, member_limit=1
+                    )
+                    invite_line = (
+                        "\n\nTrade cards and research live in the group — "
+                        f"join here (one-time link): {link.invite_link}"
+                    )
+                except Exception:
+                    logger.exception("Forum invite link failed for %s", target_id)
+            try:
+                await context.bot.send_message(
+                    target_id,
+                    (telegram_ui.POOL_WELCOME_MESSAGE + invite_line)[:4096],
+                    reply_markup=telegram_ui.pool_account_keyboard(),
+                )
+            except Exception:
+                logger.exception("Welcome DM failed for %s", target_id)
+            await context.bot.send_message(
+                chat_id, f"Admitted {target_id}. They got the welcome + invite."
+            )
+        else:
+            pool.deny_user(target_id, admin_id=user_id)
+            try:
+                await context.bot.send_message(target_id, telegram_ui.DENIED_MESSAGE)
+            except Exception:
+                logger.debug("Deny DM failed for %s", target_id, exc_info=True)
+            await context.bot.send_message(chat_id, f"Denied {target_id}.")
+        return
+
+    if data.startswith(telegram_ui.CB_POOL_DEPOSIT_PREFIX):
+        if not pool.is_admin(user_id):
+            return
+        parts = data.split(":")
+        if len(parts) != 3 or parts[1] not in ("credit", "deny"):
+            return
+        try:
+            request_id = int(parts[2])
+        except ValueError:
+            return
+        result = pool.decide_deposit(
+            request_id, admin_id=user_id, approve=parts[1] == "credit"
+        )
+        if not result.get("ok"):
+            await context.bot.send_message(
+                chat_id,
+                f"Deposit request #{request_id}: {result.get('reason')}"
+                + (f" ({result.get('status')})" if result.get("status") else ""),
+            )
+            return
+        target_id = int(result["telegram_id"])
+        amount = float(result["amount_usd"])
+        if result.get("status") == "credited":
+            await context.bot.send_message(
+                chat_id,
+                f"Credited ${amount:,.2f} to {target_id} "
+                f"(cash now ${float(result.get('cash_usd') or 0):,.2f}).",
+            )
+            try:
+                await context.bot.send_message(
+                    target_id,
+                    f"Deposit credited: ${amount:,.2f}.\n"
+                    f"Cash balance: ${float(result.get('cash_usd') or 0):,.2f}.\n\n"
+                    f"Each Accept still only risks about "
+                    f"{bot_config.POOL_RISK_PCT * 100:.1f}% of your available cash "
+                    f"(e.g. ${float(result.get('cash_usd') or 0) * bot_config.POOL_RISK_PCT:,.2f} "
+                    f"on a full-balance Accept right now) — sizes stay small while "
+                    "we solidify the strategy.\n"
+                    "Trade cards will show your size. /portfolio any time.",
+                )
+            except Exception:
+                logger.exception("Credit DM failed for %s", target_id)
+        else:
+            await context.bot.send_message(
+                chat_id, f"Denied deposit request #{request_id} ({target_id})."
+            )
+            try:
+                await context.bot.send_message(
+                    target_id,
+                    f"Your deposit request for ${amount:,.2f} was not credited. "
+                    "If you already sent funds, message the admin.",
+                )
+            except Exception:
+                logger.debug("Deposit deny DM failed", exc_info=True)
+        return
+
+    if data == telegram_ui.CB_POOL_PORTFOLIO:
+        loop = asyncio.get_running_loop()
+
+        def _load_portfolio() -> str:
+            spots = research.get_spot_prices()
+            return telegram_ui.format_portfolio(pool.portfolio(user_id, spots))
+
+        try:
+            text = await loop.run_in_executor(None, _load_portfolio)
+        except Exception:
+            logger.exception("Portfolio load failed for %s", user_id)
+            text = "Could not load your portfolio right now."
+        await context.bot.send_message(
+            user_id, text[:4096], reply_markup=telegram_ui.pool_account_keyboard()
+        )
+        return
+
+    if data == telegram_ui.CB_POOL_DEPOSIT:
+        await context.bot.send_message(
+            user_id, telegram_ui.format_deposit_instructions()
+        )
+        return
 
     # Personal idea portfolio: close open trade at spot from /me buttons.
     if data.startswith(_CB_UPORTFOLIO_PREFIX):
@@ -390,6 +631,42 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
         except ValueError:
             return
         status = trade_ideas_bridge.record_decision(idea_id, user_id, decision)
+
+        # Pool testers: Accept means a real claim on the shared fill. Their
+        # reply is a DM — personal money never lands in the group topic —
+        # and an unfunded tester is pointed at /deposit instead of falling
+        # into the demo path (whose reply would post into the group).
+        if (
+            bot_config.POOL_ENABLED
+            and pool.is_approved(user_id)
+            and not trade_ideas_bridge.is_fill_operator(user_id)
+        ):
+            loop = asyncio.get_running_loop()
+            if not pool.is_funded(user_id):
+                reply = (
+                    "Your account has no funds yet, so this Accept was not "
+                    "placed. /deposit in our private chat to join live trades."
+                )
+            elif decision == "accept" and status in ("recorded", "duplicate"):
+                try:
+                    reply = await loop.run_in_executor(
+                        None, _pool_mill_accept, idea_id, user_id
+                    )
+                except Exception:
+                    logger.exception("pool mill accept failed for idea %s", idea_id)
+                    reply = "Could not record your Accept — try again."
+            elif decision == "reject":
+                reply = "Noted — you're staying out of this one."
+            else:
+                reply = trade_ideas_bridge.format_decision_reply(
+                    status, decision, idea_id
+                )
+            try:
+                await context.bot.send_message(user_id, reply)
+            except Exception:
+                logger.exception("Pool mill reply DM failed for %s", user_id)
+            return
+
         await context.bot.send_message(
             chat_id,
             trade_ideas_bridge.format_decision_reply(status, decision, idea_id),
@@ -514,6 +791,30 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
 
     if data.startswith(telegram_ui.CB_TRADE_YES_PREFIX):
         offer_id = data[len(telegram_ui.CB_TRADE_YES_PREFIX) :]
+
+        # Pool testers: Accept joins the real shared order. DM only — the
+        # demo path below would post their reply into the group topic.
+        if bot_config.POOL_ENABLED and pool.is_approved(user_id):
+            if not pool.is_funded(user_id):
+                reply = (
+                    "Your account has no funds yet, so this Accept was not "
+                    "placed. /deposit in our private chat to join live trades."
+                )
+            else:
+                loop = asyncio.get_running_loop()
+                try:
+                    reply = await loop.run_in_executor(
+                        None, _pool_hq_accept, offer_id, user_id
+                    )
+                except Exception:
+                    logger.exception("pool HQ accept failed for offer %s", offer_id)
+                    reply = "Could not record your Accept — try again."
+            try:
+                await context.bot.send_message(user_id, reply)
+            except Exception:
+                logger.exception("Pool HQ reply DM failed for %s", user_id)
+            return
+
         spots = research.get_spot_prices()
         result = user_books.accept_offer(offer_id, user_id, spots=spots)
         if result.get("ok"):
@@ -547,6 +848,16 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
 
     if data.startswith(telegram_ui.CB_TRADE_NO_PREFIX):
         offer_id = data[len(telegram_ui.CB_TRADE_NO_PREFIX) :]
+
+        if bot_config.POOL_ENABLED and pool.is_approved(user_id):
+            try:
+                await context.bot.send_message(
+                    user_id, "Noted — you're staying out of this one."
+                )
+            except Exception:
+                logger.debug("Pool reject DM failed", exc_info=True)
+            return
+
         result = user_books.reject_offer(offer_id, user_id)
         if result.get("ok"):
             text = "Rejected — your demo cash stays out of this trade."
@@ -645,7 +956,21 @@ async def cmd_help(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         return
 
     if not access.is_allowed(user.id):
-        await _reply(update, PAYWALL_MESSAGE)
+        await _handle_gated_user(update, context)
+        return
+
+    if bot_config.POOL_ENABLED and pool.is_approved(user.id):
+        await update.message.reply_text(
+            "Commands:\n"
+            "/portfolio — your cash, positions, and P&L\n"
+            "/deposit — fund your account (sizes stay small while we prove the strategy)\n"
+            "/start — welcome + how risk works\n"
+            "/help — this message\n\n"
+            "Trade cards arrive here as private messages. Accept joins about "
+            f"{bot_config.POOL_RISK_PCT * 100:.1f}% of your available cash at risk "
+            "on that trade — not your full balance.",
+            reply_markup=telegram_ui.pool_account_keyboard(),
+        )
         return
 
     await update.message.reply_text(
@@ -668,7 +993,7 @@ async def cmd_status(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
         return
 
     if not access.is_allowed(user.id):
-        await _reply(update, PAYWALL_MESSAGE)
+        await _handle_gated_user(update, context)
         return
 
     spots = research.get_spot_prices()
@@ -748,7 +1073,7 @@ async def cmd_performance(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
     access.register_user(user.id, _username(update))
 
     if not access.is_allowed(user.id):
-        await _reply(update, PAYWALL_MESSAGE)
+        await _handle_gated_user(update, context)
         return
 
     await _handle_performance(update, context)
@@ -762,10 +1087,179 @@ async def cmd_me(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     access.register_user(user.id, _username(update))
 
     if not access.is_allowed(user.id):
-        await _reply(update, PAYWALL_MESSAGE)
+        await _handle_gated_user(update, context)
+        return
+
+    # Pool users: /me means their real money now.
+    if bot_config.POOL_ENABLED and pool.is_approved(user.id):
+        await cmd_portfolio(update, context)
         return
 
     await _handle_me(update, context)
+
+
+async def cmd_portfolio(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """The tester's real book: cash, open stakes MTM, realized, deposits."""
+    user = update.effective_user
+    if user is None or update.message is None:
+        return
+
+    access.register_user(user.id, _username(update))
+
+    if not access.is_allowed(user.id):
+        await _handle_gated_user(update, context)
+        return
+
+    if not bot_config.POOL_ENABLED:
+        await _reply(update, "The live pool is not open yet.")
+        return
+
+    await update.message.chat.send_action("typing")
+    loop = asyncio.get_running_loop()
+
+    def _load() -> str:
+        spots = research.get_spot_prices()
+        return telegram_ui.format_portfolio(pool.portfolio(user.id, spots))
+
+    try:
+        text = await loop.run_in_executor(None, _load)
+    except Exception:
+        logger.exception("Portfolio failed for %s", user.id)
+        await _reply(update, "Could not load your portfolio right now.")
+        return
+    await update.message.reply_text(
+        text[:4096], reply_markup=telegram_ui.pool_account_keyboard()
+    )
+
+
+async def cmd_deposit(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """`/deposit` shows instructions; `/deposit <amount> [txid]` files a request."""
+    user = update.effective_user
+    if user is None or update.message is None:
+        return
+
+    access.register_user(user.id, _username(update))
+
+    if not access.is_allowed(user.id):
+        await _handle_gated_user(update, context)
+        return
+
+    if not bot_config.POOL_ENABLED or not pool.is_approved(user.id):
+        await _reply(update, "The live pool is not open for your account yet.")
+        return
+
+    args = context.args or []
+    if not args:
+        await _reply(update, telegram_ui.format_deposit_instructions())
+        return
+
+    try:
+        amount = float(str(args[0]).replace("$", "").replace(",", ""))
+    except ValueError:
+        await _reply(update, "Usage: /deposit 1000  (optionally: /deposit 1000 <txid>)")
+        return
+    txid = str(args[1]) if len(args) > 1 else None
+
+    result = pool.request_deposit(user.id, amount, txid=txid)
+    if not result.get("ok"):
+        reason = result.get("reason")
+        if reason == "below_minimum":
+            await _reply(
+                update,
+                f"Minimum deposit is ${float(result.get('minimum_usd') or 0):,.0f}.",
+            )
+        elif reason == "already_pending":
+            await _reply(
+                update,
+                "You already have a deposit request pending review — "
+                "you'll get a message when it's credited.",
+            )
+        else:
+            await _reply(update, f"Could not file the request ({reason}).")
+        return
+
+    request_id = int(result["request_id"])
+    await _reply(
+        update,
+        f"Deposit request #{request_id} filed for ${amount:,.2f}. "
+        "It's credited once the funds land on the venue and an admin confirms.",
+    )
+    name = f"@{user.username}" if user.username else str(user.id)
+    txid_line = f"\ntxid: {txid}" if txid else ""
+    for admin_id in pool.admin_ids():
+        try:
+            await context.bot.send_message(
+                admin_id,
+                f"Deposit request #{request_id}: {name} (id {user.id}) says they "
+                f"sent ${amount:,.2f}.{txid_line}\n"
+                "Credit only after verifying it landed on Coinbase.",
+                reply_markup=telegram_ui.pool_admin_deposit_keyboard(request_id),
+            )
+        except Exception:
+            logger.exception("Deposit admin ping failed for %s", admin_id)
+
+
+async def cmd_credit(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Admin escape hatch: /credit <telegram_id> <usd> [note]."""
+    await _admin_cash_command(update, context, kind="credit")
+
+
+async def cmd_debit(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Admin escape hatch: /debit <telegram_id> <usd> [note]."""
+    await _admin_cash_command(update, context, kind="debit")
+
+
+async def _admin_cash_command(
+    update: Update, context: ContextTypes.DEFAULT_TYPE, *, kind: str
+) -> None:
+    user = update.effective_user
+    if user is None or update.message is None:
+        return
+    if not pool.is_admin(user.id):
+        await _reply(update, f"/{kind} is restricted to pool admins.")
+        return
+
+    args = context.args or []
+    if len(args) < 2:
+        await _reply(update, f"Usage: /{kind} <telegram_id> <usd> [note]")
+        return
+    try:
+        target_id = int(args[0])
+        amount = float(str(args[1]).replace("$", "").replace(",", ""))
+    except ValueError:
+        await _reply(update, f"Usage: /{kind} <telegram_id> <usd> [note]")
+        return
+    note = " ".join(args[2:]) if len(args) > 2 else None
+
+    if kind == "credit":
+        result = pool.credit(target_id, amount, admin_id=user.id, note=note)
+    else:
+        result = pool.debit(target_id, amount, admin_id=user.id, note=note)
+
+    if not result.get("ok"):
+        detail = result.get("reason")
+        if detail == "insufficient_available":
+            detail = (
+                f"insufficient available cash "
+                f"(${float(result.get('available_usd') or 0):,.2f})"
+            )
+        await _reply(update, f"/{kind} failed: {detail}")
+        return
+    await _reply(
+        update,
+        f"{kind.title()}ed ${amount:,.2f} for {target_id} — "
+        f"cash now ${float(result.get('cash_usd') or 0):,.2f}.",
+    )
+    verb = "credited to" if kind == "credit" else "debited from"
+    try:
+        await context.bot.send_message(
+            target_id,
+            f"${amount:,.2f} was {verb} your account"
+            + (f" ({note})" if note else "")
+            + ". /portfolio for your balance.",
+        )
+    except Exception:
+        logger.debug("Cash command DM failed for %s", target_id, exc_info=True)
 
 
 async def cmd_chart(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -776,7 +1270,7 @@ async def cmd_chart(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     access.register_user(user.id, _username(update))
 
     if not access.is_allowed(user.id):
-        await _reply(update, PAYWALL_MESSAGE)
+        await _handle_gated_user(update, context)
         return
 
     await _handle_chart(update, context)
@@ -790,7 +1284,7 @@ async def cmd_research(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
     access.register_user(user.id, _username(update))
 
     if not access.is_allowed(user.id):
-        await _reply(update, PAYWALL_MESSAGE)
+        await _handle_gated_user(update, context)
         return
 
     args = context.args or []
@@ -829,7 +1323,7 @@ async def on_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     access.register_user(user.id, _username(update))
 
     if not access.is_allowed(user.id):
-        await _reply(update, PAYWALL_MESSAGE)
+        await _handle_gated_user(update, context)
         return
 
     user_text = update.message.text.strip()
@@ -997,6 +1491,10 @@ def build_application() -> Application:
     app.add_handler(CommandHandler("performance", cmd_performance))
     app.add_handler(CommandHandler("ideas", cmd_performance))
     app.add_handler(CommandHandler("me", cmd_me))
+    app.add_handler(CommandHandler("portfolio", cmd_portfolio))
+    app.add_handler(CommandHandler("deposit", cmd_deposit))
+    app.add_handler(CommandHandler("credit", cmd_credit))
+    app.add_handler(CommandHandler("debit", cmd_debit))
     app.add_handler(CommandHandler("chart", cmd_chart))
     app.add_handler(CommandHandler("research", cmd_research))
     app.add_handler(CommandHandler("macro", cmd_macro))

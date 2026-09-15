@@ -11,6 +11,7 @@ from unittest.mock import patch
 
 from fastapi.testclient import TestClient
 
+import bot_config
 from dashboard import data
 
 
@@ -287,6 +288,8 @@ class IdeaFeedApiTests(unittest.TestCase):
             patch.object(config, "ROOT_DIR", root),
             patch.object(config, "ME_TOKEN_SECRET", "test-secret"),
             patch.object(config, "PAYWALL_ENABLED", False),
+            # Open-beta web feed: the pool gate is exercised separately below.
+            patch.object(bot_config, "POOL_ENABLED", False),
             patch.dict("os.environ", {"IDEAS_DB": str(self._ideas)}, clear=False),
         ]
         for item in self._patches:
@@ -348,6 +351,32 @@ class IdeaFeedApiTests(unittest.TestCase):
         )
         self.assertEqual(dup.status_code, 200)
         self.assertEqual(dup.json()["status"], "duplicate")
+
+    def test_pool_gates_the_web_feed_too(self) -> None:
+        """With the pool on, the product is approval-gated everywhere.
+
+        A signed-in web user who was never Admitted must not be able to Accept
+        just because they hold a magic-link cookie.
+        """
+        import pool
+        import user_books
+
+        user_books.init_db()
+        token = user_books.create_me_token(4242, ttl_sec=600)
+        self.client.get(f"/feed?t={token}")
+
+        with patch.object(bot_config, "POOL_ENABLED", True):
+            denied = self.client.post(
+                "/api/ideas/5/decision", json={"decision": "accept"}
+            )
+            self.assertEqual(denied.status_code, 403)
+
+            pool.approve_user(4242, admin_id=1)
+            allowed = self.client.post(
+                "/api/ideas/5/decision", json={"decision": "accept"}
+            )
+            self.assertEqual(allowed.status_code, 200)
+            self.assertEqual(allowed.json()["decision"], "accept")
 
     def test_vault_snapshot_and_empty_stream(self) -> None:
         snap = self.client.get("/api/vault/snapshot")

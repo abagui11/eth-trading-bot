@@ -5,6 +5,7 @@ All tests run in EXECUTION_MODE=off/shadow — no gateway is ever contacted.
 
 from __future__ import annotations
 
+import json
 import tempfile
 import unittest
 from pathlib import Path
@@ -688,6 +689,191 @@ class HqClearsMillTests(unittest.TestCase):
             )
         refill.assert_not_called()
         self.assertEqual(live_ledger.get_trade(mill_id)["close_reason"], "hq_priority")
+
+
+class PooledFillTests(unittest.TestCase):
+    """Tester intents ride the house order: one aggregate fill, virtual shares.
+
+    Entry 80,000, stop 79,300 → $700 risk per BTC unit, $7 per nano contract.
+    Alice's $1,500 gives a $10.50 budget (0.7%) — one whole extra contract.
+    """
+
+    ADMIN = 111
+    ALICE = 1001
+
+    def setUp(self) -> None:
+        self._tmpdir = tempfile.TemporaryDirectory(ignore_cleanup_errors=True)
+        db = Path(self._tmpdir.name) / "test_ledger.db"
+        self._patches = [
+            patch.object(config, "LEDGER_DB", db),
+            patch.object(config, "EXECUTION_MODE", "live"),
+            patch.object(bot_config, "CASE_STUDY_ENABLED", False),
+            patch.object(bot_config, "LIVE_FILL_ALERTS_ENABLED", False),
+            patch.object(bot_config, "LIVE_HQ_CLEARS_MILL", False),
+            patch.object(bot_config, "POOL_ENABLED", True),
+            patch.object(bot_config, "POOL_RISK_PCT", 0.007),
+            patch.object(bot_config, "POOL_MIN_EQUITY_USD", 500.0),
+            patch.object(bot_config, "POOL_ADMIN_TELEGRAM_IDS", (self.ADMIN,)),
+            patch.object(execute, "_notify_ops"),
+            patch.object(execute, "_pool_dm"),
+            patch.object(execute, "_SETTLE_SLEEP", 0),
+            patch.object(
+                execute,
+                "INSTRUMENT_MAP",
+                {"ETH-USD": "ETP-20DEC30-CDE", "BTC-USD": "BIP-20DEC30-CDE"},
+            ),
+        ]
+        for p in self._patches:
+            p.start()
+            self.addCleanup(p.stop)
+        self.addCleanup(self._tmpdir.cleanup)
+        live_ledger.init_db()
+
+        import pool
+
+        self.pool = pool
+        pool.init_db()
+        pool.approve_user(self.ALICE, admin_id=self.ADMIN)
+        pool.credit(self.ALICE, 1500.0, admin_id=self.ADMIN)
+
+    def _gateway(self, *, mark: float = 80_000.0) -> MagicMock:
+        gw = MagicMock()
+        gw.contract_size.return_value = 0.01
+        gw.get_position.return_value = {"size": 0.0, "mark_price": mark}
+        gw.get_order.return_value = {"status": "OPEN", "order_configuration": {}}
+        gw.place_market_order.side_effect = lambda **kw: {
+            "order": {
+                "order_id": f"mkt-{kw['side']}-{kw['amount']}",
+                "average_price": mark,
+                "filled_qty": kw["amount"],
+            }
+        }
+        gw.place_bracket.side_effect = lambda **kw: {
+            "order": {"order_id": f"br-{kw['limit_price']}"}
+        }
+        gw.place_stop_market.return_value = {"order": {"order_id": "stop-x"}}
+        return gw
+
+    def _suggestion(self) -> Suggestion:
+        return _hq_suggestion(
+            product_id="BTC-USD",
+            entry=80_000.0,
+            stop_loss=79_300.0,
+            take_profits=[80_700.0, 81_400.0],
+            order_block_ref="pool-ob",
+        )
+
+    def test_mill_fill_adds_tester_contracts_and_opens_stakes(self) -> None:
+        intent = self.pool.record_intent("mill_77", self.ALICE)
+        self.assertTrue(intent["ok"])
+        self.assertAlmostEqual(intent["risk_usd"], 10.5, places=2)
+
+        gw = self._gateway()
+        with patch.object(execute, "get_gateway", return_value=gw):
+            result = execute.maybe_execute_live(
+                self._suggestion(), 80_000.0, cycle_id="mill_77", source="mill"
+            )
+
+        self.assertIsNotNone(result)
+        # House clip 0.01 + Alice's $10.50 budget = one extra $7 contract.
+        self.assertAlmostEqual(result["qty"], 0.02, places=9)
+        entry_call = gw.place_market_order.call_args_list[0]
+        self.assertAlmostEqual(entry_call.kwargs["amount"], 0.02, places=9)
+
+        stakes = self.pool.open_stakes_for(int(result["trade_id"]))
+        self.assertEqual(len(stakes), 1)
+        stake = stakes[0]
+        # Split by budgets at the fill: house $7 vs Alice $10.50 of $17.50.
+        self.assertAlmostEqual(stake["share_frac"], 10.5 / 17.5, places=6)
+        self.assertAlmostEqual(stake["qty"], 0.02 * 10.5 / 17.5, places=9)
+        # Her intent was consumed — nothing left pending on the ref.
+        self.assertEqual(self.pool.pending_intents("mill_77"), [])
+        # Reserve now holds the stake margin, not the intent budget.
+        account = self.pool.get_account(self.ALICE)
+        self.assertAlmostEqual(
+            float(account["reserved_usd"]), stake["cost_usd"], places=2
+        )
+        execute._pool_dm.assert_called()
+
+    def test_hq_fill_pools_the_same_way(self) -> None:
+        intent = self.pool.record_intent("hq-cycle-9", self.ALICE)
+        self.assertTrue(intent["ok"])
+
+        gw = self._gateway()
+        with patch.object(execute, "get_gateway", return_value=gw):
+            result = execute.maybe_execute_live(
+                self._suggestion(), 80_000.0, cycle_id="hq-cycle-9", source="hq"
+            )
+
+        self.assertIsNotNone(result)
+        stakes = self.pool.open_stakes_for(int(result["trade_id"]))
+        self.assertEqual(len(stakes), 1)
+        # The house vault clip still exists under her share: the fill is
+        # strictly larger than the house-only qty.
+        house_qty = float(result["qty"]) - 0.01  # her budget bought 1 contract
+        self.assertGreater(house_qty, 0)
+
+    def test_pool_off_leaves_the_order_house_sized(self) -> None:
+        self.pool.record_intent("mill_88", self.ALICE)
+        gw = self._gateway()
+        with patch.object(bot_config, "POOL_ENABLED", False), patch.object(
+            execute, "get_gateway", return_value=gw
+        ):
+            result = execute.maybe_execute_live(
+                self._suggestion(), 80_000.0, cycle_id="mill_88", source="mill"
+            )
+        self.assertIsNotNone(result)
+        self.assertAlmostEqual(result["qty"], 0.01, places=9)
+        self.assertEqual(self.pool.open_stakes_for(int(result["trade_id"])), [])
+
+    def test_exit_leg_credits_her_share_through_the_reconcile_hook(self) -> None:
+        self.pool.record_intent("mill_99", self.ALICE)
+        gw = self._gateway()
+        with patch.object(execute, "get_gateway", return_value=gw):
+            result = execute.maybe_execute_live(
+                self._suggestion(), 80_000.0, cycle_id="mill_99", source="mill"
+            )
+        trade_id = int(result["trade_id"])
+        stake = self.pool.open_stakes_for(trade_id)[0]
+
+        # TP1 leg fills on the venue: 0.01 @ 80,700 → +$7 on the whole clip.
+        exit_oid = result and "tp1-fill"
+        gw.get_order.side_effect = lambda oid: (
+            {
+                "status": "FILLED",
+                "filled_size": 1,          # 1 contract × 0.01 size
+                "average_filled_price": 80_700.0,
+                "order_configuration": {
+                    "trigger_bracket_gtc": {
+                        "limit_price": "80700",
+                        "stop_trigger_price": "79300",
+                    }
+                },
+            }
+            if oid == exit_oid
+            else {"status": "OPEN", "order_configuration": {}}
+        )
+        trade = live_ledger.get_trade(trade_id)
+        ids = json.loads(trade.get("exit_order_ids_json") or "[]")
+        ids[0] = exit_oid
+        import sqlite3 as _sq
+
+        conn = _sq.connect(config.LEDGER_DB)
+        conn.execute(
+            "UPDATE live_trades SET exit_order_ids_json = ? WHERE id = ?",
+            (json.dumps(ids), trade_id),
+        )
+        conn.commit()
+        conn.close()
+
+        with patch.object(execute, "get_gateway", return_value=gw):
+            execute.sync_live_positions()
+
+        account = self.pool.get_account(self.ALICE)
+        expected = round(7.0 * stake["share_frac"], 2)
+        self.assertAlmostEqual(
+            float(account["cash_usd"]), 1500.0 + expected, places=2
+        )
 
 
 if __name__ == "__main__":

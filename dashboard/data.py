@@ -551,8 +551,19 @@ def enrich_live_trades(
             story.get("take_profits")
         )
         if str(row.get("source") or "") == "mill" and tps:
-            # One nano contract — `_tp_ladder` rests the whole clip on TP1.
+            # One nano contract — the ladder rests the whole clip on TP1.
             tps = ordered_take_profits(side, tps, entry)[:1]
+        # Targets the analysis named that the clip was too small to rest. Shown
+        # as planned-but-unarmed rather than dropped, so a one-contract BTC idea
+        # does not read as though it only ever had one target.
+        armed = set(ordered_take_profits(side, tps, entry))
+        unarmed = [
+            tp
+            for tp in ordered_take_profits(
+                side, _as_float_list(row.get("plan_take_profits_json")), entry
+            )
+            if tp not in armed
+        ]
         legs = exit_legs(row.get("exit_fills_json"))
         # initial_stop_loss was backfilled from stop_loss for rows opened
         # before the column existed. If that copy landed after a trail, the
@@ -621,6 +632,7 @@ def enrich_live_trades(
                 "stop_state": stop_state,
                 "take_profits": tps,
                 "tp_progress": tps_progress,
+                "unarmed_take_profits": unarmed,
                 "tps_hit": sum(1 for r in tps_progress if r["hit"]),
                 "tp_count": len(tps_progress),
                 "exit_legs": legs,

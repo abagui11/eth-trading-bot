@@ -120,6 +120,20 @@ def init_db() -> None:
             conn.execute(
                 "ALTER TABLE live_trades ADD COLUMN case_study_path TEXT"
             )
+        # take_profits_json holds the rungs the clip could *arm*, which is what
+        # the trail and the reconcile have to reason about. A clip too small to
+        # use the whole ladder therefore dropped the analysis's later targets on
+        # the floor, and the dashboard had no way to show a target Eva planned
+        # but the sleeve could not afford. Backfill is the armed list, which is
+        # all that was ever known for those rows.
+        if "plan_take_profits_json" not in live_cols:
+            conn.execute(
+                "ALTER TABLE live_trades ADD COLUMN plan_take_profits_json TEXT"
+            )
+            conn.execute(
+                "UPDATE live_trades SET plan_take_profits_json = take_profits_json "
+                "WHERE plan_take_profits_json IS NULL"
+            )
         if "qty_open" not in live_cols:
             conn.execute("ALTER TABLE live_trades ADD COLUMN qty_open REAL")
             # Rows written before partial exits existed were all-or-nothing, so
@@ -151,7 +165,16 @@ def record_open(
     fill_type: str = "auto",
     filled_by: int | None = None,
     exit_order_ids: list[str] | None = None,
+    plan_take_profits_json: str | None = None,
 ) -> int:
+    """Book a live fill.
+
+    ``take_profits_json`` is what the clip armed; ``plan_take_profits_json`` is
+    the whole ladder the analysis produced. They differ whenever the clip holds
+    fewer contracts than the plan has targets, and the reconcile must only ever
+    read the armed list. Defaults to the armed list so a caller that does not
+    distinguish them still records something truthful.
+    """
     with _connect() as conn:
         cur = conn.execute(
             """
@@ -159,8 +182,9 @@ def record_open(
                 cycle_id, source, product_id, instrument, side, qty, entry,
                 stop_loss, initial_stop_loss, take_profits_json, order_id,
                 stop_order_id, status, opened_at, notes, fill_type, filled_by,
-                exit_order_ids_json, qty_open, realized_pnl_usd
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'open', ?, ?, ?, ?, ?, ?, 0)
+                exit_order_ids_json, qty_open, realized_pnl_usd,
+                plan_take_profits_json
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'open', ?, ?, ?, ?, ?, ?, 0, ?)
             """,
             (
                 cycle_id,
@@ -181,6 +205,7 @@ def record_open(
                 int(filled_by) if filled_by is not None else None,
                 json.dumps(list(exit_order_ids or [])),
                 float(qty),
+                plan_take_profits_json or take_profits_json,
             ),
         )
         return int(cur.lastrowid or 0)

@@ -175,6 +175,16 @@ RESEND_API_KEY: str | None = _optional("RESEND_API_KEY")
 ALERT_EMAIL_TO: str | None = _optional("ALERT_EMAIL_TO")
 ALERT_EMAIL_FROM: str = _optional("ALERT_EMAIL_FROM") or "alerts@resend.dev"
 
+# Beta signups from the eva.finance marketing site (POST /api/public/beta).
+# The signup row in ledger.db is the source of truth; this is only who gets
+# the notification email. Requires RESEND_API_KEY and a verified-domain
+# ALERT_EMAIL_FROM to deliver to external addresses — the alerts@resend.dev
+# default only delivers to the Resend account owner.
+BETA_SIGNUP_EMAIL_TO: str = (
+    _optional("BETA_SIGNUP_EMAIL_TO")
+    or "abagui@republictech.io,daniel@republictech.io"
+)
+
 # Private investor view (/investors). When set, the page and its API require
 # ?k=<token> and then ride a cookie; anything else 404s so the URL gives away
 # nothing about what is behind it. Unset leaves the page unlisted-only, the
@@ -183,6 +193,41 @@ INVESTOR_ACCESS_TOKEN: str | None = _optional("INVESTOR_ACCESS_TOKEN")
 INVESTOR_SESSION_TTL_SEC: int = int(
     os.getenv("INVESTOR_SESSION_TTL_SEC", "2592000") or "2592000"
 )
+
+# --- Tester pool (hybrid Telegram UX) ----------------------------------------
+# Private forum supergroup that carries the Trades and Research topics. When
+# set, HQ/mill trade cards and research pushes post ONCE into the topic instead
+# of DM-per-subscriber; Account traffic (portfolio, deposits, personal fill
+# notices) stays in DMs. Unset = today's DM broadcast, so dev boxes without a
+# forum keep working.
+def _optional_int(key: str) -> int | None:
+    value = os.getenv(key)
+    if value is None or value.strip() == "":
+        return None
+    try:
+        return int(value.strip())
+    except ValueError:
+        raise RuntimeError(f"{key} must be an integer, got {value!r}")
+
+
+# Telegram ids allowed to Admit users and credit deposits. Env rather than
+# code so an operator can be added without a deploy; merged with
+# bot_config.POOL_ADMIN_TELEGRAM_IDS. Without at least one of these the Admit
+# cards have nowhere to go, so pool.admin_ids() falls back to
+# INTERNAL_TELEGRAM_IDS and then the admin chat.
+_pool_admin_raw = os.getenv("POOL_ADMIN_TELEGRAM_IDS", "")
+POOL_ADMIN_TELEGRAM_IDS: list[int] = [
+    int(x.strip()) for x in _pool_admin_raw.split(",") if x.strip()
+]
+
+POOL_FORUM_CHAT_ID: int | None = _optional_int("POOL_FORUM_CHAT_ID")
+POOL_FORUM_TRADES_THREAD_ID: int | None = _optional_int("POOL_FORUM_TRADES_THREAD_ID")
+POOL_FORUM_RESEARCH_THREAD_ID: int | None = _optional_int(
+    "POOL_FORUM_RESEARCH_THREAD_ID"
+)
+# Where testers send funds (USDC address or short ops instruction). Shown in
+# the /deposit flow; the admin still credits manually once it lands.
+POOL_DEPOSIT_ADDRESS: str | None = _optional("POOL_DEPOSIT_ADDRESS")
 
 # HMAC secret for /me magic links (falls back to bot token if unset).
 ME_TOKEN_SECRET: str = _optional("ME_TOKEN_SECRET") or TELEGRAM_BOT_TOKEN

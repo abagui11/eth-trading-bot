@@ -337,6 +337,36 @@ LIVE_MILL_REOFFER_MAX_AGE_MIN: int = 120
 LIVE_ALERT_TELEGRAM_IDS: tuple[int, ...] = LIVE_MILL_FILL_TELEGRAM_IDS
 LIVE_FILL_ALERTS_ENABLED = True
 
+# --- Tester pool — pooled live allocations with per-user accounting ----------
+# 10-20 approved testers share the one Coinbase account. Their Accepts pool
+# into the house order (one aggregate fill, virtual pro-rata shares); exits
+# ride the house ladder and credit each stake pro-rata. Money movement stays
+# manual (admin credits a deposit after it lands); the pool ledger in
+# ledger.db attributes it. Everything below is inert until POOL_ENABLED.
+#
+# ON makes the product approval-gated: unknown users get the pending-approval
+# flow instead of the open beta, so run deploy/pool_bootstrap.py alongside the
+# flip to grandfather the existing list in as unfunded accounts. With no funded
+# account the sizing path is a no-op and house orders are unchanged.
+POOL_ENABLED: bool = True
+# Risk budget per Accept = this fraction of the tester's cash equity. Matches
+# LIVE_HQ_RISK_PCT by design: a tester's slice is sized by exactly the same
+# rule as the house clip, just against their own equity.
+POOL_RISK_PCT: float = LIVE_HQ_RISK_PCT
+# Cash floor to Accept into the pool. Below this a 0.7% risk budget is under
+# $3.50 and the share becomes dust that only complicates the audit trail.
+POOL_MIN_EQUITY_USD: float = 500.0
+# Smallest deposit worth the manual ops round-trip.
+POOL_MIN_DEPOSIT_USD: float = 500.0
+# Reconcile drift beyond this alerts ops and freezes NEW pool intents (house
+# trading continues; open stakes keep booking their exits).
+POOL_RECON_TOLERANCE_USD: float = 25.0
+# Telegram ids allowed to Admit users, credit deposits, and run /credit //debit.
+# Merged with POOL_ADMIN_TELEGRAM_IDS from .env (set it there so an operator can
+# be added without a deploy). If both are empty this falls back to
+# config.INTERNAL_TELEGRAM_IDS, then the admin chat.
+POOL_ADMIN_TELEGRAM_IDS: tuple[int, ...] = ()
+
 # Macro headline context (RSS + webhook advisory layer).
 MACRO_CONTEXT_ENABLED = True
 MACRO_POLL_INTERVAL_SEC = 300  # 5 minutes
