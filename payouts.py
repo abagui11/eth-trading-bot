@@ -167,6 +167,28 @@ def usdc_account() -> dict[str, Any]:
     raise PayoutError("no USDC account visible to the transfer key")
 
 
+# Fixed namespace for deriving Coinbase idem keys from our own references.
+# Must never change: it is what makes the mapping from a withdrawal id to an
+# idempotency key reproducible across restarts and redeploys.
+_IDEM_NAMESPACE = uuid.UUID("6f9619ff-8b86-d011-b42d-00c04fc964ff")
+
+
+def idem_uuid(ref: str) -> str:
+    """Turn our reference into the UUID Coinbase demands, deterministically.
+
+    Coinbase rejects a non-UUID idem key outright (`Invalid input parameter.
+    Param: Idem`). The obvious fix -- generate a fresh uuid4 per attempt --
+    satisfies the format and silently destroys the thing the key is for: a
+    retry would carry a different key and pay a second time. uuid5 hashes our
+    own reference into a valid UUID, so one logical withdrawal always maps to
+    one idem key, forever.
+    """
+    try:
+        return str(uuid.UUID(ref))          # already a UUID, use it as-is
+    except (ValueError, AttributeError, TypeError):
+        return str(uuid.uuid5(_IDEM_NAMESPACE, ref))
+
+
 def send(
     *,
     account_id: str,
@@ -178,10 +200,10 @@ def send(
 ) -> dict[str, Any]:
     """Pay `amount_usd` USDC out to `to_address`. Returns Coinbase's record.
 
-    ``idem`` is Coinbase's own idempotency key and must be **stable for the
-    logical payout**, not generated per attempt: it is what makes a retry
-    after an ambiguous failure safe. Pass the withdrawal request id, so the
-    same request replayed can never pay twice even if our side lost track.
+    ``idem`` is our reference for the payout and must be **stable for the
+    logical withdrawal**, not generated per attempt: it is what makes a retry
+    after an ambiguous failure safe. Pass the withdrawal request id. It is
+    hashed into a UUID by `idem_uuid` because Coinbase requires that format.
 
     The amount is sent as a string. Floats are not safe to hand a payments API
     -- 0.1 + 0.2 is the cautionary tale, and here the rounding error is
@@ -196,7 +218,7 @@ def send(
         "amount": f"{amount_usd:.2f}",
         "currency": "USDC",
         "network": network,
-        "idem": idem,
+        "idem": idem_uuid(idem),
         "description": description or "EVA withdrawal",
     }
     logger.info(

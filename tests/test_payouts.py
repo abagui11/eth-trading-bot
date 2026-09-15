@@ -157,9 +157,49 @@ class SendGuardTests(unittest.TestCase):
 
         self.assertEqual(seen["amount"], "10.01")
         self.assertIsInstance(seen["amount"], str)
-        self.assertEqual(seen["idem"], "req:42")
+        self.assertEqual(seen["idem"], payouts.idem_uuid("req:42"))
         self.assertEqual(seen["type"], "send")
         self.assertEqual(seen["currency"], "USDC")
+
+
+class IdemTests(unittest.TestCase):
+    """Coinbase refuses a non-UUID idem key, and the obvious fix for that --
+    a fresh uuid4 per attempt -- would satisfy the format while silently
+    removing the double-pay protection the key exists for."""
+
+    def test_the_derived_key_is_a_valid_uuid(self) -> None:
+        import uuid as _uuid
+
+        self.assertEqual(
+            str(_uuid.UUID(payouts.idem_uuid("withdrawal_request:42"))),
+            payouts.idem_uuid("withdrawal_request:42"),
+        )
+
+    def test_the_same_withdrawal_always_maps_to_the_same_key(self) -> None:
+        """Stability across restarts is the whole point; a retry must carry
+        the key the first attempt used."""
+        self.assertEqual(
+            payouts.idem_uuid("withdrawal_request:42"),
+            payouts.idem_uuid("withdrawal_request:42"),
+        )
+
+    def test_different_withdrawals_get_different_keys(self) -> None:
+        self.assertNotEqual(
+            payouts.idem_uuid("withdrawal_request:42"),
+            payouts.idem_uuid("withdrawal_request:43"),
+        )
+
+    def test_a_key_that_is_already_a_uuid_passes_through(self) -> None:
+        given = "0b2b4b1e-6a3c-4f1e-9b2a-1c2d3e4f5a6b"
+        self.assertEqual(payouts.idem_uuid(given), given)
+
+    def test_the_mapping_is_pinned_so_it_cannot_drift(self) -> None:
+        """If the namespace ever changed, every in-flight retry would present
+        a new key and could pay twice. This fails loudly if that happens."""
+        self.assertEqual(
+            payouts.idem_uuid("withdrawal_request:1"),
+            "13aead37-0af6-57fb-9679-1da2b94e750b",
+        )
 
     def test_a_timeout_on_send_is_marked_submitted(self) -> None:
         """The request reached Coinbase and the outcome is unknown, so the
