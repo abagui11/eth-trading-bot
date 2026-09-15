@@ -363,6 +363,13 @@ tester, so the pool's books stay level with the venue. A $3 reserve is held at
 request time and refunded once the real fee is known (measured at ~$0.148 on
 Ethereum). Minimum withdrawal is $50 because the fee is flat.
 
+**Speed, measured rather than assumed:** the $2 test send returned at 21:20:13
+UTC and was in the destination wallet at 21:21:11 — **58 seconds**. The
+earlier "about 10 minutes" was the interval at which I was checking the
+Coinbase balance, not anything about the payout. Tester copy still says "a few
+minutes": someone told "a few" who waits ten is fine, someone told "one" who
+waits three starts wondering where their money went.
+
 #### Wallet verification gates every withdrawal
 
 A tester can only be paid at an address they have **proven** they control, and

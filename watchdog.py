@@ -843,9 +843,13 @@ def _payout_sweep() -> None:
     ]
     if refund >= 0.01:
         lines.append(f"Fee reserve returned: ${refund:,.2f}.")
+    # Measured, not estimated: the one real payout was in the destination
+    # wallet 58s after the send returned. Quoted loosely anyway — a tester who
+    # is told "a few minutes" and waits ten is fine, one told "one minute" and
+    # kept waiting three starts wondering where their money went.
     lines.append(
-        "It is on its way — Coinbase releases it within about 10 minutes, "
-        "then it settles on Ethereum."
+        "It is on its way — usually a few minutes. We will message you again "
+        "with the transaction once it lands in your wallet."
     )
     try:
         notify.send_pool_dm(uid, "\n".join(lines))
