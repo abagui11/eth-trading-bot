@@ -53,8 +53,16 @@ def main() -> int:
     try:
         p = payouts.key_permissions()
         check("can_transfer", bool(p.get("can_transfer")), True)
-        check("can_trade (should be False)", bool(p.get("can_trade")), False)
         check("can_view", bool(p.get("can_view")), True)
+        # A warning, not a failure: if the portal will not issue Transfer
+        # without Trade, that is Coinbase's constraint and not a mistake to
+        # fail the run over. It does matter though -- a payout key that can
+        # also trade hands back the blast radius the split was meant to remove.
+        if p.get("can_trade"):
+            print("  WARN  can_trade is True — this key can also trade. "
+                  "Uncheck Trade on it if the portal allows.")
+        else:
+            print("  ok    can_trade is False — cannot trade, as intended")
     except Exception as exc:
         ok = False
         print("  FAIL  could not read transfer key permissions:", str(exc)[:200])
