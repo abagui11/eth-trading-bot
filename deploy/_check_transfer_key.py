@@ -51,6 +51,12 @@ def main() -> int:
         print("  not installed yet — run deploy/_install_transfer_key.sh")
         return 1
     try:
+        _, algorithm = payouts.signing_key(config.COINBASE_TRANSFER_PRIVATE_KEY or "")
+        print(f"  signs with {algorithm}")
+    except Exception as exc:
+        print("  FAIL  key format not understood:", str(exc)[:140])
+        return 1
+    try:
         p = payouts.key_permissions()
         check("can_transfer", bool(p.get("can_transfer")), True)
         check("can_view", bool(p.get("can_view")), True)

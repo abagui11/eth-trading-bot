@@ -31,9 +31,10 @@ if [[ -z "$NAME" || -z "$KEY" ]]; then
   exit 1
 fi
 
-if ! grep -q "EC PRIVATE KEY" <<<"$KEY"; then
-  echo "WARNING: this does not look like an ECDSA key." >&2
-  echo "The signer uses ES256; an Ed25519 key will not work as-is." >&2
+if grep -q "BEGIN" <<<"$KEY"; then
+  echo "detected: ECDSA PEM (will sign ES256)"
+else
+  echo "detected: Ed25519 (will sign EdDSA)"
 fi
 
 set_var() {                       # set_var KEY VALUE — replace or append

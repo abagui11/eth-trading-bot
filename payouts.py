@@ -40,8 +40,36 @@ class PayoutError(RuntimeError):
         self.submitted = submitted
 
 
+def signing_key(private_key: str) -> tuple[Any, str]:
+    """(key, JWT algorithm), detected from the key's own format.
+
+    The CDP portal defaults to Ed25519 and labels ECDSA "Legacy SDKs", so
+    pinning one algorithm would either force the deprecated choice or break on
+    the default. Both are accepted instead: a PEM signs ES256, and a CDP
+    Ed25519 key arrives as base64 of 64 bytes — 32-byte seed followed by the
+    public half — of which only the seed is the private key.
+    """
+    text = private_key.replace("\\n", "\n").strip()
+    if "BEGIN" in text:
+        return text, "ES256"
+
+    import base64
+
+    from cryptography.hazmat.primitives.asymmetric import ed25519
+
+    try:
+        raw = base64.b64decode(text, validate=True)
+    except Exception as exc:
+        raise PayoutError("transfer key is neither a PEM nor base64") from exc
+    if len(raw) not in (32, 64):
+        raise PayoutError(
+            f"unrecognised Ed25519 key length ({len(raw)} bytes; expected 32 or 64)"
+        )
+    return ed25519.Ed25519PrivateKey.from_private_bytes(raw[:32]), "EdDSA"
+
+
 def _build_jwt(method: str, path: str) -> str:
-    """Short-lived CDP JWT signed with the TRANSFER key (ES256, uri-bound)."""
+    """Short-lived CDP JWT signed with the TRANSFER key, uri-bound."""
     import jwt as pyjwt
 
     key_name = config.COINBASE_TRANSFER_KEY_NAME
@@ -52,6 +80,7 @@ def _build_jwt(method: str, path: str) -> str:
             "create a SECOND CDP key with View + Transfer (NO Trade), then run "
             "deploy/_install_transfer_key.sh"
         )
+    key, algorithm = signing_key(private_key)
     now = int(time.time())
     return pyjwt.encode(
         {
@@ -61,8 +90,8 @@ def _build_jwt(method: str, path: str) -> str:
             "exp": now + 120,
             "uri": f"{method} {API_HOST}{path}",
         },
-        private_key.replace("\\n", "\n"),
-        algorithm="ES256",
+        key,
+        algorithm=algorithm,
         headers={"kid": key_name, "nonce": secrets.token_hex(16)},
     )
 
