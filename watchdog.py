@@ -754,9 +754,10 @@ def _pool_sweep(spots: dict[str, float] | None = None) -> None:
     1. Intents whose ref can no longer fire (pending plan replaced/expired,
        mill idea filled without them, order refused) get their reserve back
        and the tester a DM — an Accept must never just go quiet.
-    2. Every ~10 minutes, check the venue's equity covers the sum of tester
-       claims. A shortfall freezes NEW intents and alerts ops; balances are
-       never touched.
+    2. Every ~10 minutes, check the venue's whole-account cash covers the sum
+       of tester claims. A shortfall freezes NEW intents and alerts ops;
+       balances are never touched, and an unreadable balance skips the check
+       rather than failing it.
     """
     import time as _time
 
@@ -788,12 +789,40 @@ def _pool_sweep(spots: dict[str, float] | None = None) -> None:
     from coinbase_deriv import get_gateway
 
     was_frozen = bool(pool.intents_frozen())
-    equity = float(get_gateway().get_account_summary().get("equity") or 0.0)
-    snapshot = pool.reconcile(equity)
+    # Whole-account cash, not the futures sleeve: deposits land in the spot
+    # wallet, so reconciling against futures equity alone reported a shortfall
+    # the moment a deposit was credited.
+    try:
+        assets = get_gateway().get_cash_assets()
+        total = float(assets.get("total_usd") or 0.0)
+    except Exception:
+        logger.exception("pool reconcile: balance read failed — check skipped")
+        return
+    # A failed or implausible read must not be mistaken for an empty account.
+    # Freezing the pool on a transient API hiccup is the one outcome here that
+    # is worse than checking late.
+    if total <= 0 or assets.get("truncated"):
+        logger.error(
+            "pool reconcile: refusing to judge claims against assets=%.2f "
+            "truncated=%s — check skipped",
+            total, assets.get("truncated"),
+        )
+        return
+
+    snapshot = pool.reconcile(
+        total,
+        tradeable_usd=float(assets.get("tradeable_usd") or 0.0),
+        breakdown={
+            "spot_usd": round(float(assets.get("spot_usd") or 0.0), 2),
+            "futures_usd": round(float(assets.get("futures_usd") or 0.0), 2),
+        },
+    )
     if not snapshot["ok"] and not was_frozen:
         notify.send_pool_admin_alert(
             "POOL RECONCILE FAILED — new intents frozen.\n"
-            f"Venue equity ${snapshot['venue_equity_usd']:,.2f} vs tester claims "
+            f"Venue assets ${snapshot['venue_assets_usd']:,.2f} "
+            f"(spot ${snapshot['breakdown'].get('spot_usd', 0):,.2f} + futures "
+            f"${snapshot['breakdown'].get('futures_usd', 0):,.2f}) vs tester claims "
             f"${snapshot['tester_cash_usd']:,.2f}.\n"
             "Audit pool_events against Coinbase, then unfreeze via pool.unfreeze_intents()."
         )

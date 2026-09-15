@@ -1053,30 +1053,47 @@ def total_tester_cash() -> float:
     return float(row["s"] or 0.0)
 
 
-def reconcile(venue_equity_usd: float) -> dict[str, Any]:
+def reconcile(
+    venue_assets_usd: float,
+    *,
+    tradeable_usd: float | None = None,
+    breakdown: dict[str, Any] | None = None,
+) -> dict[str, Any]:
     """The fiduciary floor check: the venue must cover every tester's claim.
 
     Testers' realized cash is their claim on the account. If the venue's
-    equity cannot cover it (beyond tolerance), something is booked wrong or
+    assets cannot cover it (beyond tolerance), something is booked wrong or
     money moved that the journal does not know about — freeze NEW intents,
     alert ops, and leave every balance exactly as it is for a human to audit.
     Never adjusts a balance itself.
+
+    ``venue_assets_usd`` must be **whole-account** cash, not the futures
+    sleeve's equity. Deposits land in the spot wallet, so measuring the
+    futures pot alone made the first credited deposit look like a shortfall
+    on a perfectly solvent account — see ``DerivGateway.get_cash_assets``.
+
+    ``tradeable_usd`` is recorded but never gates the check: cash awaiting an
+    internal transfer into futures collateral is still the tester's money, so
+    it must not read as missing. It is here so ops can see when claims are
+    covered but not yet deployable.
     """
     testers = total_tester_cash()
-    headroom = float(venue_equity_usd) - testers
+    headroom = float(venue_assets_usd) - testers
     ok = headroom >= -float(bot_config.POOL_RECON_TOLERANCE_USD)
     snapshot = {
         "at": _now(),
-        "venue_equity_usd": round(float(venue_equity_usd), 2),
+        "venue_assets_usd": round(float(venue_assets_usd), 2),
+        "tradeable_usd": None if tradeable_usd is None else round(float(tradeable_usd), 2),
         "tester_cash_usd": round(testers, 2),
         "house_residual_usd": round(headroom, 2),
+        "breakdown": breakdown or {},
         "ok": ok,
     }
     set_meta(_RECON_KEY, json.dumps(snapshot))
     if not ok and not intents_frozen():
         freeze_intents(
-            f"reconcile: venue ${venue_equity_usd:,.2f} cannot cover tester "
-            f"claims ${testers:,.2f}"
+            f"reconcile: venue assets ${venue_assets_usd:,.2f} cannot cover "
+            f"tester claims ${testers:,.2f}"
         )
     return snapshot
 

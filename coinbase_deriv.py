@@ -252,6 +252,55 @@ class DerivGateway:
             "raw": bs,
         }
 
+    def get_cash_assets(self) -> dict[str, Any]:
+        """Cash-equivalent assets across the WHOLE account, with a breakdown.
+
+        ``get_account_summary()["equity"]`` is the futures sleeve's view and is
+        the wrong number for a fiduciary floor: it reads $499.98 on an account
+        whose spot wallets alone hold $3,578.96, because pool claims are
+        backed by the account as a whole rather than by the futures pot.
+
+        Three things are deliberately left out, all in the under-counting
+        direction, because a floor check that over-reports coverage is worse
+        than one that alerts early:
+
+        - ``cbi_usd_balance`` — a *view* of the same consumer spot money the
+          wallet enumeration already counts, so including both double counts.
+        - spot crypto other than USDC, which would need pricing and is not
+          what a dollar-denominated claim is backed by.
+        - ``total_pending_transfers_amount`` — may have left one pot without
+          having arrived in the other, so it is not safely attributable.
+
+        ``tradeable_usd`` is the separate operational question: how much can
+        actually margin a position right now, which is the futures pot only.
+        """
+        spot_usd = 0.0
+        wallets: dict[str, float] = {}
+        res = self._request(
+            "GET", f"{_BROKERAGE}/accounts", params={"limit": 250}
+        )
+        for acct in res.get("accounts") or []:
+            avail = acct.get("available_balance") or {}
+            held = acct.get("hold") or {}
+            code = str(avail.get("currency") or acct.get("currency") or "")
+            if code not in ("USD", "USDC"):
+                continue
+            amount = float(avail.get("value") or 0) + float(held.get("value") or 0)
+            spot_usd += amount
+            wallets[code] = wallets.get(code, 0.0) + amount
+
+        summary = self.get_account_summary()
+        futures_usd = float(summary.get("margin_balance") or 0.0)  # cfm_usd_balance
+
+        return {
+            "total_usd": spot_usd + futures_usd,
+            "spot_usd": spot_usd,
+            "futures_usd": futures_usd,
+            "tradeable_usd": futures_usd,
+            "wallets": wallets,
+            "truncated": bool(res.get("has_next")),
+        }
+
     def get_position(self, instrument: str) -> dict[str, Any]:
         """Signed size in UNDERLYING units + mark, matching the old interface."""
         try:

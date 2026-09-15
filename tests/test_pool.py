@@ -470,6 +470,174 @@ class ReconcileTests(PoolTestCase):
         snapshot = pool.reconcile(1000.0 - 10.0)  # within $25 tolerance
         self.assertTrue(snapshot["ok"])
 
+    def test_cash_awaiting_transfer_into_futures_is_not_a_shortfall(self) -> None:
+        """The bug this replaces.
+
+        Deposits land in the spot wallet, so the futures sleeve's equity can
+        be a small fraction of the account. Measuring claims against the
+        futures pot alone froze the pool on the first credited deposit of a
+        perfectly solvent account: $499.98 equity against a $1,000 claim,
+        while spot held $3,578.96.
+        """
+        self._fund(ALICE, 1000.0)
+        snapshot = pool.reconcile(
+            3578.96 + 68.67, tradeable_usd=68.67,
+            breakdown={"spot_usd": 3578.96, "futures_usd": 68.67},
+        )
+        self.assertTrue(snapshot["ok"], snapshot)
+        self.assertIsNone(pool.intents_frozen())
+        # Recorded so ops can see claims are covered but not yet deployable,
+        # without that gating the check.
+        self.assertEqual(snapshot["tradeable_usd"], 68.67)
+        self.assertLess(snapshot["tradeable_usd"], snapshot["tester_cash_usd"])
+
+    def test_the_snapshot_carries_where_the_money_sits(self) -> None:
+        self._fund(ALICE, 600.0)
+        snapshot = pool.reconcile(
+            1000.0, tradeable_usd=200.0,
+            breakdown={"spot_usd": 800.0, "futures_usd": 200.0},
+        )
+        self.assertEqual(snapshot["venue_assets_usd"], 1000.0)
+        self.assertEqual(snapshot["breakdown"]["spot_usd"], 800.0)
+        self.assertEqual(snapshot["house_residual_usd"], 400.0)
+        self.assertEqual(pool.last_reconcile()["breakdown"]["futures_usd"], 200.0)
+
+
+class CashAssetsTests(unittest.TestCase):
+    """What the reconciler is allowed to count as backing a tester's claim.
+
+    Payloads are the ones the live account actually returned, because the trap
+    here is arithmetic that looks right on invented numbers: Coinbase reports
+    the same spot money twice, once as wallets and once as cbi_usd_balance.
+    """
+
+    # Observed 2026-09-15 on the production account.
+    _V3_ACCOUNTS = {
+        "accounts": [
+            {"available_balance": {"currency": "USDC", "value": "3353.17"},
+             "hold": {"currency": "USDC", "value": "0"}},
+            {"available_balance": {"currency": "USD", "value": "225.79"},
+             "hold": {"currency": "USD", "value": "0"}},
+            # Spot crypto: an asset, but not what a dollar claim is backed by,
+            # and pricing it would add a failure mode to a solvency check.
+            {"available_balance": {"currency": "BTC", "value": "0.4"},
+             "hold": {"currency": "BTC", "value": "0"}},
+        ],
+        "has_next": False,
+    }
+    _CFM = {
+        "balance_summary": {
+            "total_usd_balance": {"value": "499.98"},
+            "cbi_usd_balance": {"value": "431.31"},
+            "cfm_usd_balance": {"value": "68.67"},
+            "futures_buying_power": {"value": "3737.92"},
+            "unrealized_pnl": {"value": "-2.35"},
+        }
+    }
+
+    def _gateway(self, *, v3=None, has_next=False):
+        import coinbase_deriv
+
+        gw = coinbase_deriv.DerivGateway()
+        accounts = dict(v3 or self._V3_ACCOUNTS)
+        accounts["has_next"] = has_next
+
+        def _request(method, path, **kwargs):
+            if path.endswith("/accounts"):
+                return accounts
+            if path.endswith("/cfm/balance_summary"):
+                return self._CFM
+            raise AssertionError(f"unexpected call {method} {path}")
+
+        gw._request = _request  # type: ignore[method-assign]
+        return gw
+
+    def test_spot_wallets_plus_futures_collateral_only(self) -> None:
+        assets = self._gateway().get_cash_assets()
+        self.assertAlmostEqual(assets["spot_usd"], 3578.96, places=2)
+        self.assertAlmostEqual(assets["futures_usd"], 68.67, places=2)
+        self.assertAlmostEqual(assets["total_usd"], 3647.63, places=2)
+        # Tradeable is the futures pot alone — the operational question, kept
+        # apart from the solvency one.
+        self.assertAlmostEqual(assets["tradeable_usd"], 68.67, places=2)
+
+    def test_cbi_balance_is_not_added_on_top_of_the_wallets(self) -> None:
+        """cbi_usd_balance is a view of the same consumer spot money.
+
+        Counting it as well would report $4,078.94 of backing for $3,647.63 of
+        real cash — over-reporting coverage, which is the one direction a
+        fiduciary floor must never fail in.
+        """
+        assets = self._gateway().get_cash_assets()
+        self.assertNotAlmostEqual(assets["total_usd"], 3647.63 + 431.31, places=2)
+        self.assertNotAlmostEqual(assets["total_usd"], 3578.96 + 499.98, places=2)
+
+    def test_non_cash_crypto_is_excluded(self) -> None:
+        assets = self._gateway().get_cash_assets()
+        self.assertEqual(sorted(assets["wallets"]), ["USD", "USDC"])
+
+    def test_a_truncated_account_list_is_flagged(self) -> None:
+        """A partial page under-reports assets, which reads as a shortfall."""
+        self.assertTrue(self._gateway(has_next=True).get_cash_assets()["truncated"])
+
+
+class ReconcileSkipTests(PoolTestCase):
+    def _run_sweep(self, gateway_factory):
+        import coinbase_deriv
+        import live_pending
+        import notify
+        import trade_ideas_bridge
+        import watchdog
+
+        watchdog._pool_last_recon = 0.0
+        with patch.object(config, "EXECUTION_MODE", "live"), \
+                patch.object(live_pending, "get_pending", return_value=[]), \
+                patch.object(trade_ideas_bridge, "pool_active_mill_refs", return_value=set()), \
+                patch.object(pool, "expire_stale_intents", return_value=[]), \
+                patch.object(notify, "send_pool_admin_alert"), \
+                patch.object(coinbase_deriv, "get_gateway", gateway_factory), \
+                patch.object(pool, "reconcile") as reconcile:
+            watchdog._pool_sweep()
+        return reconcile
+
+    def test_an_unreadable_balance_skips_the_check_instead_of_freezing(self) -> None:
+        """Freezing the pool on a transient API error is worse than checking late.
+
+        The previous code read `get_account_summary().get("equity") or 0.0`, so
+        any unexpected response shape became $0 of assets and froze every
+        tester's Accepts.
+        """
+        def _boom():
+            raise RuntimeError("coinbase 503")
+
+        reconcile = self._run_sweep(_boom)
+        reconcile.assert_not_called()
+        self.assertIsNone(pool.intents_frozen())
+
+    def test_zero_assets_is_treated_as_unreadable_not_as_insolvent(self) -> None:
+        from unittest.mock import MagicMock
+
+        gw = MagicMock()
+        gw.get_cash_assets.return_value = {
+            "total_usd": 0.0, "spot_usd": 0.0, "futures_usd": 0.0,
+            "tradeable_usd": 0.0, "wallets": {}, "truncated": False,
+        }
+        reconcile = self._run_sweep(lambda: gw)
+        reconcile.assert_not_called()
+
+    def test_a_healthy_read_is_judged_on_total_assets(self) -> None:
+        from unittest.mock import MagicMock
+
+        gw = MagicMock()
+        gw.get_cash_assets.return_value = {
+            "total_usd": 3647.63, "spot_usd": 3578.96, "futures_usd": 68.67,
+            "tradeable_usd": 68.67, "wallets": {}, "truncated": False,
+        }
+        reconcile = self._run_sweep(lambda: gw)
+        reconcile.assert_called_once()
+        self.assertAlmostEqual(reconcile.call_args.args[0], 3647.63, places=2)
+        self.assertAlmostEqual(reconcile.call_args.kwargs["tradeable_usd"], 68.67, places=2)
+
 
 class PortfolioTests(PoolTestCase):
     def test_portfolio_reports_the_journal_truthfully(self) -> None:
