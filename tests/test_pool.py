@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import sqlite3
 import tempfile
+import threading
 import unittest
 from pathlib import Path
 from unittest.mock import patch
@@ -340,6 +341,184 @@ class WalletRegistrationTests(PoolTestCase):
         self.assertEqual(
             pool.mark_wallet_verified(self.W1)["reason"], "not_registered"
         )
+
+
+class LedgerRaceTests(PoolTestCase):
+    """Concurrency, run concurrently.
+
+    These use real threads against a real file-backed ledger because the bug
+    they pin is invisible to sequential calls: every one of these assertions
+    passes with the guard removed, so long as the calls are made one at a
+    time. That is why the defect could sit in a money path unnoticed.
+    """
+
+    @staticmethod
+    def _race(n: int, fn) -> list:
+        """Run fn(i) on n threads, released together to maximise overlap."""
+        barrier = threading.Barrier(n)
+        out: list = []
+        lock = threading.Lock()
+
+        def worker(i: int) -> None:
+            barrier.wait()
+            result = fn(i)
+            with lock:
+                out.append(result)
+
+        threads = [threading.Thread(target=worker, args=(i,)) for i in range(n)]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join(timeout=30)
+        return out
+
+    def test_simultaneous_withdrawals_cannot_overdraw(self) -> None:
+        """Eight requests for the whole balance, at once. Exactly one may win.
+
+        Refs are deliberately distinct, so the dedupe index cannot be what
+        saves us — the availability check has to, and it only can if the read
+        and the write are one step.
+        """
+        self._fund(ALICE, 1000.0)
+        results = self._race(
+            8,
+            lambda i: pool.debit(ALICE, 1000.0, admin_id=ADMIN, ref=f"w:{i}"),
+        )
+        winners = [r for r in results if r.get("ok")]
+        self.assertEqual(len(winners), 1, results)
+        self.assertEqual(float(pool.get_account(ALICE)["cash_usd"]), 0.0)
+        self.assertGreaterEqual(float(pool.get_account(ALICE)["cash_usd"]), 0.0)
+
+    def test_partial_withdrawals_racing_stay_within_the_balance(self) -> None:
+        """Ten requests for $150 against $1,000: six can be paid, not ten."""
+        self._fund(ALICE, 1000.0)
+        results = self._race(
+            10,
+            lambda i: pool.debit(ALICE, 150.0, admin_id=ADMIN, ref=f"p:{i}"),
+        )
+        paid = sum(150.0 for r in results if r.get("ok"))
+        cash = float(pool.get_account(ALICE)["cash_usd"])
+        self.assertEqual(round(cash + paid, 2), 1000.0)
+        self.assertGreaterEqual(cash, 0.0)
+        self.assertLessEqual(paid, 1000.0)
+
+    def test_simultaneous_credits_do_not_lose_one(self) -> None:
+        """_apply_event reads a balance, adds in Python, writes the absolute
+        result. Concurrently, the second write silently erases the first —
+        and the journal still looks plausible afterwards."""
+        pool.approve_user(ALICE, admin_id=ADMIN)
+        self._race(
+            10,
+            lambda i: pool.credit(ALICE, 100.0, admin_id=ADMIN, ref=f"c:{i}"),
+        )
+        self.assertEqual(float(pool.get_account(ALICE)["cash_usd"]), 1000.0)
+        self.assertEqual(pool.total_tester_cash(), 1000.0)
+
+    def test_simultaneous_accepts_each_size_off_fresh_cash(self) -> None:
+        """Five Accepts at once must not all budget against the same dollars.
+
+        Serialized, each sees the previous reserve, so the five budgets are
+        strictly distinct. Identical budgets are the signature of every thread
+        reading the pre-reserve balance.
+        """
+        self._fund(ALICE, 1000.0)
+        results = self._race(
+            5, lambda i: pool.record_intent(f"ref-{i}", ALICE)
+        )
+        risks = [r["risk_usd"] for r in results if r.get("ok")]
+        self.assertEqual(len(risks), 5, results)
+        self.assertEqual(len(set(risks)), 5, f"all sized off stale cash: {risks}")
+
+        account = pool.get_account(ALICE)
+        self.assertEqual(round(float(account["reserved_usd"]), 2),
+                         round(sum(risks), 2))
+        self.assertLessEqual(float(account["reserved_usd"]),
+                             float(account["cash_usd"]))
+
+    def test_the_same_withdrawal_retried_books_once(self) -> None:
+        """A payout retried after a timeout must not charge twice. This is
+        what the ref is for: the index only covers non-NULL refs, so the old
+        ref=None withdrawal could be replayed freely."""
+        self._fund(ALICE, 1000.0)
+        first = pool.debit(ALICE, 200.0, admin_id=ADMIN,
+                           ref="withdrawal_request:7")
+        again = pool.debit(ALICE, 200.0, admin_id=ADMIN,
+                           ref="withdrawal_request:7")
+        self.assertTrue(first["ok"], first)
+        self.assertEqual(again.get("reason"), "duplicate")
+        self.assertEqual(float(pool.get_account(ALICE)["cash_usd"]), 800.0)
+
+    def test_the_same_withdrawal_retried_concurrently_books_once(self) -> None:
+        self._fund(ALICE, 1000.0)
+        results = self._race(
+            6,
+            lambda i: pool.debit(ALICE, 200.0, admin_id=ADMIN,
+                                 ref="withdrawal_request:9"),
+        )
+        self.assertEqual(len([r for r in results if r.get("ok")]), 1, results)
+        self.assertEqual(float(pool.get_account(ALICE)["cash_usd"]), 800.0)
+
+    def test_two_intended_adhoc_debits_both_book(self) -> None:
+        """The flip side: an admin correction has no operation id and can
+        legitimately repeat, so it must not be deduped into silence."""
+        self._fund(ALICE, 1000.0)
+        first = pool.debit(ALICE, 500.0, admin_id=ADMIN)
+        second = pool.debit(ALICE, 500.0, admin_id=ADMIN)
+        self.assertTrue(first["ok"], first)
+        self.assertTrue(second["ok"], second)
+        self.assertNotEqual(first["ref"], second["ref"])
+        self.assertEqual(float(pool.get_account(ALICE)["cash_usd"]), 0.0)
+
+    def test_every_balance_event_carries_a_ref(self) -> None:
+        """A NULL ref is outside the dedupe index, so it is a replay waiting
+        to happen. Nothing that moves money should leave one behind."""
+        self._fund(ALICE, 1000.0)
+        pool.record_intent("ref-x", ALICE)
+        pool.release_intents("ref-x")
+        pool.debit(ALICE, 50.0, admin_id=ADMIN)
+        conn = sqlite3.connect(self._db)
+        conn.row_factory = sqlite3.Row
+        orphans = conn.execute(
+            "SELECT kind, amount_usd FROM pool_events WHERE ref IS NULL"
+        ).fetchall()
+        conn.close()
+        self.assertEqual([dict(r) for r in orphans], [])
+
+
+class WithdrawableTests(PoolTestCase):
+    def test_withdrawable_excludes_money_committed_to_a_trade(self) -> None:
+        self._fund(ALICE, 1000.0)
+        pool.record_intent("ref-1", ALICE)
+        reserved = float(pool.get_account(ALICE)["reserved_usd"])
+        self.assertGreater(reserved, 0)
+        self.assertEqual(pool.withdrawable_usd(ALICE), round(1000.0 - reserved, 2))
+
+    def test_a_withdrawal_cannot_reach_reserved_margin(self) -> None:
+        self._fund(ALICE, 1000.0)
+        pool.record_intent("ref-1", ALICE)
+        result = pool.debit(ALICE, 1000.0, admin_id=ADMIN, ref="w:1")
+        self.assertEqual(result["reason"], "insufficient_available")
+        self.assertEqual(result["available_usd"], pool.withdrawable_usd(ALICE))
+
+    def test_the_quoted_max_is_exactly_what_clears(self) -> None:
+        """Whatever "withdraw max" shows has to be accepted, or the button
+        quotes a number the ledger then refuses."""
+        self._fund(ALICE, 1000.0)
+        pool.record_intent("ref-1", ALICE)
+        quoted = pool.withdrawable_usd(ALICE)
+        self.assertTrue(
+            pool.debit(ALICE, quoted, admin_id=ADMIN, ref="w:max")["ok"]
+        )
+        self.assertEqual(pool.withdrawable_usd(ALICE), 0.0)
+
+    def test_withdrawable_never_goes_negative(self) -> None:
+        self._fund(ALICE, 1000.0)
+        self.assertEqual(pool.withdrawable_usd(BOB), 0.0)  # no account at all
+
+    def test_an_unfunded_account_can_withdraw_nothing(self) -> None:
+        pool.approve_user(ALICE, admin_id=ADMIN)
+        self.assertEqual(pool.withdrawable_usd(ALICE), 0.0)
+        self.assertFalse(pool.debit(ALICE, 10.0, admin_id=ADMIN, ref="w")["ok"])
 
 
 class AutoCreditTests(PoolTestCase):

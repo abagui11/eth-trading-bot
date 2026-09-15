@@ -35,6 +35,9 @@ from __future__ import annotations
 import json
 import logging
 import sqlite3
+import uuid
+from collections.abc import Iterator
+from contextlib import contextmanager
 from datetime import datetime, timedelta, timezone
 from typing import Any
 
@@ -42,6 +45,20 @@ import bot_config
 import config
 
 logger = logging.getLogger(__name__)
+
+# Long enough that a concurrent writer waits its turn instead of failing.
+# Every transaction here spans a handful of statements, so the lock is held
+# for microseconds and the queue never builds.
+_LOCK_TIMEOUT_SEC = 10.0
+# Keyed on the db path, not a bare flag: tests point LEDGER_DB at a fresh file
+# per case, and a global "done" would skip creating the schema on the new one.
+_schema_ready: set[str] = set()
+
+# One definition of "money this tester could take out", used both for the
+# figure quoted to them and for the check inside the transaction. Two spellings
+# of this rule would eventually disagree, and the direction it disagrees in is
+# paying out money that is committed to an open position.
+_AVAILABLE_SQL = "MAX(cash_usd - reserved_usd, 0)"
 
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS approved_users (
@@ -197,7 +214,7 @@ def _now() -> str:
 
 
 def _connect() -> sqlite3.Connection:
-    conn = sqlite3.connect(config.LEDGER_DB)
+    conn = sqlite3.connect(config.LEDGER_DB, timeout=_LOCK_TIMEOUT_SEC)
     conn.row_factory = sqlite3.Row
     conn.executescript(_SCHEMA)
     return conn
@@ -206,6 +223,50 @@ def _connect() -> sqlite3.Connection:
 def init_db() -> None:
     with _connect():
         pass
+
+
+@contextmanager
+def _write_txn() -> Iterator[sqlite3.Connection]:
+    """A serialized read-modify-write over the ledger.
+
+    sqlite begins its implicit transaction at the first *write*, not the first
+    read, so the natural shape of a money check —
+
+        SELECT the balance  ->  decide if it covers the amount  ->  write
+
+    — is not atomic by default. Two withdrawals arriving together both read
+    the same available cash, both conclude it is enough, and both write; the
+    account goes negative and nothing in the journal looks wrong. `BEGIN
+    IMMEDIATE` takes the write lock before the read, so the check and the
+    write are one indivisible step and the second caller sees the first one's
+    effect.
+
+    Anything that decides an amount from a balance belongs in here. A plain
+    `_connect()` is fine for reads, and for writes whose correctness does not
+    depend on what was just read.
+    """
+    key = str(config.LEDGER_DB)
+    if key not in _schema_ready:
+        with _connect():
+            pass
+        _schema_ready.add(key)
+
+    # isolation_level=None turns off the driver's implicit transactions so
+    # BEGIN/COMMIT here mean exactly what they say.
+    conn = sqlite3.connect(
+        config.LEDGER_DB, timeout=_LOCK_TIMEOUT_SEC, isolation_level=None
+    )
+    conn.row_factory = sqlite3.Row
+    try:
+        conn.execute("BEGIN IMMEDIATE")
+        try:
+            yield conn
+        except Exception:
+            conn.execute("ROLLBACK")
+            raise
+        conn.execute("COMMIT")
+    finally:
+        conn.close()
 
 
 def get_meta(key: str) -> str | None:
@@ -418,11 +479,22 @@ def _apply_event(
 ) -> bool:
     """Append one journal row and move the balances it describes.
 
+    **The caller must hold a `_write_txn`.** This reads the balance, adds to
+    it in Python, and writes the absolute result, so two of these running
+    concurrently on one account both read the old figure and the second
+    overwrites the first — a credit that silently never happened. The lost
+    update is invisible afterwards: the journal shows both rows, each with a
+    plausible `cash_after`, and only the arithmetic between them disagrees.
+    `BEGIN IMMEDIATE` is what makes the pair atomic; a plain `_connect()` does
+    not, because sqlite starts its implicit transaction at the first write
+    rather than the first read.
+
     Cash kinds (deposit/withdrawal/partial_exit/trade_close/adjustment) move
     ``cash_usd`` by ``amount_usd``. Reserve kinds (reserve/trade_open move it
     up, release moves it down) move ``reserved_usd``. Returns False when the
     (telegram_id, kind, ref) key already exists — the caller treats that as
-    "already booked", never as an error.
+    "already booked", never as an error. A NULL ``ref`` opts out of that index
+    entirely, so anything that could be retried must pass one.
     """
     account = conn.execute(
         "SELECT cash_usd, reserved_usd, deposited_usd FROM pool_accounts "
@@ -472,10 +544,19 @@ def credit(
     note: str | None = None,
     ref: str | None = None,
 ) -> dict[str, Any]:
-    """Admin books a deposit that has landed on the venue."""
+    """Book money arriving in a tester's account.
+
+    ``ref`` carries the same meaning as in `debit`: pass the operation's id to
+    make a retry safe. The auto-credit path passes the Coinbase transaction
+    id; an ad-hoc admin credit has no id and is genuinely repeatable, so it
+    gets a unique one — that keeps every balance-moving event covered by the
+    dedupe index rather than sitting outside it on a NULL.
+    """
     if amount_usd <= 0:
         return {"ok": False, "reason": "bad_amount"}
-    with _connect() as conn:
+    if ref is None:
+        ref = f"adhoc:{admin_id}:{uuid.uuid4().hex[:12]}"
+    with _write_txn() as conn:
         try:
             done = _apply_event(
                 conn, telegram_id, kind="deposit", amount_usd=float(amount_usd),
@@ -490,34 +571,79 @@ def credit(
     return {"ok": True, "cash_usd": account.get("cash_usd")}
 
 
+def withdrawable_usd(telegram_id: int) -> float:
+    """The most this tester could take out right now.
+
+    Cash minus everything already committed — intent budgets and the margin
+    behind open stakes. Computed here and never accepted from a caller, so a
+    "withdraw max" button cannot quote a number the ledger disagrees with, and
+    a crafted request cannot name its own ceiling.
+    """
+    with _connect() as conn:
+        row = conn.execute(
+            f"SELECT {_AVAILABLE_SQL} AS available FROM pool_accounts "
+            "WHERE telegram_id = ?",
+            (telegram_id,),
+        ).fetchone()
+    return round(float(row["available"]), 2) if row else 0.0
+
+
 def debit(
     telegram_id: int,
     amount_usd: float,
     *,
     admin_id: int,
+    ref: str | None = None,
     note: str | None = None,
 ) -> dict[str, Any]:
-    """Admin books a withdrawal / correction. Cannot touch reserved margin."""
+    """Book money leaving a tester's account. Cannot touch reserved margin.
+
+    The whole body runs inside `_write_txn`, because the check and the write
+    have to be one step: read available cash on one connection and write on
+    another, and two withdrawals arriving together both pass a check neither
+    of them still satisfies.
+
+    ``ref`` is the identity of the operation, and passing one is what makes a
+    retry safe — `_apply_event`'s unique index only covers non-NULL refs, so a
+    withdrawal booked with `ref=None` (as this used to) could be replayed and
+    charged twice. Callers with an operation id (a withdrawal request, a
+    payout) should pass it. An ad-hoc admin correction has no such id and is
+    genuinely repeatable — two $500 debits can both be intended — so it gets a
+    unique ref rather than a pretence of idempotence.
+    """
     if amount_usd <= 0:
         return {"ok": False, "reason": "bad_amount"}
-    with _connect() as conn:
+    if ref is None:
+        ref = f"adhoc:{admin_id}:{uuid.uuid4().hex[:12]}"
+
+    with _write_txn() as conn:
         account = conn.execute(
-            "SELECT cash_usd, reserved_usd FROM pool_accounts WHERE telegram_id = ?",
+            f"SELECT {_AVAILABLE_SQL} AS available FROM pool_accounts "
+            "WHERE telegram_id = ?",
             (telegram_id,),
         ).fetchone()
         if account is None:
             return {"ok": False, "reason": "no_account"}
-        available = float(account["cash_usd"]) - float(account["reserved_usd"])
+        available = float(account["available"])
         if amount_usd > available + 1e-9:
             return {"ok": False, "reason": "insufficient_available",
                     "available_usd": round(available, 2)}
-        _apply_event(
+        booked = _apply_event(
             conn, telegram_id, kind="withdrawal", amount_usd=-float(amount_usd),
-            ref=None, note=note or f"debited by {admin_id}",
+            ref=ref, note=note or f"debited by {admin_id}",
         )
-    account2 = get_account(telegram_id) or {}
-    logger.info("pool: debited %s $%.2f by %s", telegram_id, amount_usd, admin_id)
-    return {"ok": True, "cash_usd": account2.get("cash_usd")}
+        if not booked:
+            return {"ok": False, "reason": "duplicate", "ref": ref}
+        after = conn.execute(
+            "SELECT cash_usd FROM pool_accounts WHERE telegram_id = ?",
+            (telegram_id,),
+        ).fetchone()
+
+    logger.info(
+        "pool: debited %s $%.2f by %s (ref %s)", telegram_id, amount_usd,
+        admin_id, ref,
+    )
+    return {"ok": True, "cash_usd": float(after["cash_usd"]), "ref": ref}
 
 
 # ---------------------------------------------------------------------------
@@ -1197,29 +1323,36 @@ def record_intent(ref: str, telegram_id: int) -> dict[str, Any]:
     """A funded tester's Accept: reserve their risk budget against this ref.
 
     The budget is POOL_RISK_PCT of *available* cash (cash minus everything
-    already reserved), so ten concurrent Accepts cannot promise the same
-    dollars twice.
+    already reserved), and the read and the reserve happen in one transaction
+    so concurrent Accepts cannot each size against the same dollars. They used
+    to: the balance was read on one connection and reserved on another, so two
+    cards accepted together both computed their budget from the pre-reserve
+    figure. The overlap was small because the budget is a fraction of a
+    fraction, which is exactly why it would never have shown up in a balance
+    anyone eyeballed.
     """
     frozen = intents_frozen()
     if frozen:
         return {"ok": False, "reason": "frozen", "detail": frozen}
     if not is_approved(telegram_id):
         return {"ok": False, "reason": "not_approved"}
-    account = get_account(telegram_id)
-    if account is None or float(account["cash_usd"]) <= 0:
-        return {"ok": False, "reason": "not_funded"}
 
-    cash = float(account["cash_usd"])
-    reserved = float(account["reserved_usd"])
-    available = cash - reserved
-    if cash < float(bot_config.POOL_MIN_EQUITY_USD):
-        return {"ok": False, "reason": "below_min_equity",
-                "minimum_usd": float(bot_config.POOL_MIN_EQUITY_USD)}
-    risk = round(available * float(bot_config.POOL_RISK_PCT), 2)
-    if risk <= 0:
-        return {"ok": False, "reason": "no_available_cash"}
+    with _write_txn() as conn:
+        account = conn.execute(
+            f"SELECT cash_usd, {_AVAILABLE_SQL} AS available FROM pool_accounts "
+            "WHERE telegram_id = ?",
+            (telegram_id,),
+        ).fetchone()
+        if account is None or float(account["cash_usd"]) <= 0:
+            return {"ok": False, "reason": "not_funded"}
+        cash = float(account["cash_usd"])
+        if cash < float(bot_config.POOL_MIN_EQUITY_USD):
+            return {"ok": False, "reason": "below_min_equity",
+                    "minimum_usd": float(bot_config.POOL_MIN_EQUITY_USD)}
+        risk = round(float(account["available"]) * float(bot_config.POOL_RISK_PCT), 2)
+        if risk <= 0:
+            return {"ok": False, "reason": "no_available_cash"}
 
-    with _connect() as conn:
         try:
             conn.execute(
                 "INSERT INTO pool_intents (ref, telegram_id, risk_usd, created_at) "
@@ -1275,7 +1408,7 @@ def release_intents(ref: str, *, status: str = "missed") -> list[dict[str, Any]]
     replaced, expired, or the fill was rejected). Returns the released rows so
     the caller can DM each tester."""
     released: list[dict[str, Any]] = []
-    with _connect() as conn:
+    with _write_txn() as conn:
         rows = conn.execute(
             "SELECT * FROM pool_intents WHERE ref = ? AND status = 'pending'",
             (ref,),
@@ -1295,7 +1428,7 @@ def expire_stale_intents(active_refs: set[str]) -> list[dict[str, Any]]:
     can no longer be kept, so the reserve goes back and the tester is told.
     """
     released: list[dict[str, Any]] = []
-    with _connect() as conn:
+    with _write_txn() as conn:
         rows = conn.execute(
             "SELECT * FROM pool_intents WHERE status = 'pending'"
         ).fetchall()
@@ -1356,7 +1489,7 @@ def open_stakes(
     notional = fill_qty * fill_price
 
     opened: list[dict[str, Any]] = []
-    with _connect() as conn:
+    with _write_txn() as conn:
         for intent in intents:
             intent = dict(intent)
             uid = int(intent["telegram_id"])
@@ -1471,7 +1604,7 @@ def book_exit(
     frac_closed = min(exit_qty / qty_total, 1.0) if qty_total > 0 else 1.0
 
     booked: list[dict[str, Any]] = []
-    with _connect() as conn:
+    with _write_txn() as conn:
         for stake in stakes:
             uid = int(stake["telegram_id"])
             share = float(stake["share_frac"])
@@ -1515,7 +1648,7 @@ def book_close(trade_id: int, *, close_reason: str) -> list[dict[str, Any]]:
     left behind and marks the stakes closed.
     """
     closed: list[dict[str, Any]] = []
-    with _connect() as conn:
+    with _write_txn() as conn:
         rows = conn.execute(
             "SELECT * FROM pool_stakes WHERE live_trade_id = ? AND status = 'open'",
             (trade_id,),
