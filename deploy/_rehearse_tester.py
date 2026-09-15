@@ -41,6 +41,10 @@ ADMIN = 424242
 # that genuinely happened rather than one we invented.
 WALLET = "0x6549B1E2C9B3b004fca5E3C13AD8189Cf2f273B1"
 DEPOSIT_TXID = "0x8cec3f784252d27f0159a111ab0b83bd4e848190ab5e2e33dbc2f98d7ac8be98"
+# The other real transfer on this address ($3,000), used for the mismatch
+# case: same genuine sender, deliberately registered against a different
+# address, which is exactly the shape of funding from an exchange.
+DEPOSIT_TXID_B = "0x8ba547524f84f0366864f217b19cd5e34721639d1aff531d23b7e2d5c0e3de45"
 DEPOSIT_USD = 1000.0
 
 # The real $2 test payout, which landed in that same wallet.
@@ -140,6 +144,39 @@ def main() -> int:
         show_messages("messages")
 
         print("=" * 66)
+        print("3b. The common failure: funded from an exchange, not a wallet")
+        print("=" * 66)
+        print("  A second tester registers an address they control, but the")
+        print("  money arrives from somewhere else. Same real transaction,")
+        print("  so the sender genuinely does not match.")
+        other = -90304
+        pool.approve_user(other, admin_id=ADMIN)
+        pool.register_wallet(other, "0x" + "11" * 20)
+        req_b = pool.request_deposit(other, DEPOSIT_USD, txid=DEPOSIT_TXID_B)
+        pool.observe_chain_deposits([{
+            "id": f"rehearsal-{other}", "amount": DEPOSIT_USD,
+            "txid": DEPOSIT_TXID_B, "currency": "USDC", "network": "ethereum",
+        }])
+        check("their deposit is still credited",
+              float(pool.get_account(other)["cash_usd"]), DEPOSIT_USD)
+        _sent.clear()
+
+        watchdog._wallet_verify_sweep()
+        check("wallet stays unproven", pool.get_wallet(other)["status"],
+              "pending")
+        check("withdrawals blocked",
+              pool.payout_target(other).get("reason"), "unverified")
+        check("recorded once", len(pool.wallet_check_mismatches()), 1)
+        print("\n  What both sides receive:")
+        show_messages("messages")
+
+        print("  Re-running must not re-alert — an admin who gets this every")
+        print("  minute stops reading them:")
+        watchdog._wallet_verify_sweep()
+        check("silent on the second pass", len(_sent), 0)
+        _sent.clear()
+
+        print("\n" + "=" * 66)
         print("4. Withdrawal request — caps, holds and refunds")
         print("=" * 66)
         reserve = float(bot_config.POOL_WITHDRAWAL_FEE_RESERVE_USD)
