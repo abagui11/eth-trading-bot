@@ -35,7 +35,7 @@ from __future__ import annotations
 import json
 import logging
 import sqlite3
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Any
 
 import bot_config
@@ -99,6 +99,37 @@ CREATE TABLE IF NOT EXISTS pool_deposit_requests (
 CREATE UNIQUE INDEX IF NOT EXISTS pool_deposit_txid_once
     ON pool_deposit_requests (txid)
     WHERE txid IS NOT NULL AND status != 'denied';
+
+-- The address a tester funds FROM, and is therefore paid back TO. It does two
+-- jobs: it is how an arriving transfer is attributed to a person without
+-- trusting what they typed, and it is the only destination a payout may go to
+-- (return-to-source), which keeps us out of the business of sending client
+-- money to addresses nobody has proven they control.
+CREATE TABLE IF NOT EXISTS pool_wallets (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    telegram_id INTEGER NOT NULL,
+    address TEXT NOT NULL,                  -- lowercase, 0x-prefixed, 40 hex
+    status TEXT NOT NULL DEFAULT 'pending', -- pending | verified | requested
+                                            -- | replaced | rejected
+    registered_at TEXT NOT NULL,
+    verified_at TEXT,
+    verified_txid TEXT,                     -- the transfer that proved control
+    payouts_blocked_until TEXT,             -- set on an admin-approved change
+    replaced_at TEXT,
+    decided_by INTEGER,
+    note TEXT
+);
+-- One live address per account, so "where do we pay this person" never has
+-- two answers. 'requested' is excluded: a pending change coexists with the
+-- address it wants to replace until an admin rules on it.
+CREATE UNIQUE INDEX IF NOT EXISTS pool_wallets_active_once
+    ON pool_wallets (telegram_id)
+    WHERE status IN ('pending', 'verified');
+-- And one account per address. Two testers claiming one address would make
+-- sender-based attribution ambiguous, which is the entire point of holding it.
+CREATE UNIQUE INDEX IF NOT EXISTS pool_wallets_address_once
+    ON pool_wallets (address)
+    WHERE status IN ('pending', 'verified');
 
 CREATE TABLE IF NOT EXISTS pool_intents (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -468,6 +499,259 @@ def debit(
 
 
 # ---------------------------------------------------------------------------
+# Wallet registration — where a tester's money comes from, and goes back to
+# ---------------------------------------------------------------------------
+
+def normalize_address(address: str | None) -> str | None:
+    """Lower-cased, 0x-prefixed 40-hex address, or None if it is not one.
+
+    Deliberately **no EIP-55 checksum check.** There is no keccak-256 in this
+    environment (`hashlib.sha3_256` is the NIST variant, not keccak), and
+    hand-rolling one in a money path would trade a rare failure for a worse
+    one: a subtly wrong implementation rejects addresses that are fine, or
+    blesses ones that are not. The property that actually matters is proven
+    elsewhere and more strongly — a deposit arriving *from* this address is
+    cryptographic evidence the tester controls it, which no checksum can give.
+    Until that arrives the address is `pending` and no payout may use it.
+
+    Case is dropped because the same address arrives checksummed from one
+    wallet and lowercase from another, and two spellings of one address would
+    defeat the indexes that keep it to a single owner.
+    """
+    if address is None:
+        return None
+    raw = str(address).strip().lower()
+    if raw.startswith("0x"):
+        raw = raw[2:]
+    if len(raw) != 40 or any(c not in "0123456789abcdef" for c in raw):
+        return None
+    return f"0x{raw}"
+
+
+def get_wallet(telegram_id: int) -> dict[str, Any] | None:
+    """The tester's live address, verified or merely registered."""
+    with _connect() as conn:
+        row = conn.execute(
+            "SELECT * FROM pool_wallets WHERE telegram_id = ? AND status IN "
+            "('pending', 'verified') ORDER BY id DESC LIMIT 1",
+            (telegram_id,),
+        ).fetchone()
+    return dict(row) if row else None
+
+
+def get_wallet_change_request(telegram_id: int) -> dict[str, Any] | None:
+    with _connect() as conn:
+        row = conn.execute(
+            "SELECT * FROM pool_wallets WHERE telegram_id = ? AND "
+            "status = 'requested' ORDER BY id DESC LIMIT 1",
+            (telegram_id,),
+        ).fetchone()
+    return dict(row) if row else None
+
+
+def wallet_owner(address: str) -> int | None:
+    """Which tester an arriving transfer belongs to, by its sender."""
+    clean = normalize_address(address)
+    if clean is None:
+        return None
+    with _connect() as conn:
+        row = conn.execute(
+            "SELECT telegram_id FROM pool_wallets WHERE address = ? AND "
+            "status IN ('pending', 'verified')",
+            (clean,),
+        ).fetchone()
+    return int(row["telegram_id"]) if row else None
+
+
+def register_wallet(telegram_id: int, address: str) -> dict[str, Any]:
+    """Bind the address a tester funds from and will be paid back to.
+
+    A **first** registration is self-serve. There is nothing to steal yet: the
+    account holds no money, and the address cannot receive a payout until a
+    deposit arrives from it. Gating it on an admin would only add a round-trip
+    between someone deciding to fund and being able to.
+
+    **Replacing** one is the dangerous operation, and goes through
+    `request_wallet_change` instead. Whoever holds the Telegram account can
+    ask to be paid somewhere new, so a takeover's first move is to re-point
+    the payout address — which is why that path needs a human and a cooldown.
+    """
+    if not is_approved(telegram_id):
+        return {"ok": False, "reason": "not_approved"}
+    clean = normalize_address(address)
+    if clean is None:
+        return {"ok": False, "reason": "malformed"}
+
+    current = get_wallet(telegram_id)
+    if current is not None:
+        if str(current["address"]) == clean:
+            return {"ok": True, "unchanged": True, "wallet": current}
+        return {"ok": False, "reason": "change_needs_admin",
+                "current": str(current["address"])}
+
+    owner = wallet_owner(clean)
+    if owner is not None and int(owner) != int(telegram_id):
+        # Not named, deliberately: whether a given address is already in the
+        # book is not this user's information to learn.
+        logger.warning(
+            "pool: %s tried to register %s, held by %s", telegram_id, clean, owner
+        )
+        return {"ok": False, "reason": "address_taken"}
+
+    with _connect() as conn:
+        conn.execute(
+            "INSERT INTO pool_wallets (telegram_id, address, status, registered_at) "
+            "VALUES (?, ?, 'pending', ?)",
+            (telegram_id, clean, _now()),
+        )
+    logger.info("pool: %s registered wallet %s (pending)", telegram_id, clean)
+    return {"ok": True, "address": clean, "status": "pending"}
+
+
+def request_wallet_change(telegram_id: int, address: str) -> dict[str, Any]:
+    """File a payout-address change for an admin to rule on."""
+    if not is_approved(telegram_id):
+        return {"ok": False, "reason": "not_approved"}
+    clean = normalize_address(address)
+    if clean is None:
+        return {"ok": False, "reason": "malformed"}
+
+    current = get_wallet(telegram_id)
+    if current is None:
+        return register_wallet(telegram_id, clean)
+    if str(current["address"]) == clean:
+        return {"ok": False, "reason": "same_address"}
+    if get_wallet_change_request(telegram_id) is not None:
+        return {"ok": False, "reason": "already_pending"}
+    if (owner := wallet_owner(clean)) is not None and int(owner) != int(telegram_id):
+        return {"ok": False, "reason": "address_taken"}
+
+    with _connect() as conn:
+        cur = conn.execute(
+            "INSERT INTO pool_wallets (telegram_id, address, status, registered_at, "
+            "note) VALUES (?, ?, 'requested', ?, ?)",
+            (telegram_id, clean, _now(), f"replaces {current['address']}"),
+        )
+    logger.info(
+        "pool: %s asked to move payouts from %s to %s",
+        telegram_id, current["address"], clean,
+    )
+    return {"ok": True, "request_id": int(cur.lastrowid or 0), "address": clean,
+            "previous": str(current["address"]),
+            "cooldown_hours": float(bot_config.POOL_WALLET_COOLDOWN_HOURS)}
+
+
+def decide_wallet_change(
+    request_id: int, *, admin_id: int, approve: bool
+) -> dict[str, Any]:
+    """Approve or refuse a payout-address change.
+
+    An approved change starts a payout cooldown on the new address. The point
+    is not to slow the honest case down for its own sake — it is that if this
+    change was not the tester's doing, there is a window in which they can
+    still say so before their money leaves.
+    """
+    now = _now()
+    with _connect() as conn:
+        row = conn.execute(
+            "SELECT * FROM pool_wallets WHERE id = ?", (request_id,)
+        ).fetchone()
+        if row is None:
+            return {"ok": False, "reason": "not_found"}
+        if str(row["status"]) != "requested":
+            return {"ok": False, "reason": "already_decided",
+                    "status": str(row["status"])}
+
+        telegram_id = int(row["telegram_id"])
+        if not approve:
+            conn.execute(
+                "UPDATE pool_wallets SET status = 'rejected', decided_by = ?, "
+                "replaced_at = ? WHERE id = ?",
+                (admin_id, now, request_id),
+            )
+            return {"ok": True, "approved": False, "telegram_id": telegram_id,
+                    "address": str(row["address"])}
+
+        blocked_until = (
+            datetime.now(timezone.utc)
+            + timedelta(hours=float(bot_config.POOL_WALLET_COOLDOWN_HOURS))
+        ).strftime("%Y-%m-%dT%H:%M:%SZ")
+        # Retire the old row first: both it and the incoming one would
+        # otherwise be 'verified'/'pending' at once, which the one-live-address
+        # index exists to make impossible.
+        conn.execute(
+            "UPDATE pool_wallets SET status = 'replaced', replaced_at = ? "
+            "WHERE telegram_id = ? AND status IN ('pending', 'verified')",
+            (now, telegram_id),
+        )
+        conn.execute(
+            "UPDATE pool_wallets SET status = 'pending', decided_by = ?, "
+            "payouts_blocked_until = ? WHERE id = ?",
+            (admin_id, blocked_until, request_id),
+        )
+    logger.info(
+        "pool: %s payout address moved to %s by %s, payouts held until %s",
+        telegram_id, row["address"], admin_id, blocked_until,
+    )
+    return {"ok": True, "approved": True, "telegram_id": telegram_id,
+            "address": str(row["address"]),
+            "payouts_blocked_until": blocked_until}
+
+
+def mark_wallet_verified(
+    address: str, *, txid: str | None = None
+) -> dict[str, Any]:
+    """Record that a deposit arrived from this address, proving control.
+
+    Called by the deposit path rather than by a user, because the whole value
+    of the flag is that a tester cannot set it themselves.
+    """
+    clean = normalize_address(address)
+    if clean is None:
+        return {"ok": False, "reason": "malformed"}
+    with _connect() as conn:
+        row = conn.execute(
+            "SELECT * FROM pool_wallets WHERE address = ? AND status IN "
+            "('pending', 'verified')",
+            (clean,),
+        ).fetchone()
+        if row is None:
+            return {"ok": False, "reason": "not_registered"}
+        if str(row["status"]) == "verified":
+            return {"ok": True, "already": True,
+                    "telegram_id": int(row["telegram_id"])}
+        conn.execute(
+            "UPDATE pool_wallets SET status = 'verified', verified_at = ?, "
+            "verified_txid = COALESCE(?, verified_txid) WHERE id = ?",
+            (_now(), normalize_txid(txid), int(row["id"])),
+        )
+    logger.info("pool: wallet %s verified by an inbound transfer", clean)
+    return {"ok": True, "telegram_id": int(row["telegram_id"]), "address": clean}
+
+
+def payout_target(telegram_id: int) -> dict[str, Any]:
+    """Where a withdrawal may go, or why it may not go anywhere yet.
+
+    The withdrawal path is not built; this is the single place that decides
+    the destination so that when it is, there is one answer rather than a
+    second opinion written next to it.
+    """
+    wallet = get_wallet(telegram_id)
+    if wallet is None:
+        return {"ok": False, "reason": "no_wallet"}
+    if str(wallet["status"]) != "verified":
+        # Paying an unproven address would mean sending client funds somewhere
+        # on nothing but a typed claim.
+        return {"ok": False, "reason": "unverified",
+                "address": str(wallet["address"])}
+    held = wallet["payouts_blocked_until"]
+    if held and str(held) > _now():
+        return {"ok": False, "reason": "cooldown", "until": str(held),
+                "address": str(wallet["address"])}
+    return {"ok": True, "address": str(wallet["address"])}
+
+
+# ---------------------------------------------------------------------------
 # Deposit requests — user asks, admin credits with one tap
 # ---------------------------------------------------------------------------
 
@@ -493,9 +777,12 @@ def request_deposit(
 ) -> dict[str, Any]:
     """File a deposit claim for an admin to verify against the chain.
 
-    A txid is required whenever a deposit address is configured: that address
-    is shared with the yield sleeve's wallet, so without a hash there is
-    nothing connecting a claimed amount to a transfer that actually arrived.
+    Two things are required whenever a deposit address is configured, and they
+    do different jobs. A **registered wallet** is who the money is from: it is
+    what lets an arriving transfer be attributed to a person by its sender
+    rather than by what someone typed, and it is the address any payout must
+    later return to. A **txid** is which transfer it was, and is what stops
+    one deposit being credited twice or claimed by the wrong account.
     """
     if not is_approved(telegram_id):
         return {"ok": False, "reason": "not_approved"}
@@ -505,6 +792,9 @@ def request_deposit(
 
     clean = normalize_txid(txid)
     if config.POOL_DEPOSIT_ADDRESS:
+        wallet = get_wallet(telegram_id)
+        if wallet is None:
+            return {"ok": False, "reason": "wallet_required"}
         if txid is None:
             return {"ok": False, "reason": "txid_required"}
         if clean is None:
@@ -542,12 +832,13 @@ def request_deposit(
 
 
 def pending_inbound_usd() -> float:
-    """Claimed-but-uncredited deposits — how much of the wallet is not ours.
+    """Claimed-but-uncredited deposits — venue cash that is already not ours.
 
-    The deposit address doubles as the yield sleeve's wallet, so between a
-    tester sending funds and an admin sweeping them to the venue this is the
-    balance sitting there that belongs to a tester. Nothing spends against it;
-    it exists so the admin and the yield lane can both see it.
+    Deposits land straight in the Coinbase spot wallet, so the reconciler
+    counts them from the moment they arrive, and until an admin credits them
+    they inflate `house_residual_usd`. This is that overstatement: the slice
+    of apparent house money that is really a tester's. Nothing spends against
+    it; it exists so the gap is visible rather than inferred.
     """
     with _connect() as conn:
         row = conn.execute(
@@ -566,9 +857,20 @@ def get_deposit_request(request_id: int) -> dict[str, Any] | None:
 
 
 def decide_deposit(
-    request_id: int, *, admin_id: int, approve: bool
+    request_id: int, *, admin_id: int, approve: bool, sender: str | None = None
 ) -> dict[str, Any]:
-    """One admin tap: credit the request's amount, or deny it."""
+    """One admin tap: credit the request's amount, or deny it.
+
+    ``sender`` is the address the transfer actually came from. Passing it is
+    what verifies the tester's registered wallet, so it is a parameter rather
+    than an assumption: tapping Credit means an admin saw funds arrive, which
+    is not the same as having seen *where they came from*. Marking a wallet
+    verified on the strength of the tap alone would manufacture a proof we do
+    not hold, and that proof is the only thing standing between a payout and
+    an address nobody has shown they control. The chain watcher will pass it;
+    until then wallets stay `pending`, which costs nothing while there is no
+    withdrawal path.
+    """
     req = get_deposit_request(request_id)
     if req is None:
         return {"ok": False, "reason": "not_found"}
@@ -585,6 +887,26 @@ def decide_deposit(
     if not approve:
         return {"ok": True, "status": "denied", "telegram_id": req["telegram_id"],
                 "amount_usd": req["amount_usd"]}
+
+    verified = False
+    if sender is not None:
+        registered = get_wallet(int(req["telegram_id"]))
+        clean = normalize_address(sender)
+        if registered and clean == str(registered["address"]):
+            verified = bool(
+                mark_wallet_verified(clean, txid=req["txid"]).get("ok")
+            )
+        else:
+            # Money arrived and is credited either way — it is in the account.
+            # But it did not come from where this tester said, so the address
+            # stays unproven and a payout must not use it.
+            logger.warning(
+                "pool: deposit #%s for %s came from %s, registered %s — wallet "
+                "NOT verified",
+                request_id, req["telegram_id"], clean,
+                registered and registered["address"],
+            )
+
     result = credit(
         int(req["telegram_id"]),
         float(req["amount_usd"]),
@@ -594,7 +916,7 @@ def decide_deposit(
     )
     result.update(
         {"status": "credited", "telegram_id": req["telegram_id"],
-         "amount_usd": req["amount_usd"]}
+         "amount_usd": req["amount_usd"], "wallet_verified": verified}
     )
     return result
 

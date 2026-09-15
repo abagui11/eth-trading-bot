@@ -477,6 +477,59 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
             await context.bot.send_message(chat_id, f"Denied {target_id}.")
         return
 
+    if data.startswith(telegram_ui.CB_POOL_WALLET_PREFIX):
+        if not pool.is_admin(user_id):
+            return
+        parts = data.split(":")
+        if len(parts) != 3 or parts[1] not in ("approve", "reject"):
+            return
+        try:
+            row_id = int(parts[2])
+        except ValueError:
+            return
+        result = pool.decide_wallet_change(
+            row_id, admin_id=user_id, approve=parts[1] == "approve"
+        )
+        if not result.get("ok"):
+            await context.bot.send_message(
+                chat_id, f"Wallet change #{row_id}: {result.get('reason')}"
+            )
+            return
+        target_id = int(result["telegram_id"])
+        address = str(result["address"])
+        if result.get("approved"):
+            held = str(result.get("payouts_blocked_until") or "")
+            await context.bot.send_message(
+                chat_id,
+                f"Payout address for {target_id} is now {address}. "
+                f"Withdrawals held until {held}.",
+            )
+            try:
+                await context.bot.send_message(
+                    target_id,
+                    "Your payout address was updated to:\n"
+                    f"`{address}`\n\n"
+                    f"Withdrawals are held until {held}. If this wasn't you, "
+                    "reply now — that hold is there so this can still be "
+                    "undone.",
+                )
+            except Exception:
+                logger.exception("Wallet-change DM failed for %s", target_id)
+        else:
+            await context.bot.send_message(
+                chat_id, f"Rejected the wallet change for {target_id}."
+            )
+            try:
+                await context.bot.send_message(
+                    target_id,
+                    "Your address change wasn't approved. Your payout wallet "
+                    "is unchanged — /wallet shows it. Message the admin if "
+                    "you need it moved.",
+                )
+            except Exception:
+                logger.exception("Wallet-reject DM failed for %s", target_id)
+        return
+
     if data.startswith(telegram_ui.CB_POOL_DEPOSIT_PREFIX):
         if not pool.is_admin(user_id):
             return
@@ -964,6 +1017,7 @@ async def cmd_help(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
             "Commands:\n"
             "/portfolio — your cash, positions, and P&L\n"
             "/deposit — fund your account (sizes stay small while we prove the strategy)\n"
+            "/wallet — the address you fund from and are paid back to\n"
             "/start — welcome + how risk works\n"
             "/help — this message\n\n"
             "Trade cards arrive here as private messages. Accept joins about "
@@ -1148,9 +1202,15 @@ async def cmd_deposit(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
         await _reply(update, "The live pool is not open for your account yet.")
         return
 
+    wallet = pool.get_wallet(user.id)
     args = context.args or []
     if not args:
-        await _reply(update, telegram_ui.format_deposit_instructions())
+        await _reply(
+            update,
+            telegram_ui.format_deposit_instructions(
+                wallet=str(wallet["address"]) if wallet else None
+            ),
+        )
         return
 
     try:
@@ -1173,6 +1233,14 @@ async def cmd_deposit(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
                 update,
                 "You already have a deposit request pending review — "
                 "you'll get a message when it's credited.",
+            )
+        elif reason == "wallet_required":
+            await _reply(
+                update,
+                "Register the wallet you're sending from first:\n\n"
+                "/wallet 0x<your address>\n\n"
+                "It's how we match your transfer when it arrives, and it's "
+                "the only address we send withdrawals back to.",
             )
         elif reason in ("txid_required", "txid_malformed"):
             await _reply(
@@ -1203,12 +1271,16 @@ async def cmd_deposit(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
     )
     name = f"@{user.username}" if user.username else str(user.id)
     txid_line = f"\ntxid: `{result['txid']}`" if result.get("txid") else ""
-    # The deposit address is the yield sleeve's wallet, so a credit must follow
-    # the sweep to Coinbase, not the arrival on-chain: the pool's claim is
-    # against venue equity, which is what pool.reconcile checks.
+    wallet_line = (
+        f"\nregistered wallet: `{wallet['address']}`" if wallet else ""
+    )
+    # Deposits now land at the venue directly, so there is no sweep to wait on
+    # and the reconciler counts the funds on arrival. What is left to check is
+    # attribution: that the amount matches, and that it came from the address
+    # this tester registered.
     inbound = pool.pending_inbound_usd()
     inbound_line = (
-        f"\nUnswept tester claims on the wallet: ${inbound:,.2f}"
+        f"\nUncredited tester claims on venue cash: ${inbound:,.2f}"
         if inbound > amount
         else ""
     )
@@ -1217,15 +1289,123 @@ async def cmd_deposit(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
             await context.bot.send_message(
                 admin_id,
                 f"Deposit request #{request_id}: {name} (id {user.id}) says they "
-                f"sent ${amount:,.2f}.{txid_line}{inbound_line}\n\n"
-                "Before crediting: confirm the transfer on-chain, then move it "
-                "to Coinbase. Crediting while it still sits in the wallet gives "
-                "them a claim the venue cannot cover, and leaves the funds where "
-                "the yield sleeve may deploy them.",
+                f"sent ${amount:,.2f}.{txid_line}{wallet_line}{inbound_line}\n\n"
+                "Before crediting: confirm on-chain that the amount matches and "
+                "that the sender is the registered wallet above. A mismatch is "
+                "still creditable — the money is there — but the wallet stays "
+                "unverified, and an unverified wallet cannot be paid out to.",
                 reply_markup=telegram_ui.pool_admin_deposit_keyboard(request_id),
             )
         except Exception:
             logger.exception("Deposit admin ping failed for %s", admin_id)
+
+
+async def cmd_wallet(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """`/wallet` shows the payout address; `/wallet 0x…` sets or changes it."""
+    user = update.effective_user
+    if user is None or update.message is None:
+        return
+
+    access.register_user(user.id, _username(update))
+    if not access.is_allowed(user.id):
+        await _handle_gated_user(update, context)
+        return
+    if not bot_config.POOL_ENABLED or not pool.is_approved(user.id):
+        await _reply(update, "The live pool is not open for your account yet.")
+        return
+
+    args = context.args or []
+    if not args:
+        await _reply(
+            update,
+            telegram_ui.format_wallet_status(
+                pool.get_wallet(user.id),
+                change=pool.get_wallet_change_request(user.id),
+            ),
+        )
+        return
+
+    existing = pool.get_wallet(user.id)
+    given = str(args[0])
+    result = (
+        pool.request_wallet_change(user.id, given)
+        if existing is not None
+        else pool.register_wallet(user.id, given)
+    )
+
+    if not result.get("ok"):
+        reason = result.get("reason")
+        if reason == "malformed":
+            await _reply(
+                update,
+                "That doesn't look like an Ethereum address. It should be "
+                "`0x` followed by 40 characters — copy it from your wallet "
+                "rather than typing it.",
+            )
+        elif reason == "same_address":
+            await _reply(update, "That's already your registered wallet.")
+        elif reason == "already_pending":
+            await _reply(
+                update,
+                "You already have an address change waiting on admin review.",
+            )
+        elif reason == "address_taken":
+            # Deliberately not saying whose: whether an address is in the book
+            # is not this user's information.
+            await _reply(
+                update,
+                "That address can't be registered. If it's yours, message the "
+                "admin.",
+            )
+        else:
+            await _reply(update, f"Could not register that ({reason}).")
+        return
+
+    if result.get("unchanged"):
+        await _reply(update, "That's already your registered wallet.")
+        return
+
+    # First registration: live immediately, because an account with no money
+    # has nothing to redirect.
+    if "request_id" not in result:
+        await _reply(
+            update,
+            "Registered:\n"
+            f"`{result['address']}`\n\n"
+            "Send your deposit from this wallet — that's what confirms it's "
+            "yours, and withdrawals return here and nowhere else. Check it "
+            "carefully; /wallet shows it any time.\n\n"
+            "Next: /deposit",
+        )
+        return
+
+    # A change: admin review, and the tester hears about it on the old address
+    # too, since they are the one person who would know it was not them.
+    hours = float(result.get("cooldown_hours") or 0)
+    await _reply(
+        update,
+        f"Change requested to:\n`{result['address']}`\n\n"
+        f"An admin reviews it first, and withdrawals are held for {hours:.0f}h "
+        "afterwards. If you didn't request this, say so now — that delay "
+        "exists for exactly this reason.",
+    )
+    name = f"@{user.username}" if user.username else str(user.id)
+    for admin_id in pool.admin_ids():
+        try:
+            await context.bot.send_message(
+                admin_id,
+                f"Payout address change: {name} (id {user.id})\n\n"
+                f"from `{result.get('previous')}`\n"
+                f"to   `{result['address']}`\n\n"
+                "Confirm out-of-band that this is really them before approving "
+                "— re-pointing the payout address is what an account takeover "
+                f"would do first. Approval holds their withdrawals {hours:.0f}h.",
+                reply_markup=telegram_ui.pool_admin_wallet_keyboard(
+                    int(result["request_id"])
+                ),
+            )
+        except Exception:
+            logger.exception("Wallet-change admin ping failed for %s", admin_id)
 
 
 async def cmd_credit(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -1522,6 +1702,7 @@ def build_application() -> Application:
     app.add_handler(CommandHandler("me", cmd_me))
     app.add_handler(CommandHandler("portfolio", cmd_portfolio))
     app.add_handler(CommandHandler("deposit", cmd_deposit))
+    app.add_handler(CommandHandler("wallet", cmd_wallet))
     app.add_handler(CommandHandler("credit", cmd_credit))
     app.add_handler(CommandHandler("debit", cmd_debit))
     app.add_handler(CommandHandler("chart", cmd_chart))

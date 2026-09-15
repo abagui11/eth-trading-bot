@@ -209,10 +209,11 @@ edit, no restart:
    `approved_users` and every pool admin gets a DM card with **Admit / Deny**.
 2. **You** tap Admit. They get the welcome DM, the Account keyboard
    (Portfolio / Deposit), and a **one-time invite link** to the forum group.
-3. **They** `/deposit`, send USDC to `POOL_DEPOSIT_ADDRESS`, then
-   `/deposit 1000 <txid>`. You get a **Credit / Deny** card — tap Credit
-   **only after the funds are visible on Coinbase**. Their cash is live the
-   moment you tap.
+3. **They** register the wallet they'll send from (`/wallet 0x…`), then
+   `/deposit` for the address, send USDC, and file `/deposit 1000 <txid>`.
+   You get a **Credit / Deny** card — tap Credit once the amount is visible on
+   Coinbase and the sender matches their registered wallet. Their cash is live
+   the moment you tap.
 4. From then on their Accepts in the Trades topic join live fills with
    pooled sizing; `/portfolio` shows their real book. `/credit <id> <usd>`
    and `/debit <id> <usd>` are the admin escape hatches (a debit can never
@@ -304,36 +305,67 @@ sudo -u ethagent /opt/eth-trading-agent/.venv/bin/python -c \
   "import pool; print(pool.debit(<test_id>, <usd>, admin_id=<your_id>, note='test reset'))"
 ```
 
-#### The deposit wallet is shared with the yield sleeve
+#### Deposits go straight to Coinbase
 
-`POOL_DEPOSIT_ADDRESS` is `0x6549B1E2C9B3b004fca5E3C13AD8189Cf2f273B1`, which
-is also the wallet the `yield_gen_bot` app on **45.33.101.215** monitors. Two
-systems reading one balance is the problem to manage here, and the rule that
-keeps it safe is:
+`POOL_DEPOSIT_ADDRESS` is `0xDdA10FB6e6d726ae1cfB079CD79A4f0Ef7cAF240` — the
+**Coinbase deposit address** for the USDC account, on Ethereum mainnet.
+Transfers there become venue equity on arrival, which means:
 
-> **The wallet is a doorway, not a vault.** Tester funds land there, get swept
-> to Coinbase, and only then get credited. The pool's claim is always against
-> **venue equity** — which is what `pool.reconcile` checks — never against the
-> wallet balance.
+- **No wallet in the middle**, so we never hold client funds in something we
+  sign for. There is no sweep step and no hot key to protect.
+- **No collision with the yield sleeve.** The earlier address
+  (`0x6549…73B1`) is the wallet `yield_gen_bot` on **45.33.101.215** monitors;
+  tester money no longer lands there, so that app's planner can never deploy a
+  deposit. Nothing about the yield box needed changing to get that property.
+- **The reconciler sees it immediately** (`get_cash_assets` counts the spot
+  USDC wallet), so a deposit raises covered assets the moment it lands rather
+  than at credit time.
 
-Credit **after** the sweep, not on arrival on-chain. Crediting while funds are
-still in the wallet gives a tester a claim Coinbase cannot cover *and* leaves
-the money somewhere the yield sleeve may deploy it. `pool.pending_inbound_usd()`
-is the amount claimed but not yet credited — i.e. how much of that wallet is
-not house money right now — and it rides along on the admin Credit card.
+If you ever change this value, run the check first — a typo has no undo:
 
-What is **not** enforced from this repo: `yield_gen_bot` runs on another box,
-so nothing here can stop its planner deploying an idle tester deposit. The hub's
-own Yield tab cannot misread it — `dashboard/yield_gen.py` computes NAV as Aave
-collateral − debt + Pendle PTs, which excludes idle wallet balance — but the
-`nav_eth` display figure comes from that app's `topline`, so it inherits
-whatever the app counts. Note also that `SERVICE_API_TOKENS` is **empty** on
-this server, so `/api/v1` returns 503 and the two systems are not currently
-talking at all. Publishing the pool's reserved balance for the yield planner to
-subtract needs that token set plus a change on the yield box.
+```bash
+sudo -u ethagent /opt/eth-trading-agent/.venv/bin/python \
+  deploy/_check_deposit_address.py 0x<new address>
+```
 
-The durable fix is a deposit address that is **not** the yield wallet. Until
-then, keep the sweep prompt and don't leave deposits sitting.
+It asks Coinbase whether it generated that address, and names the account and
+network. A `NO MATCH` is not proof the address is wrong, but it *is* reason to
+confirm in the Coinbase UI before anyone sends to it.
+
+Credits are still a manual tap, and what you are confirming has changed: not
+that funds were swept, but that the **amount matches** and the **sender is the
+tester's registered wallet**. A sender mismatch is still creditable — the money
+is in the account — but the wallet stays unverified and cannot be paid out to.
+`pool.pending_inbound_usd()` is the amount claimed but not yet credited, i.e.
+the slice of apparent house residual that is really a tester's, and it rides
+along on the admin Credit card.
+
+#### Registered wallets and return-to-source
+
+Every tester binds the address they fund from (`/wallet 0x…`) before they can
+`/deposit`. It does two jobs: it is how an arriving transfer is attributed to a
+person by its **sender** rather than by what they typed, and it is the only
+address a withdrawal may ever return to.
+
+| State | Meaning | Payout allowed |
+|---|---|---|
+| `pending` | registered, but nothing has arrived from it | no |
+| `verified` | a deposit arrived from it, proving control | yes |
+| cooldown set | an admin approved an address change | no, until it expires |
+
+A wallet is verified only by passing the real sender into
+`pool.decide_deposit(..., sender=...)`. Tapping Credit alone does **not** verify
+it, deliberately: the tap means you saw funds arrive, not that you saw where
+from, and that distinction is the only thing standing between a payout and an
+address nobody has proven they control. The chain watcher will supply the
+sender automatically; until then wallets stay `pending`, which costs nothing
+while there is no withdrawal path.
+
+Changing an address needs an admin tap and then holds payouts for
+`POOL_WALLET_COOLDOWN_HOURS` (24h). Re-pointing the payout address is the first
+thing an account takeover would do, so confirm out-of-band that a change
+request is really the tester before approving. The tester is DM'd on both the
+request and the approval, which is what gives them a chance to object.
 
 #### If the reconciler freezes intents
 

@@ -24,8 +24,9 @@ ALICE = 1001
 BOB = 1002
 
 # Tests run with a deposit address configured, the way production does, so the
-# txid rules are exercised rather than skipped.
-ADDRESS = "0x6549B1E2C9B3b004fca5E3C13AD8189Cf2f273B1"
+# wallet and txid rules are exercised rather than skipped. This is the real
+# Coinbase USDC deposit address: funds sent here land at the venue directly.
+ADDRESS = "0xDdA10FB6e6d726ae1cfB079CD79A4f0Ef7cAF240"
 
 
 def txhash(seed: str) -> str:
@@ -58,6 +59,13 @@ class PoolTestCase(unittest.TestCase):
         pool.approve_user(uid, admin_id=ADMIN)
         result = pool.credit(uid, amount, admin_id=ADMIN)
         self.assertTrue(result["ok"], result)
+
+    def _wallet(self, uid: int) -> str:
+        """Register a distinct sending address for this tester."""
+        address = "0x" + f"{uid:040x}"
+        result = pool.register_wallet(uid, address)
+        self.assertTrue(result["ok"], result)
+        return address
 
 
 class AccessTests(PoolTestCase):
@@ -147,9 +155,200 @@ class CashJournalTests(PoolTestCase):
         self.assertTrue(ok["ok"])
 
 
-class DepositRequestTests(PoolTestCase):
-    def test_request_and_one_tap_credit(self) -> None:
+class WalletRegistrationTests(PoolTestCase):
+    """The address a tester funds from is the only address they are paid to.
+
+    Return-to-source is what keeps us out of the business of sending client
+    money to destinations nobody has proven they control, so these tests pin
+    who may bind an address, what proves it, and how hard it is to move.
+    """
+
+    W1 = "0x1111111111111111111111111111111111111111"
+    W2 = "0x2222222222222222222222222222222222222222"
+
+    def setUp(self) -> None:
+        super().setUp()
         pool.approve_user(ALICE, admin_id=ADMIN)
+        pool.approve_user(BOB, admin_id=ADMIN)
+
+    def test_first_registration_is_self_serve_and_starts_unproven(self) -> None:
+        result = pool.register_wallet(ALICE, self.W1)
+        self.assertTrue(result["ok"], result)
+        wallet = pool.get_wallet(ALICE)
+        self.assertEqual(wallet["address"], self.W1)
+        # Unproven until money arrives from it — a typed address is a claim,
+        # not evidence.
+        self.assertEqual(wallet["status"], "pending")
+        self.assertEqual(pool.payout_target(ALICE)["reason"], "unverified")
+
+    def test_checksummed_and_unprefixed_spellings_are_one_address(self) -> None:
+        pool.register_wallet(ALICE, self.W1)
+        for variant in (self.W1.upper().replace("0X", "0x"), self.W1[2:],
+                        f"  {self.W1}  "):
+            self.assertEqual(
+                pool.register_wallet(ALICE, variant).get("unchanged"), True,
+                f"{variant!r} was treated as a different address",
+            )
+        self.assertEqual(pool.wallet_owner(self.W1.upper()), ALICE)
+
+    def test_malformed_addresses_are_refused(self) -> None:
+        for bad in ("", "0x", "nope", self.W1 + "ff", self.W1[:-1],
+                    "0xzzzz111111111111111111111111111111111111"):
+            self.assertEqual(
+                pool.register_wallet(ALICE, bad).get("reason"), "malformed",
+                f"{bad!r} was accepted as an address",
+            )
+
+    def test_two_testers_cannot_claim_one_address(self) -> None:
+        """Shared addresses would make sender-based attribution ambiguous,
+        which is the one job the registered wallet exists to do."""
+        pool.register_wallet(ALICE, self.W1)
+        result = pool.register_wallet(BOB, self.W1)
+        self.assertEqual(result["reason"], "address_taken")
+        self.assertNotIn("claimed_by", result)  # not Bob's to learn
+        self.assertIsNone(pool.get_wallet(BOB))
+
+    def test_a_deposit_from_the_address_is_what_verifies_it(self) -> None:
+        pool.register_wallet(ALICE, self.W1)
+        req = pool.request_deposit(ALICE, 600.0, txid=txhash("a"))
+        pool.decide_deposit(
+            req["request_id"], admin_id=ADMIN, approve=True, sender=self.W1
+        )
+        self.assertEqual(pool.get_wallet(ALICE)["status"], "verified")
+        target = pool.payout_target(ALICE)
+        self.assertTrue(target["ok"])
+        self.assertEqual(target["address"], self.W1)
+
+    def test_a_deposit_from_elsewhere_credits_but_proves_nothing(self) -> None:
+        """The money is in the account either way — it arrived. What it does
+        not do is establish that the registered address is really theirs."""
+        pool.register_wallet(ALICE, self.W1)
+        req = pool.request_deposit(ALICE, 600.0, txid=txhash("b"))
+        result = pool.decide_deposit(
+            req["request_id"], admin_id=ADMIN, approve=True, sender=self.W2
+        )
+        self.assertEqual(result["status"], "credited")
+        self.assertEqual(float(pool.get_account(ALICE)["cash_usd"]), 600.0)
+        self.assertFalse(result["wallet_verified"])
+        self.assertEqual(pool.get_wallet(ALICE)["status"], "pending")
+        self.assertEqual(pool.payout_target(ALICE)["reason"], "unverified")
+
+    def test_crediting_without_a_sender_never_fakes_the_proof(self) -> None:
+        """Tapping Credit means an admin saw funds arrive, not that they saw
+        where from. The flag must not be inferred from the tap."""
+        pool.register_wallet(ALICE, self.W1)
+        req = pool.request_deposit(ALICE, 600.0, txid=txhash("c"))
+        result = pool.decide_deposit(req["request_id"], admin_id=ADMIN, approve=True)
+        self.assertEqual(result["status"], "credited")
+        self.assertFalse(result["wallet_verified"])
+        self.assertEqual(pool.get_wallet(ALICE)["status"], "pending")
+
+    def test_a_deposit_needs_a_registered_wallet_first(self) -> None:
+        self.assertEqual(
+            pool.request_deposit(ALICE, 600.0, txid=txhash("d"))["reason"],
+            "wallet_required",
+        )
+
+    def test_changing_the_address_is_not_self_serve(self) -> None:
+        """A hijacked Telegram account's first move is to re-point the payout
+        address, so the tester alone cannot complete this."""
+        pool.register_wallet(ALICE, self.W1)
+        result = pool.register_wallet(ALICE, self.W2)
+        self.assertEqual(result["reason"], "change_needs_admin")
+        self.assertEqual(pool.get_wallet(ALICE)["address"], self.W1)
+
+    def test_an_approved_change_swaps_the_address_and_holds_payouts(self) -> None:
+        pool.register_wallet(ALICE, self.W1)
+        req = pool.request_wallet_change(ALICE, self.W2)
+        self.assertTrue(req["ok"], req)
+        # The old address still answers until an admin rules.
+        self.assertEqual(pool.get_wallet(ALICE)["address"], self.W1)
+
+        decided = pool.decide_wallet_change(
+            req["request_id"], admin_id=ADMIN, approve=True
+        )
+        self.assertTrue(decided["approved"])
+        wallet = pool.get_wallet(ALICE)
+        self.assertEqual(wallet["address"], self.W2)
+        # Unproven again, and held: a new address has shown us nothing yet.
+        self.assertEqual(wallet["status"], "pending")
+        self.assertEqual(pool.payout_target(ALICE)["reason"], "unverified")
+
+    def test_the_cooldown_outlives_verification(self) -> None:
+        """The hold is the window in which a victim can still object, so
+        proving the new address must not cut it short."""
+        pool.register_wallet(ALICE, self.W1)
+        req = pool.request_wallet_change(ALICE, self.W2)
+        pool.decide_wallet_change(req["request_id"], admin_id=ADMIN, approve=True)
+        pool.mark_wallet_verified(self.W2, txid=txhash("e"))
+
+        target = pool.payout_target(ALICE)
+        self.assertFalse(target["ok"])
+        self.assertEqual(target["reason"], "cooldown")
+        self.assertGreater(target["until"], pool._now())
+
+    def test_a_rejected_change_leaves_the_old_address_alone(self) -> None:
+        pool.register_wallet(ALICE, self.W1)
+        req = pool.request_wallet_change(ALICE, self.W2)
+        pool.decide_wallet_change(req["request_id"], admin_id=ADMIN, approve=False)
+        self.assertEqual(pool.get_wallet(ALICE)["address"], self.W1)
+        self.assertIsNone(pool.get_wallet_change_request(ALICE))
+
+    def test_one_change_request_at_a_time(self) -> None:
+        third = "0x3333333333333333333333333333333333333333"
+        pool.register_wallet(ALICE, self.W1)
+        self.assertTrue(pool.request_wallet_change(ALICE, self.W2)["ok"])
+        self.assertEqual(
+            pool.request_wallet_change(ALICE, third)["reason"], "already_pending"
+        )
+        # Naming the address they already have is answered as such, not queued.
+        self.assertEqual(
+            pool.request_wallet_change(ALICE, self.W1)["reason"], "same_address"
+        )
+
+    def test_a_change_cannot_be_decided_twice(self) -> None:
+        pool.register_wallet(ALICE, self.W1)
+        req = pool.request_wallet_change(ALICE, self.W2)
+        pool.decide_wallet_change(req["request_id"], admin_id=ADMIN, approve=True)
+        again = pool.decide_wallet_change(
+            req["request_id"], admin_id=ADMIN, approve=True
+        )
+        self.assertFalse(again["ok"])
+        self.assertEqual(again["reason"], "already_decided")
+
+    def test_only_one_live_address_survives_a_change(self) -> None:
+        """The index behind "where do we pay this person" having one answer."""
+        pool.register_wallet(ALICE, self.W1)
+        req = pool.request_wallet_change(ALICE, self.W2)
+        pool.decide_wallet_change(req["request_id"], admin_id=ADMIN, approve=True)
+        with sqlite3.connect(self._db) as conn:
+            live = conn.execute(
+                "SELECT COUNT(*) FROM pool_wallets WHERE telegram_id = ? AND "
+                "status IN ('pending', 'verified')",
+                (ALICE,),
+            ).fetchone()[0]
+        self.assertEqual(live, 1)
+        # And the old one is retained as history, not deleted.
+        self.assertEqual(pool.wallet_owner(self.W1), None)
+
+    def test_an_unapproved_user_cannot_register(self) -> None:
+        self.assertEqual(
+            pool.register_wallet(999, self.W1)["reason"], "not_approved"
+        )
+
+    def test_verifying_an_unregistered_address_is_a_no_op(self) -> None:
+        self.assertEqual(
+            pool.mark_wallet_verified(self.W1)["reason"], "not_registered"
+        )
+
+
+class DepositRequestTests(PoolTestCase):
+    def setUp(self) -> None:
+        super().setUp()
+        pool.approve_user(ALICE, admin_id=ADMIN)
+        self._wallet(ALICE)
+
+    def test_request_and_one_tap_credit(self) -> None:
         req = pool.request_deposit(ALICE, 800.0, txid=txhash("a"))
         self.assertTrue(req["ok"])
         result = pool.decide_deposit(req["request_id"], admin_id=ADMIN, approve=True)
@@ -161,7 +360,6 @@ class DepositRequestTests(PoolTestCase):
         self.assertEqual(float(pool.get_account(ALICE)["cash_usd"]), 800.0)
 
     def test_below_minimum_and_double_pending_are_refused(self) -> None:
-        pool.approve_user(ALICE, admin_id=ADMIN)
         self.assertEqual(
             pool.request_deposit(ALICE, 100.0, txid=txhash("a"))["reason"],
             "below_minimum",
@@ -172,7 +370,6 @@ class DepositRequestTests(PoolTestCase):
         self.assertEqual(second["reason"], "already_pending")
 
     def test_denied_request_moves_no_money(self) -> None:
-        pool.approve_user(ALICE, admin_id=ADMIN)
         req = pool.request_deposit(ALICE, 600.0, txid=txhash("d"))
         result = pool.decide_deposit(req["request_id"], admin_id=ADMIN, approve=False)
         self.assertEqual(result["status"], "denied")
@@ -180,13 +377,19 @@ class DepositRequestTests(PoolTestCase):
 
 
 class DepositTxidTests(PoolTestCase):
-    """The deposit address is shared with the yield wallet, so the hash is the
-    only thing tying a claimed amount to a transfer that actually arrived."""
+    """The hash is which transfer arrived, and it may be claimed exactly once.
+
+    Deposits from every tester land at one venue address, so without a hash
+    a claimed amount is not tied to any particular transfer, and without
+    uniqueness two testers could be credited for the same one.
+    """
 
     def setUp(self) -> None:
         super().setUp()
         pool.approve_user(ALICE, admin_id=ADMIN)
         pool.approve_user(BOB, admin_id=ADMIN)
+        self._wallet(ALICE)
+        self._wallet(BOB)
 
     def test_a_hash_is_required_once_an_address_is_configured(self) -> None:
         self.assertEqual(

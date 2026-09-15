@@ -366,6 +366,12 @@ POOL_RECON_TOLERANCE_USD: float = 25.0
 # be added without a deploy). If both are empty this falls back to
 # config.INTERNAL_TELEGRAM_IDS, then the admin chat.
 POOL_ADMIN_TELEGRAM_IDS: tuple[int, ...] = ()
+# How long payouts are held after an admin approves a change of payout
+# address. Whoever holds the Telegram account can ask to be paid somewhere
+# new, so re-pointing the address is a takeover's first move; the delay is the
+# window in which the real owner can notice and say so before funds leave.
+# Costs an honest tester a day, once, and only if they move wallets.
+POOL_WALLET_COOLDOWN_HOURS: float = 24.0
 
 # Macro headline context (RSS + webhook advisory layer).
 MACRO_CONTEXT_ENABLED = True

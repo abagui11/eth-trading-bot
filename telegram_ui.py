@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from datetime import datetime
+
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup
 
 import bot_config
@@ -191,6 +193,7 @@ def format_fund_result(result: dict) -> str:
 
 CB_POOL_USER_PREFIX = "pooluser:"      # pooluser:approve:<id> / pooluser:deny:<id>
 CB_POOL_DEPOSIT_PREFIX = "pooldep:"    # pooldep:credit:<req_id> / pooldep:deny:<req_id>
+CB_POOL_WALLET_PREFIX = "poolwal:"     # poolwal:approve:<row_id> / poolwal:reject:<row_id>
 CB_POOL_PORTFOLIO = "pool:portfolio"
 CB_POOL_DEPOSIT = "pool:deposit"
 
@@ -218,6 +221,7 @@ POOL_WELCOME_MESSAGE = (
     "are automatic and your share is credited as each one fills.\n\n"
     "Commands:\n"
     "• /portfolio — cash, positions, P&L\n"
+    "• /wallet — register the address you fund from; withdrawals return there\n"
     "• /deposit — how to fund (credits stay manual until we confirm on the venue)\n\n"
     "Trade cards arrive here as private messages with *your* size on them. "
     "Anything about your money stays in this chat.\n\n"
@@ -234,6 +238,21 @@ def pool_admin_access_keyboard(telegram_id: int) -> InlineKeyboardMarkup:
                 ),
                 InlineKeyboardButton(
                     "Deny", callback_data=f"{CB_POOL_USER_PREFIX}deny:{telegram_id}"
+                ),
+            ]
+        ]
+    )
+
+
+def pool_admin_wallet_keyboard(request_id: int) -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(
+        [
+            [
+                InlineKeyboardButton(
+                    "Approve", callback_data=f"{CB_POOL_WALLET_PREFIX}approve:{request_id}"
+                ),
+                InlineKeyboardButton(
+                    "Reject", callback_data=f"{CB_POOL_WALLET_PREFIX}reject:{request_id}"
                 ),
             ]
         ]
@@ -267,7 +286,9 @@ def pool_account_keyboard() -> InlineKeyboardMarkup:
     )
 
 
-def format_deposit_instructions(*, has_pending: bool = False) -> str:
+def format_deposit_instructions(
+    *, has_pending: bool = False, wallet: str | None = None
+) -> str:
     address = config.POOL_DEPOSIT_ADDRESS or "(deposit address not configured — ask the admin)"
     # Never guess the chain: USDC sent to this address on a network we do not
     # control it on is unrecoverable.
@@ -276,6 +297,24 @@ def format_deposit_instructions(*, has_pending: bool = False) -> str:
     risk_pct = float(bot_config.POOL_RISK_PCT) * 100
     example = 1000.0
     example_risk = example * float(bot_config.POOL_RISK_PCT)
+
+    if wallet is None:
+        # Ordered deliberately: registering first is what makes the deposit
+        # attributable and the payout address known, and a tester who sends
+        # before registering creates a transfer nobody can match to them.
+        return "\n".join([
+            "Fund your account\n",
+            "First, register the wallet you'll send from:",
+            "   /wallet 0x<your address>",
+            "",
+            "We pay withdrawals back to that same address and nowhere else. "
+            "That is deliberate — it means your funds can only ever return to "
+            "a wallet you've proven you control, and it's how we recognise "
+            "your deposit when it arrives.",
+            "",
+            "Once that's set, /deposit shows where to send.",
+        ])
+
     lines = [
         "Fund your account\n",
         "Sizes stay intentionally small while we solidify the strategy. "
@@ -284,22 +323,104 @@ def format_deposit_instructions(*, has_pending: bool = False) -> str:
         f"Example: ${example:,.0f} available → about ${example_risk:,.2f} at "
         "risk if that trade is stopped out. The rest stays available for "
         "other Accepts or sits in cash.\n",
-        f"1. Send USDC to:\n`{address}`",
-        f"   Network: {network}",
-        f"2. Minimum: ${minimum:,.0f}",
-        "3. Tell me the amount *and the transaction hash*:\n"
+        f"1. Send USDC *from your registered wallet*:\n`{wallet}`",
+        f"2. To this address:\n`{address}`",
+        f"   Network: *{network}*. USDC only.",
+        f"3. Minimum: ${minimum:,.0f}",
+        "4. Tell me the amount *and the transaction hash*:\n"
         "   /deposit 1000 0x<transaction hash>",
         "",
-        "The hash is required. Other funds arrive at that address too, so it "
-        "is what proves which transfer is yours.",
+        "Both matter: sending from your registered wallet is how the transfer "
+        "is matched to you, and the hash is how we tell one deposit from "
+        "another. Send from an exchange account instead and we may not be "
+        "able to credit it.",
         "",
-        "Your balance is credited once the funds land on the venue and an "
-        "admin confirms — you'll get a message here. Trade cards will then "
-        "show the dollar risk *your* Accept would take.",
+        f"Only USDC, only on {network}. Anything else sent to that address "
+        "may be unrecoverable — by us or by anyone.",
+        "",
+        "Funds arrive at the trading venue directly. Your balance is credited "
+        "once an admin confirms, and you'll get a message here. Trade cards "
+        "will then show the dollar risk *your* Accept would take.",
     ]
     if has_pending:
         lines.append("")
         lines.append("You already have a deposit request pending review.")
+    return "\n".join(lines)
+
+
+def _friendly_utc(stamp: str) -> str:
+    """`2026-09-16T20:00:00Z` → `16 Sep 20:00 UTC`, or the input if odd."""
+    try:
+        when = datetime.strptime(str(stamp), "%Y-%m-%dT%H:%M:%SZ")
+    except (TypeError, ValueError):
+        return str(stamp)
+    return when.strftime("%d %b %H:%M UTC")
+
+
+def format_wallet_status(
+    wallet: dict | None, *, change: dict | None = None
+) -> str:
+    """What /wallet shows: the payout address and how settled it is."""
+    if wallet is None:
+        return "\n".join([
+            "Your payout wallet\n",
+            "You haven't registered one yet. Send:",
+            "   /wallet 0x<your address>",
+            "",
+            "This is the address you'll fund from, and the *only* address "
+            "withdrawals are ever sent back to. Use a wallet you control — "
+            "not an exchange deposit address, which may not let funds return.",
+        ])
+
+    verified = str(wallet.get("status")) == "verified"
+    lines = [
+        "Your payout wallet\n",
+        f"`{wallet['address']}`",
+        "",
+    ]
+    if verified:
+        lines.append(
+            "Confirmed — we've seen a deposit arrive from this address, so "
+            "we know you control it. Withdrawals return here."
+        )
+    else:
+        # Say plainly that the address is unproven rather than implying the
+        # payout path is ready: a tester who assumes it is set could be
+        # surprised at exactly the wrong moment.
+        lines.append(
+            "Registered, not yet confirmed. It's confirmed the first time a "
+            "deposit arrives from it — that's what proves the wallet is "
+            "yours, and withdrawals can only go to a confirmed address."
+        )
+    held = wallet.get("payouts_blocked_until")
+    if held:
+        lines += [
+            "",
+            f"Withdrawals to this address are on hold until {_friendly_utc(held)} "
+            "(24h after an address change, as a safety measure).",
+        ]
+    if change:
+        lines += [
+            "",
+            f"Change pending admin review: `{change['address']}`",
+        ]
+    else:
+        lines += [
+            "",
+            "To change it, send /wallet with the new address. Changes need "
+            "admin review and hold withdrawals for "
+            f"{float(bot_config.POOL_WALLET_COOLDOWN_HOURS):.0f}h — if "
+            "someone ever gets into your Telegram, that delay is what stops "
+            "them redirecting your money.",
+        ]
+    # Say it rather than let a tester discover it by trying: the address is
+    # being collected now so the payout path has somewhere to send to, but
+    # that path is not open yet.
+    lines += [
+        "",
+        "Withdrawals aren't open yet — we're briefing everyone on timing "
+        "before they are. Message the admin meanwhile.",
+    ]
     return "\n".join(lines)
 
 
