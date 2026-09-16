@@ -56,15 +56,16 @@ def main() -> int:
         check("chain module", False, str(exc)[:80])
 
     print("\nBooks")
-    try:
-        snap = pool.reconcile_snapshot()
-        check("reconcile healthy", bool(snap.get("ok")),
+    snap = pool.last_reconcile()
+    if snap:
+        check("last reconcile healthy", bool(snap.get("ok")),
               f"venue ${float(snap.get('venue_assets_usd') or 0):,.2f} vs "
               f"claims ${float(snap.get('tester_cash_usd') or 0):,.2f}")
-    except Exception as exc:
-        print(f"  --    reconcile snapshot unavailable: {str(exc)[:80]}")
-    check("intents not frozen", not pool.is_frozen(),
-          str(pool.is_frozen() or "open"))
+    else:
+        print("  --    no reconcile recorded yet (runs every ~10 min)")
+    frozen = pool.intents_frozen()
+    check("intents not frozen", not frozen, str(frozen or "open"))
+    print(f"  tester cash total ${pool.total_tester_cash():,.2f}")
 
     print("\nLimits the demo will hit")
     print(f"  min deposit    ${float(bot_config.POOL_MIN_DEPOSIT_USD):,.0f}")
