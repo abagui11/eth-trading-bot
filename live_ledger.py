@@ -349,7 +349,18 @@ def get_closed_trades(
 
 
 def get_live_performance() -> dict[str, Any]:
-    """Realized live P&L per sleeve — never blended with the paper book."""
+    """Realized live P&L per sleeve — never blended with the paper book.
+
+    The mill sleeve's numbers count from ``MILL_LIVE_EPOCH_START`` (the
+    2026-09-12 bracket re-base): the old 1.5R-target book and the current
+    0.375R-target book have different hit rates by construction, so a blended
+    headline would describe neither. Pre-epoch rows stay in the ledger and in
+    the Trading Log; they are only excluded from these aggregates.
+    """
+    import bot_config
+
+    mill_epoch = str(bot_config.MILL_LIVE_EPOCH_START)
+    epoch_clause = " AND (source != 'mill' OR opened_at >= ?)"
     with _connect() as conn:
         rows = conn.execute(
             """
@@ -357,15 +368,21 @@ def get_live_performance() -> dict[str, Any]:
                    COUNT(*) AS closed_n,
                    COALESCE(SUM(pnl_usd), 0) AS pnl,
                    SUM(CASE WHEN pnl_usd > 0 THEN 1 ELSE 0 END) AS wins
-            FROM live_trades WHERE status = 'closed' GROUP BY source
+            FROM live_trades WHERE status = 'closed'
             """
+            + epoch_clause
+            + " GROUP BY source",
+            (mill_epoch,),
         ).fetchall()
         open_rows = conn.execute(
             """
             SELECT source, COUNT(*) AS n,
                    COALESCE(SUM(realized_pnl_usd), 0) AS banked
-            FROM live_trades WHERE status = 'open' GROUP BY source
+            FROM live_trades WHERE status = 'open'
             """
+            + epoch_clause
+            + " GROUP BY source",
+            (mill_epoch,),
         ).fetchall()
         fill_rows = conn.execute(
             """
@@ -373,8 +390,11 @@ def get_live_performance() -> dict[str, Any]:
                    SUM(CASE WHEN status = 'open' THEN 1 ELSE 0 END) AS open_n,
                    SUM(CASE WHEN status = 'closed' THEN 1 ELSE 0 END) AS closed_n,
                    COALESCE(SUM(CASE WHEN status = 'closed' THEN pnl_usd END), 0) AS pnl
-            FROM live_trades GROUP BY source, fill_type
+            FROM live_trades WHERE 1 = 1
             """
+            + epoch_clause
+            + " GROUP BY source, fill_type",
+            (mill_epoch,),
         ).fetchall()
     by_source: dict[str, dict[str, Any]] = {}
     for r in rows:

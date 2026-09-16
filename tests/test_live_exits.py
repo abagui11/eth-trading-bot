@@ -734,6 +734,47 @@ class RealizedPerformanceTests(LedgerDbTestCase):
         self.assertEqual(hq["banked_open_usd"], 0.0)
 
 
+class MillEpochWindowTests(LedgerDbTestCase):
+    """The mill's headline P&L counts from the 09-12 bracket re-base.
+
+    The old 1.5R book and the current 0.375R book have different hit rates by
+    construction; blending them describes neither. Pre-epoch rows stay in the
+    ledger — they only leave the aggregates. HQ is never windowed.
+    """
+
+    def _backdate(self, tid: int, opened_at: str) -> None:
+        with live_ledger._connect() as conn:
+            conn.execute(
+                "UPDATE live_trades SET opened_at = ? WHERE id = ?",
+                (opened_at, tid),
+            )
+
+    def test_pre_epoch_mill_trades_leave_the_headline(self) -> None:
+        old = self._open_trade(source="mill", qty=0.1)
+        live_ledger.record_close(
+            old, exit_price=2385.0, pnl_usd=-10.0, close_reason="stop_loss"
+        )
+        self._backdate(old, "2026-09-11T12:00:00Z")
+        new = self._open_trade(source="mill", qty=0.1, order_id="entry-2")
+        live_ledger.record_close(
+            new, exit_price=2440.0, pnl_usd=3.0, close_reason="take_profit"
+        )
+        mill = live_ledger.get_live_performance()["by_source"]["mill"]
+        self.assertEqual(mill["closed"], 1)
+        self.assertAlmostEqual(mill["pnl_usd"], 3.0)
+        self.assertEqual(mill["win_rate"], 1.0)
+
+    def test_hq_is_not_windowed(self) -> None:
+        tid = self._open_trade()
+        live_ledger.record_close(
+            tid, exit_price=2385.0, pnl_usd=-10.0, close_reason="stop_loss"
+        )
+        self._backdate(tid, "2026-09-01T12:00:00Z")
+        hq = live_ledger.get_live_performance()["by_source"]["hq"]
+        self.assertEqual(hq["closed"], 1)
+        self.assertAlmostEqual(hq["pnl_usd"], -10.0)
+
+
 class ReconcileTests(LedgerDbTestCase):
     """The netting bug: two sleeves share one contract, so a size check lies."""
 

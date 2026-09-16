@@ -468,6 +468,27 @@ DAILY_DIGEST_SOURCE = "mill"
 # bracket earlier the same day. The filter is a lexicographic >= on an ISO
 # opened_at, so a full timestamp works wherever a date does.
 MILL_PAPER_EPOCH_START = "2026-09-12T17:36:00Z"  # UTC; volume paper opened_at >= this
+# The dashboard's live-clip P&L window starts at the same bracket re-base
+# (git 0343548). Trades opened under the old 1.5R bracket stay in the ledger
+# and in the Trading Log list; they just no longer set the headline number,
+# because a book that changed its geometry mid-flight has two track records.
+MILL_LIVE_EPOCH_START = MILL_PAPER_EPOCH_START
+
+# Auto-fill loss cooldown (2026-09-16). On 09-11 the sleeve refilled 19 times
+# into one trending day (−$44 of the live book's −$76 total): every close freed
+# the slot and the sweep immediately bought the next idea in the same hostile
+# tape. After N consecutive losing AUTO clips on the same (product, side), the
+# auto path sits out that (product, side) for COOLDOWN minutes; other products
+# and the other side stay eligible, so the sweep "thinks about other ideas"
+# rather than going quiet. Manual Accepts are never blocked.
+# Backtest on the recorded live book (analysis/_q0916_cooldown_bt.py): the
+# 3×3 sweep over N∈{2,3,4} × cooldown∈{2h,4h,6h} avoids net losses in every
+# cell and monotonically; N=3 / 4h would have avoided −$23.47 of the −$76.40
+# (net of the 2 winners it also blocks). n=76, so treat as structural damage
+# control, not tuned alpha.
+LIVE_MILL_LOSS_COOLDOWN_ENABLED = True
+LIVE_MILL_LOSS_COOLDOWN_N = 3          # consecutive losses on one (product, side)
+LIVE_MILL_LOSS_COOLDOWN_MIN = 240      # minutes the auto path sits out
 
 
 def qty_caps(product_id: str) -> tuple[float, float]:

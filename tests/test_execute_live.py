@@ -404,6 +404,74 @@ class MillSleeveTests(unittest.TestCase):
             verdict = execute.execute_mill_idea(**self._idea())
         self.assertEqual(verdict["skip_reason"], "auto_disabled")
 
+    # -- loss cooldown ---------------------------------------------------------
+
+    def _close_streak(
+        self, n: int, *, product_id: str = "ETH-USD", side: str = "long",
+        pnl: float = -2.0,
+    ) -> None:
+        """Book n consecutive closed mill trades on one (product, side)."""
+        instrument = "ETP-20DEC30-CDE" if product_id == "ETH-USD" else "BIP-20DEC30-CDE"
+        for i in range(n):
+            tid = live_ledger.record_open(
+                cycle_id=f"mill_cd_{product_id}_{side}_{i}",
+                source="mill",
+                product_id=product_id,
+                instrument=instrument,
+                side=side,
+                qty=0.1,
+                entry=3000.0,
+                stop_loss=2940.0,
+                take_profits_json="[]",
+                order_id=None,
+                stop_order_id=None,
+            )
+            live_ledger.record_close(
+                tid, exit_price=2940.0, pnl_usd=pnl,
+                close_reason="stop_loss" if pnl <= 0 else "take_profit",
+            )
+
+    def test_auto_sits_out_after_a_loss_streak(self) -> None:
+        self._close_streak(bot_config.LIVE_MILL_LOSS_COOLDOWN_N)
+        verdict = execute.execute_mill_idea(**self._idea())
+        self.assertFalse(verdict["executed"])
+        self.assertEqual(verdict["skip_reason"], "loss_cooldown")
+        self.assertIn("until", verdict["cooldown"])
+
+    def test_other_product_or_side_stays_eligible(self) -> None:
+        """The sweep should move on to a different idea, not go quiet."""
+        self._close_streak(bot_config.LIVE_MILL_LOSS_COOLDOWN_N)
+        verdict = execute.execute_mill_idea(
+            **self._idea(direction="short", entry=3000.0, stop_loss=3060.0,
+                         take_profits=[2900.0])
+        )
+        self.assertTrue(verdict["executed"])
+
+    def test_a_winner_breaks_the_streak(self) -> None:
+        self._close_streak(bot_config.LIVE_MILL_LOSS_COOLDOWN_N - 1)
+        self._close_streak(1, pnl=4.0)
+        verdict = execute.execute_mill_idea(**self._idea())
+        self.assertTrue(verdict["executed"])
+
+    def test_cooldown_expires(self) -> None:
+        self._close_streak(bot_config.LIVE_MILL_LOSS_COOLDOWN_N)
+        with patch.object(bot_config, "LIVE_MILL_LOSS_COOLDOWN_MIN", 0):
+            verdict = execute.execute_mill_idea(**self._idea())
+        self.assertTrue(verdict["executed"])
+
+    def test_manual_accept_ignores_the_cooldown(self) -> None:
+        self._close_streak(bot_config.LIVE_MILL_LOSS_COOLDOWN_N)
+        verdict = execute.execute_mill_idea(
+            **self._idea(fill_type="manual", accepted_by=self.OPERATOR)
+        )
+        self.assertTrue(verdict["executed"])
+
+    def test_cooldown_can_be_disabled(self) -> None:
+        self._close_streak(bot_config.LIVE_MILL_LOSS_COOLDOWN_N)
+        with patch.object(bot_config, "LIVE_MILL_LOSS_COOLDOWN_ENABLED", False):
+            verdict = execute.execute_mill_idea(**self._idea())
+        self.assertTrue(verdict["executed"])
+
     # -- manual (operator Accept) path ---------------------------------------
 
     def test_manual_fills_beside_an_existing_clip(self) -> None:

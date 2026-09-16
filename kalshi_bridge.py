@@ -51,9 +51,10 @@ _BOT_BLURBS = {
         "Cash out at 2× or cut at ½; cool down after consecutive stops."
     ),
     "eva_wick": (
-        "Fade session-range pops and buy overshoots against EVA’s H4/H1/M15 lean "
-        "when the side is cheap (≤33¢). Take profit near 2× entry; hold losers "
-        "to settlement."
+        "Join the move the old wick fade bet against: same session-range pop/"
+        "flush triggers and EVA stance gates, but buy the momentum side at "
+        "~67–80¢ and hold to settlement. Replaced 2026-09-16; epoch book "
+        "backfilled from the replayed inverse — treat as a forward paper test."
     ),
     "eva_arb": (
         "Last 2 minutes only. If the favorite touched 90¢ then dips to 75–85¢, "

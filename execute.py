@@ -25,7 +25,7 @@ from __future__ import annotations
 import json
 import logging
 import time
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Any
 
 import bot_config
@@ -1511,6 +1511,54 @@ def mill_capacity() -> dict[str, Any]:
     }
 
 
+def _mill_loss_cooldown(product_id: str, direction: str) -> dict[str, Any] | None:
+    """Sit the AUTO path out after a losing streak on one (product, side).
+
+    On 2026-09-11 the sleeve refilled 19 times into one trending day: every
+    stop-out freed the slot and the re-offer sweep immediately bought the next
+    idea in the same hostile tape (−$44 of the live book's −$76.40). The mill
+    keeps minting ideas; this only stops the *auto* path from re-buying the
+    exact pattern that just lost N times in a row. Other products and the
+    opposite side stay eligible — the sweep moves on to a different idea —
+    and manual Accepts are never gated.
+
+    Returns ``{"until": iso, "streak": n}`` while cooling down, else None.
+    Backtested on the recorded book in analysis/_q0916_cooldown_bt.py.
+    """
+    if not bot_config.LIVE_MILL_LOSS_COOLDOWN_ENABLED:
+        return None
+    n_needed = int(bot_config.LIVE_MILL_LOSS_COOLDOWN_N)
+    if n_needed <= 0:
+        return None
+    try:
+        closed = live_ledger.get_closed_trades(limit=50, source="mill")
+    except Exception:
+        logger.exception("Mill cooldown read failed — failing open")
+        return None
+    recent = [
+        t
+        for t in closed  # newest first
+        if str(t.get("product_id") or "") == product_id
+        and str(t.get("side") or "") == direction
+    ][:n_needed]
+    if len(recent) < n_needed:
+        return None
+    if any(float(t.get("pnl_usd") or 0.0) > 0 for t in recent):
+        return None
+    last_close = str(recent[0].get("closed_at") or "")
+    try:
+        closed_dt = datetime.fromisoformat(last_close.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    until = closed_dt + timedelta(minutes=int(bot_config.LIVE_MILL_LOSS_COOLDOWN_MIN))
+    if datetime.now(timezone.utc) >= until:
+        return None
+    return {
+        "until": until.strftime("%Y-%m-%dT%H:%M:%SZ"),
+        "streak": n_needed,
+    }
+
+
 def _revalidated_plan(
     *,
     product_id: str,
@@ -1624,6 +1672,10 @@ def execute_mill_idea(
         # empty. Once anything is open, later slots belong to manual Accepts.
         if capacity["open"] > 0:
             return _skip("book_not_empty")
+        cooldown = _mill_loss_cooldown(product_id, direction)
+        if cooldown is not None:
+            verdict["cooldown"] = cooldown
+            return _skip("loss_cooldown")
     else:
         return _skip("bad_fill_type")
 

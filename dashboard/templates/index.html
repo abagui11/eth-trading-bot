@@ -881,7 +881,7 @@
         {% set mill_live = live_performance.by_source.get('mill') %}
         <div class="metrics" style="margin-bottom:10px">
           <div class="metric">
-            <div class="label">Clip realized P&amp;L</div>
+            <div class="label">Clip realized P&amp;L <span class="sub">(since 09-12 bracket re-base)</span></div>
             <div class="value {{ 'pos' if mill_live and mill_live.pnl_usd >= 0 else ('neg' if mill_live else '') }}" id="mill-clip-pnl">
               {% if mill_live %}{{ "%+.2f"|format(mill_live.pnl_usd) }}{% else %}no fills{% endif %}
             </div>
