@@ -41,6 +41,59 @@ TABLES = (
 )
 
 
+def row_counts(uid: int) -> dict[str, int]:
+    """Rows this id owns, per table. Absent tables are skipped, not fatal."""
+    conn = sqlite3.connect(config.LEDGER_DB)
+    conn.row_factory = sqlite3.Row
+    counts: dict[str, int] = {}
+    try:
+        for table in TABLES:
+            try:
+                row = conn.execute(
+                    f"SELECT COUNT(*) AS n FROM {table} WHERE telegram_id = ?",
+                    (uid,),
+                ).fetchone()
+            except sqlite3.OperationalError:
+                continue    # table or column absent on this build
+            if int(row["n"]):
+                counts[table] = int(row["n"])
+    finally:
+        conn.close()
+    return counts
+
+
+def reset(uid: int, *, confirm: bool, force: bool) -> dict:
+    """Decide and, if allowed, perform the reset. Returns what happened.
+
+    Split out from the CLI so the refusal can be tested: it is the only thing
+    standing between a demo reset and deleting a real tester's balance.
+    """
+    account = pool.get_account(uid)
+    cash = float(account["cash_usd"]) if account else 0.0
+    reserved = float(account["reserved_usd"]) if account else 0.0
+    counts = row_counts(uid)
+
+    if not counts:
+        return {"action": "nothing", "cash": cash, "reserved": reserved,
+                "counts": counts}
+    if (cash > 0.01 or reserved > 0.01) and not force:
+        return {"action": "refused", "cash": cash, "reserved": reserved,
+                "counts": counts}
+    if not confirm:
+        return {"action": "dry_run", "cash": cash, "reserved": reserved,
+                "counts": counts}
+
+    conn = sqlite3.connect(config.LEDGER_DB)
+    try:
+        with conn:
+            for table in counts:
+                conn.execute(f"DELETE FROM {table} WHERE telegram_id = ?", (uid,))
+    finally:
+        conn.close()
+    return {"action": "reset", "cash": cash, "reserved": reserved,
+            "counts": counts}
+
+
 def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("telegram_id", type=int)
@@ -51,56 +104,37 @@ def main() -> int:
     uid = args.telegram_id
 
     account = pool.get_account(uid)
-    cash = float(account["cash_usd"]) if account else 0.0
-    reserved = float(account["reserved_usd"]) if account else 0.0
-
     print(f"telegram id : {uid}")
     print(f"account     : {'exists' if account else 'none'}")
-    print(f"cash        : ${cash:,.2f}")
-    print(f"reserved    : ${reserved:,.2f}")
+    print(f"cash        : ${float(account['cash_usd']) if account else 0:,.2f}")
+    print(f"reserved    : "
+          f"${float(account['reserved_usd']) if account else 0:,.2f}")
 
     wallet = pool.get_wallet(uid)
     if wallet:
         print(f"wallet      : {wallet['address']} ({wallet['status']})")
 
-    conn = sqlite3.connect(config.LEDGER_DB)
-    conn.row_factory = sqlite3.Row
-    counts = {}
-    for table in TABLES:
-        try:
-            row = conn.execute(
-                f"SELECT COUNT(*) AS n FROM {table} WHERE telegram_id = ?", (uid,)
-            ).fetchone()
-            if int(row["n"]):
-                counts[table] = int(row["n"])
-        except sqlite3.OperationalError:
-            continue        # table or column absent on this build
+    result = reset(uid, confirm=args.yes, force=args.force)
+    counts = result["counts"]
 
-    if not counts:
-        conn.close()
+    if result["action"] == "nothing":
         print("\nnothing to reset — this id is already brand-new.")
         return 0
 
-    print("\nrows that would be deleted:")
+    print("\nrows that would be deleted:" if result["action"] != "reset"
+          else "\nrows deleted:")
     for table, n in counts.items():
         print(f"  {n:>4}  {table}")
 
-    if (cash > 0.01 or reserved > 0.01) and not args.force:
-        conn.close()
-        print(f"\nREFUSED: this account still holds ${cash + reserved:,.2f}. "
-              "Withdraw it first, or pass --force if you are certain the money "
-              "is not real.")
+    if result["action"] == "refused":
+        held = result["cash"] + result["reserved"]
+        print(f"\nREFUSED: this account still holds ${held:,.2f}. Withdraw it "
+              "first, or pass --force if you are certain the money is not "
+              "real.")
         return 1
-
-    if not args.yes:
-        conn.close()
+    if result["action"] == "dry_run":
         print("\ndry run. re-run with --yes to delete.")
         return 0
-
-    with conn:
-        for table in counts:
-            conn.execute(f"DELETE FROM {table} WHERE telegram_id = ?", (uid,))
-    conn.close()
 
     print(f"\nreset. {uid} is now a first-contact user again.")
     print(f"tester cash across the pool: ${pool.total_tester_cash():,.2f}")

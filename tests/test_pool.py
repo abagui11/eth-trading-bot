@@ -9,6 +9,7 @@ properties, plus the access gate and the reconcile freeze.
 from __future__ import annotations
 
 import sqlite3
+import sys
 import tempfile
 import threading
 import unittest
@@ -950,6 +951,75 @@ class DepositRequestTests(PoolTestCase):
         result = pool.decide_deposit(req["request_id"], admin_id=ADMIN, approve=False)
         self.assertEqual(result["status"], "denied")
         self.assertEqual(float(pool.get_account(ALICE)["cash_usd"]), 0.0)
+
+
+class ResetTestUserTests(PoolTestCase):
+    """The demo-reset tool deletes money rows, so its refusal is pinned here.
+
+    It exists to make an onboarding recording repeatable. The failure it must
+    never allow is being pointed at a real tester and quietly wiping their
+    balance, so the guard is tested rather than trusted.
+    """
+
+    def setUp(self) -> None:
+        super().setUp()
+        sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "deploy"))
+        import _reset_test_user
+
+        self.tool = _reset_test_user
+        pool.approve_user(ALICE, admin_id=ADMIN)
+        self._wallet(ALICE)
+
+    def test_a_fresh_id_has_nothing_to_reset(self) -> None:
+        result = self.tool.reset(-12345, confirm=True, force=False)
+        self.assertEqual(result["action"], "nothing")
+
+    def test_an_account_holding_money_is_refused(self) -> None:
+        pool.credit(ALICE, 600.0, admin_id=ADMIN, ref="reset-test")
+        result = self.tool.reset(ALICE, confirm=True, force=False)
+        self.assertEqual(result["action"], "refused")
+        # And nothing was touched — a refusal that half-deleted would be worse
+        # than no guard at all.
+        self.assertEqual(float(pool.get_account(ALICE)["cash_usd"]), 600.0)
+        self.assertIsNotNone(pool.get_wallet(ALICE))
+
+    def test_reserved_money_also_refuses(self) -> None:
+        """Cash can read as zero while the balance is committed to a trade."""
+        pool.credit(ALICE, 600.0, admin_id=ADMIN, ref="reset-test")
+        pool.record_intent("ref-1", ALICE)
+        pool.debit(ALICE, float(pool.get_account(ALICE)["cash_usd"]),
+                   admin_id=ADMIN, ref="drain")
+        account = pool.get_account(ALICE)
+        self.assertGreater(float(account["reserved_usd"]), 0.0)
+        self.assertEqual(
+            self.tool.reset(ALICE, confirm=True, force=False)["action"],
+            "refused",
+        )
+
+    def test_a_dry_run_deletes_nothing(self) -> None:
+        result = self.tool.reset(ALICE, confirm=False, force=False)
+        self.assertEqual(result["action"], "dry_run")
+        self.assertTrue(pool.is_approved(ALICE))
+        self.assertIsNotNone(pool.get_wallet(ALICE))
+
+    def test_an_empty_account_resets_to_first_contact(self) -> None:
+        self.assertEqual(
+            self.tool.reset(ALICE, confirm=True, force=False)["action"], "reset"
+        )
+        self.assertFalse(pool.is_approved(ALICE))
+        self.assertIsNone(pool.get_wallet(ALICE))
+        self.assertIsNone(pool.get_account(ALICE))
+        # Which is the point: /start shows the review message again.
+        self.assertEqual(pool.request_access(ALICE, "alice"), "new")
+
+    def test_only_the_named_id_is_touched(self) -> None:
+        pool.approve_user(BOB, admin_id=ADMIN)
+        self._wallet(BOB)
+        pool.credit(BOB, 900.0, admin_id=ADMIN, ref="bob-untouched")
+        self.tool.reset(ALICE, confirm=True, force=False)
+        self.assertEqual(float(pool.get_account(BOB)["cash_usd"]), 900.0)
+        self.assertTrue(pool.is_approved(BOB))
+        self.assertIsNotNone(pool.get_wallet(BOB))
 
 
 class WalletVerifyTests(PoolTestCase):
