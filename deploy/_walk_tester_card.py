@@ -21,7 +21,26 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 import config  # noqa: E402
 
 _SCRATCH = os.path.join(tempfile.gettempdir(), "_walk_ledger.db")
-shutil.copy(config.LEDGER_DB, _SCRATCH)
+
+
+def _snapshot(src: str, dest: str) -> None:
+    """WAL-safe copy. `shutil.copy` on a WAL database silently omits the -wal
+    file, so the snapshot is missing every commit since the last checkpoint --
+    which read as a reserve that had already been released."""
+    import sqlite3
+
+    for leftover in (dest, f"{dest}-wal", f"{dest}-shm"):
+        if os.path.exists(leftover):
+            os.remove(leftover)
+    src_conn = sqlite3.connect(src)
+    dest_conn = sqlite3.connect(dest)
+    with dest_conn:
+        src_conn.backup(dest_conn)
+    src_conn.close()
+    dest_conn.close()
+
+
+_snapshot(str(config.LEDGER_DB), _SCRATCH)
 config.LEDGER_DB = _SCRATCH
 
 import bot  # noqa: E402
@@ -83,6 +102,41 @@ def accept(uid: int, idea_id: int, verdict: dict | None, *, label: str) -> None:
     pool.release_intents(f"mill_{idea_id}", status="missed")
 
 
+def fill_at(uid: int, idea_id: int, sug) -> None:
+    """The message on a real fill, with a real stake row behind it.
+
+    `_pool_fill_reply` quotes the *stake*, not the reservation, because the
+    venue fills whole contracts and a budget that did not grow the order still
+    buys a pro-rata slice of it. Without a stake row it falls back to the
+    reserve copy, so the interesting line only appears if one exists.
+    """
+    print("\n--- it fills ---")
+    ref = f"mill_{idea_id}"
+    before = state(uid)
+    recorded = pool.record_intent(ref, uid)
+    if not recorded.get("ok"):
+        print(f"  could not reserve: {recorded}")
+        return
+
+    trade_id = 999_001
+    fill = float(sug.entry)
+    risk_per_unit = abs(float(sug.entry) - float(sug.stop_loss))
+    pool.open_stakes(
+        trade_id, ref,
+        fill_qty=0.1, fill_price=fill,
+        risk_per_unit=risk_per_unit,
+        house_risk_usd=14.0,
+    )
+    reply = bot._pool_fill_reply(
+        recorded, {"executed": True, "result": {"trade_id": trade_id, "fill": fill}},
+        uid,
+    )
+    print(f"  ledger before: {before}")
+    print(f"  ledger after:  {state(uid)}")
+    print("  they see:")
+    quote(reply)
+
+
 def main() -> int:
     if len(sys.argv) < 2:
         print(__doc__)
@@ -124,20 +178,22 @@ def main() -> int:
     rule(f"Accept on mill idea #{idea_id}  (window open: "
          f"{bridge.idea_pool_open(idea_id)})")
 
-    fill = 3_500.0
-    accept(uid, idea_id, {
-        "executed": True,
-        "result": {"trade_id": -1, "fill": fill},
-    }, label="it fills (no stake row on scratch -> falls back to reserve copy)")
-
+    # Keys as `execute` actually emits them, so the copy shown here is the copy
+    # that ships. An unknown key falls back to a vague sentence, which is how
+    # to tell a real gap from a typo in this script.
     for reason, label in (
-        ("chase", "refused: price drifted past the entry"),
-        ("rr_floor", "refused: never qualified at mint"),
-        ("loss_cooldown", "refused: loss cooldown on that product/side"),
-        ("exposure", "refused: sleeve already full"),
+        ("chased", "refused: price already ran past the entry"),
+        ("rr_collapsed", "refused: would risk more than it stands to make"),
+        ("loss_cooldown", "refused: cooldown on that product/side"),
+        ("sleeve_full", "refused: sleeve already full"),
+        ("expired", "refused: card timed out"),
     ):
         accept(uid, idea_id, {"executed": False, "skip_reason": reason},
                label=label)
+
+    # Last, because a filled intent is terminal for that ref -- everything
+    # after it correctly answers "you're already in this one".
+    fill_at(uid, idea_id, sug)
 
     rule("what they no longer see")
     for data in (telegram_ui.CB_OPEN, f"{telegram_ui.CB_OPEN_SIZE_PREFIX}2500",

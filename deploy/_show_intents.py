@@ -1,49 +1,70 @@
-"""What happened to recent Accepts.
+"""Show pool intents and what the sweep currently considers fillable.
 
-Answers "the tester pressed Accept and never heard back" by showing the intent
-rows, their status, and what the sweep currently considers an active ref.
+Read-only. Answers "why is this tester's money reserved, and will it come
+back on its own?"
 """
 
 from __future__ import annotations
 
 import os
-import sqlite3
 import sys
+from datetime import datetime, timezone
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
+import bot_config  # noqa: E402
 import config  # noqa: E402
+import pool  # noqa: E402
+import trade_ideas_bridge as bridge  # noqa: E402
+
+
+def age_min(ts: str) -> float:
+    try:
+        then = datetime.strptime(str(ts), "%Y-%m-%dT%H:%M:%SZ").replace(
+            tzinfo=timezone.utc
+        )
+    except ValueError:
+        return -1.0
+    return (datetime.now(timezone.utc) - then).total_seconds() / 60.0
 
 
 def main() -> int:
-    conn = sqlite3.connect(config.LEDGER_DB)
-    conn.row_factory = sqlite3.Row
+    ttl = float(bot_config.POOL_INTENT_TTL_MIN)
+    active = set(bridge.pool_active_mill_refs())
 
-    print("=== pool_intents (latest 25) ===")
-    for r in conn.execute(
-        "select id, ref, telegram_id, status, risk_usd, created_at"
-        " from pool_intents order by id desc limit 25"
-    ):
-        print(f"  #{r['id']:<4} {str(r['ref']):<28} uid {r['telegram_id']} "
-              f"{str(r['status']):<9} ${float(r['risk_usd']):>7,.2f}  "
-              f"{r['created_at']}")
+    with pool._connect() as conn:
+        rows = [dict(r) for r in conn.execute(
+            "SELECT * FROM pool_intents ORDER BY id DESC LIMIT 25"
+        )]
 
-    print("\n=== accounts ===")
-    for r in conn.execute(
-        "select telegram_id, cash_usd, reserved_usd from pool_accounts"
-        " where cash_usd > 0 or reserved_usd > 0"
-    ):
-        print(f"  {r['telegram_id']}  cash ${float(r['cash_usd']):,.2f} "
-              f"reserved ${float(r['reserved_usd']):,.2f}")
+    print(f"POOL_INTENT_TTL_MIN = {ttl:.0f} min")
+    print(f"active mill refs the sweep will not release: "
+          f"{sorted(active) if active else '(none)'}\n")
 
-    print("\n=== what the sweep thinks is still live ===")
-    import live_pending
-    import trade_ideas_bridge
-    pend = {str(r.get("cycle_id") or "") for r in live_pending.get_pending()}
-    mill = trade_ideas_bridge.pool_active_mill_refs()
-    print(f"  live_pending cycle ids : {sorted(pend)}")
-    print(f"  active mill refs       : {sorted(mill)}")
+    print(f"{'id':>4}  {'ref':<14} {'who':>12} {'risk':>7} {'att':>3} "
+          f"{'status':<9} {'age':>7}  verdict")
+    for r in rows:
+        ref = str(r["ref"])
+        age = age_min(r["created_at"])
+        if r["status"] != "pending":
+            verdict = "done"
+        elif ref in active:
+            verdict = (f"held (still fillable); TTL frees it in "
+                       f"{max(0.0, ttl - age):.0f} min")
+        else:
+            verdict = "next sweep releases it"
+        print(f"{r['id']:>4}  {ref:<14} {r['telegram_id']:>12} "
+              f"${float(r['risk_usd']):>6.2f} {int(r.get('attempt') or 1):>3} "
+              f"{r['status']:<9} {age:>6.0f}m  {verdict}")
 
+    print("\naccounts with money set aside")
+    for acct in pool.list_accounts():
+        reserved = float(acct["reserved_usd"])
+        if reserved <= 0:
+            continue
+        print(f"  {acct['telegram_id']}  cash ${float(acct['cash_usd']):,.2f}  "
+              f"reserved ${reserved:,.2f}  "
+              f"withdrawable ${pool.withdrawable_usd(int(acct['telegram_id'])):,.2f}")
     return 0
 
 
