@@ -238,8 +238,8 @@ class TestSizing:
             stop_loss=99.0, take_profits=[101.0], entry_source="m1_trigger",
         )
         wide = ev.open_position(
-            ev.SWING_MECH, product_id="ETH-USD", side="long", entry=100.0,
-            stop_loss=96.0, take_profits=[108.0], entry_source="vision_mirror",
+            ev.SWING_LLM, product_id="ETH-USD", side="long", entry=100.0,
+            stop_loss=96.0, take_profits=[108.0], entry_source="swing_vision",
         )
         rows = {r["id"]: r for r in ev.open_positions()}
         assert rows[tight]["qty"] == pytest.approx(4 * rows[wide]["qty"])
@@ -305,28 +305,6 @@ class TestActionMapping:
         for a in ("spot_buy", "deriv_buy", "spot_sell", "deriv_sell"):
             assert ev.side_of_action(a) == live_pending.side_of(a)
 
-    def test_swing_mirror_opens_on_a_real_spot_buy(self, tmp_path, monkeypatch):
-        """End-to-end: the exact call agent.py makes must produce a position."""
-        import config
-        import eva_swing
-
-        monkeypatch.setattr(config, "LEDGER_DB", tmp_path / "t.db")
-        monkeypatch.setattr(eva_swing, "structural_stop",
-                            lambda p, s, e: (e * 0.97, "test"))
-
-        class S:
-            action = "spot_buy"
-            product_id = "ETH-USD"
-            entry = 2500.0
-            stop_loss = 2475.0
-
-        pid = eva_swing.mirror(S(), cycle_id="T1")
-        assert pid is not None
-        row = ev.open_positions(ev.SWING_MECH)[0]
-        assert row["side"] == "long"
-        # Structural stop, not the suggestion's 1% stop.
-        assert row["stop_loss"] == pytest.approx(2425.0)
-
     def test_day_mirror_opens_on_a_real_deriv_sell(self, tmp_path, monkeypatch):
         import config
         import eva_day
@@ -349,7 +327,6 @@ class TestActionMapping:
     def test_no_trade_suggestion_opens_nothing(self, tmp_path, monkeypatch):
         import config
         import eva_day
-        import eva_swing
 
         monkeypatch.setattr(config, "LEDGER_DB", tmp_path / "t.db")
 
@@ -359,7 +336,6 @@ class TestActionMapping:
             entry = 0.0
             stop_loss = 0.0
 
-        assert eva_swing.mirror(S()) is None
         assert eva_day.mirror_vision_suggestion(S()) is None
         assert ev.open_positions() == []
 

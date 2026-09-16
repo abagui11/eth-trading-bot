@@ -21,6 +21,21 @@ thresholds, rather than later against whichever book happens to be ahead. The
 Eva Lab tab deliberately labels its front-runner a "candidate only" for the
 same reason. Evidence for the hypotheses is in `EVA_VARIANTS_PLAN.md` §1.
 
+**Amendment 2026-09-16 — experiment redesigned, epoch re-based again
+(`2026-09-16T17:00:00Z`).** Vol-conditioned geometry (`eva_geometry.py`,
+`EVA_GEOM_*`) shipped **onto control itself** — stop floored at 7×ATR24, TP
+rungs capped at k×8×ATR24, measured on the 52-entry recorded book before
+shipping (`trade_ideas/analysis/_q0916_dynamic_geometry.py`). Consequences for
+this pre-registration: (1) `eva_swing_mech` is **retired**, not falsified —
+its question ("does mechanical re-bracketing of control's entries beat
+control?") was answered by measurement and the answer shipped into control, so
+a paper twin of the live rule measures nothing; its H1/H2 comparisons below
+are void. (2) `eva_swing_llm` plans are now conditioned by the same rule after
+validation, so that book now scores "LLM swing entries + conditioned
+brackets"; its comparison to control remains fair because both books carry the
+same geometry rule. (3) Hypotheses against `eva_swing_mech` are struck;
+day-book and swing-llm-vs-control thresholds stand unchanged.
+
 ---
 
 ## 1. Books
