@@ -7,6 +7,7 @@ import logging
 import re
 
 from telegram import Update
+from telegram.error import BadRequest
 from telegram.ext import (
     Application,
     CallbackQueryHandler,
@@ -121,10 +122,42 @@ def _is_me_query(text: str) -> bool:
     return bool(_ME_QUERY.search(text))
 
 
-async def _reply(update: Update, text: str) -> None:
+async def _reply(update: Update, text: str, *, markdown: bool = False,
+                 **kwargs) -> None:
+    """Reply, optionally rendering the copy's markdown.
+
+    The fallback is the point. Telegram refuses an entire message if it cannot
+    parse the entities, and a stray underscore or bracket in a handle is
+    enough. On the withdrawal path that failure mode is severe: the money is
+    already debited by the time the confirmation is sent, so a refused message
+    means funds held with the tester told nothing. Unformatted text is a far
+    better outcome than silence.
+    """
     if update.message is None:
         return
-    await update.message.reply_text(text)
+    if markdown:
+        try:
+            await update.message.reply_text(
+                text, parse_mode="Markdown", **kwargs
+            )
+            return
+        except BadRequest:
+            logger.warning("markdown parse failed; sending plain", exc_info=True)
+    await update.message.reply_text(text, **kwargs)
+
+
+async def _send(context: ContextTypes.DEFAULT_TYPE, chat_id: int, text: str,
+                *, markdown: bool = False, **kwargs) -> None:
+    """Push a message to a chat, degrading to plain text rather than failing."""
+    if markdown:
+        try:
+            await context.bot.send_message(
+                chat_id, text, parse_mode="Markdown", **kwargs
+            )
+            return
+        except BadRequest:
+            logger.warning("markdown parse failed; sending plain", exc_info=True)
+    await context.bot.send_message(chat_id, text, **kwargs)
 
 
 async def _notify_admins_new_user(context: ContextTypes.DEFAULT_TYPE, user) -> None:
@@ -367,8 +400,10 @@ async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         if p.get("ok") and float(p.get("cash_usd") or 0) > 0:
             lines.append("")
             lines.append(telegram_ui.format_portfolio(p))
-        await update.message.reply_text(
+        await _reply(
+            update,
             "\n".join(lines)[:4096],
+            markdown=True,
             reply_markup=telegram_ui.pool_account_keyboard(),
         )
         return
@@ -458,9 +493,10 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
                 except Exception:
                     logger.exception("Forum invite link failed for %s", target_id)
             try:
-                await context.bot.send_message(
-                    target_id,
+                await _send(
+                    context, target_id,
                     (telegram_ui.POOL_WELCOME_MESSAGE + invite_line)[:4096],
+                    markdown=True,
                     reply_markup=telegram_ui.pool_account_keyboard(),
                 )
             except Exception:
@@ -1264,6 +1300,7 @@ async def cmd_deposit(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
             telegram_ui.format_deposit_instructions(
                 wallet=str(wallet["address"]) if wallet else None
             ),
+            markdown=True,
         )
         return
 
@@ -1377,6 +1414,7 @@ async def cmd_wallet(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
                 pool.get_wallet(user.id),
                 change=pool.get_wallet_change_request(user.id),
             ),
+            markdown=True,
         )
         return
 
