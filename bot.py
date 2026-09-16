@@ -212,6 +212,8 @@ def _pool_intent_reply(result: dict, *, risk_label: str = "risk") -> str:
         )
     reason = result.get("reason")
     if reason == "already_recorded":
+        if result.get("status") == "pooled":
+            return "You're already in this one — /portfolio shows your share."
         return "Already recorded — you're on this order."
     if reason == "frozen":
         return (

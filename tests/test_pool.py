@@ -1220,6 +1220,69 @@ class IntentTests(PoolTestCase):
             pool.record_intent("hq-1", BOB)["reason"], "below_min_equity"
         )
 
+    def test_a_released_card_can_be_accepted_again(self) -> None:
+        """The reoffer sweep can bring a card back after the first Accept was
+        released. The second Accept used to be refused as a duplicate with
+        "you're on this order", which was the opposite of the truth — the
+        release had already handed the money back."""
+        self._fund(ALICE, 1000.0)
+        pool.record_intent("mill_7", ALICE)
+        pool.release_intents("mill_7", status="missed")
+        self.assertAlmostEqual(
+            float(pool.get_account(ALICE)["reserved_usd"]), 0.0, places=2
+        )
+
+        again = pool.record_intent("mill_7", ALICE)
+        self.assertTrue(again["ok"], again)
+        # The money is genuinely held this time, not just claimed. The reserve
+        # event dedupes on (telegram_id, kind, ref), so reusing the first
+        # attempt's ref would have been dropped in silence and left a pending
+        # intent against nothing.
+        self.assertAlmostEqual(
+            float(pool.get_account(ALICE)["reserved_usd"]),
+            float(again["risk_usd"]),
+            places=2,
+        )
+        self.assertEqual(len(pool.pending_intents("mill_7")), 1)
+
+    def test_a_reaccepted_card_gives_the_money_back_again(self) -> None:
+        """Release has to work on every attempt, not just the first."""
+        self._fund(ALICE, 1000.0)
+        for _ in range(3):
+            self.assertTrue(pool.record_intent("mill_8", ALICE)["ok"])
+            pool.release_intents("mill_8", status="missed")
+            self.assertAlmostEqual(
+                float(pool.get_account(ALICE)["reserved_usd"]), 0.0, places=2
+            )
+        self.assertEqual(float(pool.get_account(ALICE)["cash_usd"]), 1000.0)
+
+    def test_being_in_the_trade_is_not_confused_with_having_missed_it(self) -> None:
+        self._fund(ALICE, 1000.0)
+        pool.record_intent("mill_9", ALICE)
+        with pool._write_txn() as conn:
+            conn.execute(
+                "UPDATE pool_intents SET status = 'pooled' WHERE ref = ?",
+                ("mill_9",),
+            )
+        result = pool.record_intent("mill_9", ALICE)
+        self.assertEqual(result["reason"], "already_recorded")
+        self.assertEqual(result["status"], "pooled")
+
+    def test_the_attempt_column_reaches_an_existing_ledger(self) -> None:
+        """`CREATE TABLE IF NOT EXISTS` is a no-op on a live database, so the
+        column only arrives through the explicit migration."""
+        with pool._connect() as conn:
+            conn.execute("ALTER TABLE pool_intents DROP COLUMN attempt")
+            cols = {r[1] for r in conn.execute("PRAGMA table_info(pool_intents)")}
+        self.assertNotIn("attempt", cols)
+
+        with pool._connect() as conn:  # reconnect runs _migrate
+            cols = {r[1] for r in conn.execute("PRAGMA table_info(pool_intents)")}
+        self.assertIn("attempt", cols)
+
+        self._fund(ALICE, 1000.0)
+        self.assertTrue(pool.record_intent("mill_10", ALICE)["ok"])
+
     def test_frozen_pool_refuses_new_intents(self) -> None:
         self._fund(ALICE, 1000.0)
         pool.freeze_intents("test")

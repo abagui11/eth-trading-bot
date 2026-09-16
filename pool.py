@@ -170,6 +170,10 @@ CREATE TABLE IF NOT EXISTS pool_wallet_checks (
 CREATE UNIQUE INDEX IF NOT EXISTS pool_wallet_checks_once
     ON pool_wallet_checks (txid, address);
 
+-- `attempt` is bumped when a released card is accepted again. It exists to
+-- keep the journal refs distinct: `pool_events` dedupes on
+-- (telegram_id, kind, ref), so a second reserve under the first attempt's ref
+-- is dropped in silence and leaves a pending claim against nothing reserved.
 CREATE TABLE IF NOT EXISTS pool_intents (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     ref TEXT NOT NULL,          -- offer/cycle id (HQ) or mill_<idea_id> (mill)
@@ -177,7 +181,8 @@ CREATE TABLE IF NOT EXISTS pool_intents (
     risk_usd REAL NOT NULL,     -- budget reserved at Accept
     status TEXT NOT NULL DEFAULT 'pending',  -- pending | pooled | missed | released
     created_at TEXT NOT NULL,
-    decided_at TEXT
+    decided_at TEXT,
+    attempt INTEGER NOT NULL DEFAULT 1
 );
 CREATE UNIQUE INDEX IF NOT EXISTS pool_intents_once
     ON pool_intents (ref, telegram_id);
@@ -262,10 +267,26 @@ def _now() -> str:
     return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
 
 
+# Columns added after a table shipped. `CREATE TABLE IF NOT EXISTS` is a no-op
+# on an existing database, so a new column in `_SCHEMA` never reaches the
+# deployed ledger without this.
+_ADDED_COLUMNS = (
+    ("pool_intents", "attempt", "INTEGER NOT NULL DEFAULT 1"),
+)
+
+
+def _migrate(conn: sqlite3.Connection) -> None:
+    for table, column, decl in _ADDED_COLUMNS:
+        cols = {r[1] for r in conn.execute(f"PRAGMA table_info({table})")}
+        if cols and column not in cols:
+            conn.execute(f"ALTER TABLE {table} ADD COLUMN {column} {decl}")
+
+
 def _connect() -> sqlite3.Connection:
     conn = sqlite3.connect(config.LEDGER_DB, timeout=_LOCK_TIMEOUT_SEC)
     conn.row_factory = sqlite3.Row
     conn.executescript(_SCHEMA)
+    _migrate(conn)
     return conn
 
 
@@ -1811,6 +1832,20 @@ def unfreeze_intents() -> None:
     logger.info("pool: intents unfrozen")
 
 
+# An intent in one of these holds no money, so the same card may be accepted
+# again. `pooled` is absent on purpose: that tester is in the trade.
+_TERMINAL_INTENTS = frozenset({"missed", "released", "expired"})
+
+
+def _intent_event_ref(ref: str, attempt: int) -> str:
+    """Journal ref for an intent's reserve/release.
+
+    Attempt 1 keeps the original bare form so every event already written
+    against a live ledger still matches the row that produced it.
+    """
+    return f"intent:{ref}" if int(attempt) <= 1 else f"intent:{ref}#{int(attempt)}"
+
+
 def record_intent(ref: str, telegram_id: int) -> dict[str, Any]:
     """A funded tester's Accept: reserve their risk budget against this ref.
 
@@ -1845,6 +1880,7 @@ def record_intent(ref: str, telegram_id: int) -> dict[str, Any]:
         if risk <= 0:
             return {"ok": False, "reason": "no_available_cash"}
 
+        attempt = 1
         try:
             conn.execute(
                 "INSERT INTO pool_intents (ref, telegram_id, risk_usd, created_at) "
@@ -1852,17 +1888,41 @@ def record_intent(ref: str, telegram_id: int) -> dict[str, Any]:
                 (ref, telegram_id, risk, _now()),
             )
         except sqlite3.IntegrityError:
+            # One row per (ref, tester), so a second Accept on the same ref
+            # lands here. Whether that is really a duplicate depends on the
+            # first one's status: a *terminal* intent means they hold nothing,
+            # and a released card can legitimately come round again through the
+            # reoffer sweep. Refusing that second Accept told them "you're on
+            # this order" while they were on nothing at all.
             row = conn.execute(
-                "SELECT status, risk_usd FROM pool_intents WHERE ref = ? "
+                "SELECT status, attempt FROM pool_intents WHERE ref = ? "
                 "AND telegram_id = ?",
                 (ref, telegram_id),
             ).fetchone()
-            return {"ok": False, "reason": "already_recorded",
-                    "status": row["status"] if row else None}
-        _apply_event(
+            prior = str(row["status"]) if row else ""
+            if prior not in _TERMINAL_INTENTS:
+                return {"ok": False, "reason": "already_recorded",
+                        "status": prior or None}
+            attempt = int(row["attempt"] or 1) + 1
+            conn.execute(
+                "UPDATE pool_intents SET status = 'pending', risk_usd = ?, "
+                "created_at = ?, decided_at = NULL, attempt = ? "
+                "WHERE ref = ? AND telegram_id = ?",
+                (risk, _now(), attempt, ref, telegram_id),
+            )
+        if not _apply_event(
             conn, telegram_id, kind="reserve", amount_usd=risk,
-            ref=f"intent:{ref}", note="pool intent",
-        )
+            ref=_intent_event_ref(ref, attempt), note="pool intent",
+        ):
+            # Unreachable: `attempt` only ever increases, so the ref is new
+            # every time. Checked anyway because the failure is silent and
+            # expensive — a deduped reserve holds no money while the intent
+            # row still claims a budget, and the raise rolls the row back
+            # rather than leaving a claim against nothing.
+            raise RuntimeError(
+                f"intent reserve deduped: {ref} user {telegram_id} "
+                f"attempt {attempt}"
+            )
     logger.info("pool: intent %s user %s risk $%.2f", ref, telegram_id, risk)
     return {"ok": True, "risk_usd": risk}
 
@@ -1881,6 +1941,7 @@ def _finish_intent(
     conn: sqlite3.Connection, intent: dict[str, Any], status: str
 ) -> None:
     """Terminal-state an intent and give its reserve back."""
+    attempt = int(intent.get("attempt") or 1)
     conn.execute(
         "UPDATE pool_intents SET status = ?, decided_at = ? WHERE id = ?",
         (status, _now(), int(intent["id"])),
@@ -1890,7 +1951,7 @@ def _finish_intent(
         int(intent["telegram_id"]),
         kind="release",
         amount_usd=float(intent["risk_usd"]),
-        ref=f"intent:{intent['ref']}:{status}",
+        ref=f"{_intent_event_ref(str(intent['ref']), attempt)}:{status}",
         note=f"intent {status}",
     )
 
