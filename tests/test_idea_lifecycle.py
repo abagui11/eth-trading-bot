@@ -155,15 +155,39 @@ class ExpiryTests(IdeasDbTestCase):
         self.assertEqual(bridge.expire_stale_ideas(15), 0)
         self.assertEqual(self._status(fresh), "sent")
 
-    def test_an_accepted_card_is_never_expired(self) -> None:
-        """Someone acted on it, so the clock is not what decides its fate."""
-        accepted = self._idea(minutes_ago=90)
+    def _accept(self, idea_id: int, user_id: int) -> None:
         with sqlite3.connect(self.db) as conn:
             conn.execute(
                 "INSERT INTO decisions (idea_id, user_id, decision, decided_at) "
                 "VALUES (?, ?, 'accept', ?)",
-                (accepted, 111, _iso(self.now)),
+                (idea_id, user_id, _iso(self.now)),
             )
+
+    def test_an_operators_accept_holds_the_card_open(self) -> None:
+        """Their Accept is what fills the clip, so expiring it underneath them
+        would refuse their own action."""
+        accepted = self._idea(minutes_ago=90)
+        self._accept(accepted, bot_config.LIVE_MILL_FILL_TELEGRAM_IDS[0])
+        bridge.expire_stale_ideas(15)
+        self.assertEqual(self._status(accepted), "sent")
+
+    def test_a_testers_accept_does_not_hold_the_card_open(self) -> None:
+        """The shipped bug. A tester's Accept is a claim on a fill someone
+        else has to make, not a fill — but it exempted the card from expiry
+        all the same. The card then stayed in `pool_active_mill_refs` forever,
+        so the stale-intent sweep never returned the tester's reserve and they
+        were never told anything. An Accept must never just go quiet.
+        """
+        accepted = self._idea(minutes_ago=90)
+        self._accept(accepted, 8708390551)  # funded tester, not an operator
+        bridge.expire_stale_ideas(15)
+        self.assertEqual(self._status(accepted), "expired")
+
+    def test_a_testers_accept_cannot_free_ride_on_an_operators(self) -> None:
+        """One operator Accept still pins the card, whoever else tapped it."""
+        accepted = self._idea(minutes_ago=90)
+        self._accept(accepted, 8708390551)
+        self._accept(accepted, bot_config.LIVE_MILL_FILL_TELEGRAM_IDS[0])
         bridge.expire_stale_ideas(15)
         self.assertEqual(self._status(accepted), "sent")
 

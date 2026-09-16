@@ -13,6 +13,7 @@ import sys
 import tempfile
 import threading
 import unittest
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from unittest.mock import patch
 
@@ -1239,6 +1240,50 @@ class IntentTests(PoolTestCase):
         self.assertAlmostEqual(
             float(account["reserved_usd"]), float(live["risk_usd"]), places=2
         )
+
+    def _age_intent(self, ref: str, minutes: int) -> None:
+        when = (datetime.now(timezone.utc)
+                - timedelta(minutes=minutes)).strftime("%Y-%m-%dT%H:%M:%SZ")
+        conn = sqlite3.connect(self._db)
+        with conn:
+            conn.execute(
+                "UPDATE pool_intents SET created_at = ? WHERE ref = ?",
+                (when, ref),
+            )
+        conn.close()
+
+    def test_an_intent_cannot_hang_forever_on_a_ref_that_looks_active(self) -> None:
+        """The shipped bug, at the level it actually broke.
+
+        A tester's Accept exempted the mill idea from expiry, so `mill_<id>`
+        stayed in the active-ref set indefinitely and the reserve was never
+        returned — the Accept simply went quiet holding their money. The root
+        cause is fixed upstream; this is the backstop that makes "an Accept
+        always resolves" true even if that bookkeeping breaks again.
+        """
+        self._fund(ALICE, 1000.0)
+        pool.record_intent("mill_1025", ALICE)
+        self._age_intent("mill_1025", bot_config.POOL_INTENT_TTL_MIN + 5)
+
+        released = pool.expire_stale_intents({"mill_1025"})
+
+        self.assertEqual(len(released), 1)
+        self.assertEqual(released[0]["ref"], "mill_1025")
+        self.assertEqual(float(pool.get_account(ALICE)["reserved_usd"]), 0.0)
+        self.assertEqual(float(pool.get_account(ALICE)["cash_usd"]), 1000.0)
+
+    def test_the_backstop_does_not_race_a_fill_that_can_still_happen(self) -> None:
+        """A TTL shorter than the real fill window would drop a tester out of
+        a trade they were promised, which is worse than releasing late."""
+        self.assertGreater(
+            bot_config.POOL_INTENT_TTL_MIN,
+            bot_config.LIVE_MILL_REOFFER_MAX_AGE_MIN,
+        )
+        self._fund(ALICE, 1000.0)
+        pool.record_intent("mill_1025", ALICE)
+        self._age_intent("mill_1025", bot_config.LIVE_MILL_REOFFER_MAX_AGE_MIN + 1)
+        self.assertEqual(pool.expire_stale_intents({"mill_1025"}), [])
+        self.assertGreater(float(pool.get_account(ALICE)["reserved_usd"]), 0.0)
 
 
 class FillMathTests(PoolTestCase):

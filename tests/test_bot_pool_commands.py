@@ -520,6 +520,60 @@ class SendDemoCardTests(unittest.TestCase):
                    return_value={"id": 85, "status": "closed"}):
             self.assertIsNone(demo_card.pick_trade(85))
 
+    # -- broadcast ---------------------------------------------------------
+
+    def test_all_sends_one_card_per_account_sized_individually(self) -> None:
+        """A shared render would show every tester the same number; the size
+        line is personal, so each card is built for its own account."""
+        pool.credit(UID, 1000.0, admin_id=ADMIN, ref="fund")
+        update = MagicMock()
+        update.effective_user.id = ADMIN
+        update.message = MagicMock()
+        update.message.reply_text = AsyncMock()
+        context = MagicMock()
+        context.args = ["all"]
+        with patch.object(research, "get_spot_price", return_value=75_000.0), \
+                patch.object(notify, "send_pool_dm_with_keyboard",
+                             return_value=True) as sent:
+            asyncio.run(bot.cmd_democard(update, context))
+
+        # ADMIN is funded-less, UID has $1,000: both approved, both carded.
+        self.assertEqual(sent.call_count, 2)
+        self.assertEqual({c.args[0] for c in sent.call_args_list}, {ADMIN, UID})
+        replies = "\n".join(
+            str(c.args[0]) for c in update.message.reply_text.call_args_list
+        )
+        self.assertIn("2 account(s)", replies)
+        self.assertIn("1 of them are funded", replies)
+
+    def test_a_tester_cannot_broadcast(self) -> None:
+        update = MagicMock()
+        update.effective_user.id = UID
+        update.message = MagicMock()
+        update.message.reply_text = AsyncMock()
+        context = MagicMock()
+        context.args = ["all"]
+        with patch.object(notify, "send_pool_dm_with_keyboard",
+                          return_value=True) as sent:
+            asyncio.run(bot.cmd_democard(update, context))
+        sent.assert_not_called()
+
+    def test_an_unreachable_account_is_named_not_silently_dropped(self) -> None:
+        update = MagicMock()
+        update.effective_user.id = ADMIN
+        update.message = MagicMock()
+        update.message.reply_text = AsyncMock()
+        context = MagicMock()
+        context.args = ["all"]
+        with patch.object(research, "get_spot_price", return_value=75_000.0), \
+                patch.object(notify, "send_pool_dm_with_keyboard",
+                             side_effect=[True, False]):
+            asyncio.run(bot.cmd_democard(update, context))
+        replies = "\n".join(
+            str(c.args[0]) for c in update.message.reply_text.call_args_list
+        )
+        self.assertIn("Could not reach", replies)
+
     def test_an_unapproved_target_is_refused(self) -> None:
         with patch.object(research, "get_spot_price", return_value=75_000.0), \
                 patch.object(notify, "send_pool_dm_with_keyboard",

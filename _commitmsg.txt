@@ -1,0 +1,38 @@
+Fix: a tester's Accept could go quiet forever holding their money
+
+Found on the first real Accept from a funded test account: two intents on
+mill ideas sat pending with $7.12 reserved and no DM, indefinitely.
+
+The loop. bot.on_callback writes a decisions row for every Accept, and
+expire_stale_ideas exempted any accepted idea from the 15-minute clock. So a
+tester's own Accept pinned the idea in a live status forever, which kept
+mill_<id> in pool_active_mill_refs forever, which meant expire_stale_intents
+never released the reserve and the card's promise -- "I'll DM you when it
+fills or gets pulled" -- was never kept.
+
+That exemption is right for a fill operator, whose Accept is the fill and must
+not be expired underneath them, and wrong for a tester, whose Accept is only a
+claim on a fill someone else has to make. It is now scoped to
+LIVE_MILL_FILL_TELEGRAM_IDS.
+
+Fixing expiry alone would have introduced the opposite error.
+pool_active_mill_refs listed only live statuses, but the re-offer sweep
+deliberately replays expired ideas within LIVE_MILL_REOFFER_MAX_AGE_MIN after
+re-pricing them against the live mark. A reserve released at the 15-minute
+expiry could therefore be followed by a fill of that same idea at minute 40,
+without the tester who accepted it -- worse than releasing late. It now
+includes re-offer-eligible ideas.
+
+New POOL_INTENT_TTL_MIN=150 backstops both, so an Accept always terminates
+even if that bookkeeping breaks again. It sits deliberately above the
+120-minute re-offer window so the backstop can never race a real fill and drop
+a tester out of a trade they were promised.
+
+Accept copy now says a card can rest a couple of hours, because it can, and
+silence for that long is expected rather than a fault.
+
+Also: /democard all broadcasts to every approved account, rendering a separate
+card per recipient because the size line is personal. A bare /democard only
+ever reached one account, which read as a bug.
+
+Full suite green, 1128 passing.

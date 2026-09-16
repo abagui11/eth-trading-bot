@@ -1916,18 +1916,39 @@ def expire_stale_intents(active_refs: set[str]) -> list[dict[str, Any]]:
     """Release pending intents whose ref no longer has a live order path.
 
     Called from the watchdog with the set of refs that can still fire (waiting
-    live_pending cycle ids + open mill ideas). Anything else is a promise that
-    can no longer be kept, so the reserve goes back and the tester is told.
+    live_pending cycle ids + fillable mill ideas). Anything else is a promise
+    that can no longer be kept, so the reserve goes back and the tester is told.
+
+    `POOL_INTENT_TTL_MIN` is a backstop on top of that, and it is here because
+    the ref-based release depends on another subsystem's bookkeeping being
+    right. It was not: a tester's Accept exempted the mill idea from expiry, so
+    the ref stayed "active" indefinitely and the reserve was held with the
+    tester never hearing back. That root cause is fixed, but an Accept going
+    quiet with someone's money held is bad enough that it should not be
+    reachable by any single bug. The TTL sits above the longest window in which
+    a ref could still legitimately fire, so it never races a real fill.
     """
     released: list[dict[str, Any]] = []
+    ttl_min = int(getattr(bot_config, "POOL_INTENT_TTL_MIN", 0) or 0)
+    cutoff = (
+        (datetime.now(timezone.utc)
+         - timedelta(minutes=ttl_min)).strftime("%Y-%m-%dT%H:%M:%SZ")
+        if ttl_min > 0 else None
+    )
     with _write_txn() as conn:
         rows = conn.execute(
             "SELECT * FROM pool_intents WHERE status = 'pending'"
         ).fetchall()
         for row in rows:
             intent = dict(row)
-            if str(intent["ref"]) in active_refs:
+            expired = cutoff is not None and str(intent["created_at"]) < cutoff
+            if str(intent["ref"]) in active_refs and not expired:
                 continue
+            if expired and str(intent["ref"]) in active_refs:
+                logger.warning(
+                    "Intent %s on %s hit the TTL while its ref still looked "
+                    "active — releasing anyway", intent["id"], intent["ref"],
+                )
             _finish_intent(conn, intent, "missed")
             released.append(intent)
     return released

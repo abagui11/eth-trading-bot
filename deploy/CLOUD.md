@@ -415,9 +415,15 @@ a real card would quote for that account.
 | `/democard live 8708390551` | **mirrors the newest open position** |
 | `/democard mill` / `/democard hq` | mirrors the newest open trade in that book |
 | `/democard 85` | mirrors live trade #85 specifically |
+| `/democard all live` | mirrors it **to every approved account** |
 
 Telegram ids are long and trade ids are short, which is what keeps `85` and
-`8708390551` apart.
+`8708390551` apart. Without `all` it goes to one account — yourself by default,
+which is why a bare `/democard mill` only reaches you.
+
+`all` renders a separate card per recipient rather than reusing one, because
+the size line is personal; the reply back to you says how many were funded
+enough to see a real size and names anyone who could not be reached.
 
 **Mirror mode is the one to use for anything measurement-like.** It copies a
 real open position's entry, its *initial* stop, its *original* target ladder,

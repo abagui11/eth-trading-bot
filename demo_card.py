@@ -67,10 +67,11 @@ SIDES = {
 }
 # 'mill'/'hq' both pick a real trade and narrow which book it comes from.
 MIRRORS = {"live": None, "real": None, "open": None, "mill": "mill", "hq": "hq"}
+EVERYONE = ("all", "everyone", "broadcast")
 
 
 def parse_args(args: list[str], *, default_id: int) -> dict[str, Any]:
-    """Read `/democard [id] [live|mill|hq] [product] [side] [#trade]` in any order.
+    """Read `/democard [id|all] [live|mill|hq] [product] [side] [#trade]` in any order.
 
     Order-insensitive on purpose: this gets typed mid-recording, and having to
     remember positions is exactly when it gets typed wrong. Telegram ids are
@@ -78,11 +79,13 @@ def parse_args(args: list[str], *, default_id: int) -> dict[str, Any]:
     """
     out: dict[str, Any] = {
         "telegram_id": default_id, "product": "BTC-USD", "side": "buy",
-        "mirror": False, "source": None, "trade_id": None,
+        "mirror": False, "source": None, "trade_id": None, "everyone": False,
     }
     for raw in args:
         token = str(raw).strip().lower().lstrip("-#")
-        if token in MIRRORS:
+        if token in EVERYONE:
+            out["everyone"] = True
+        elif token in MIRRORS:
             out["mirror"] = True
             out["source"] = MIRRORS[token] or out["source"]
         elif token in PRODUCTS:
@@ -96,6 +99,31 @@ def parse_args(args: list[str], *, default_id: int) -> dict[str, Any]:
                 out["trade_id"] = int(token)
                 out["mirror"] = True
     return out
+
+
+def recipients() -> list[int]:
+    """Every approved pool account — who a real card would reach."""
+    import pool
+
+    return [
+        int(a["telegram_id"]) for a in pool.list_accounts()
+        if pool.is_approved(int(a["telegram_id"]))
+    ]
+
+
+def send_many(telegram_ids: list[int], **kwargs: Any) -> dict[str, Any]:
+    """Fan one demo card out, sized per recipient.
+
+    Not one rendered card reused: each is built for its own account, because
+    the size line is personal and a shared render would show everyone the same
+    number. This is also how the real broadcast behaves.
+    """
+    sent: list[dict[str, Any]] = []
+    failed: list[dict[str, Any]] = []
+    for uid in telegram_ids:
+        result = send(int(uid), **kwargs)
+        (sent if result.get("ok") else failed).append({"telegram_id": uid, **result})
+    return {"sent": sent, "failed": failed}
 
 
 def build_suggestion(product: str, side: str, spot: float) -> Suggestion:

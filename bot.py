@@ -205,7 +205,10 @@ def _pool_intent_reply(result: dict, *, risk_label: str = "risk") -> str:
             f"Reserved: ${risk:,.2f} at risk ({pct:.1f}% of your available cash). "
             "That is the most this trade can cost you if stopped out — not your "
             "full balance. Same fill price as the house; exits are automatic.\n\n"
-            "I'll DM you when it fills or gets pulled. /portfolio any time."
+            "I'll DM you either way — when it fills, or when it's pulled and "
+            "your reserve comes back. A card can rest a couple of hours while "
+            "the setup is still in play, so no news isn't bad news. "
+            "/portfolio any time."
         )
     reason = result.get("reason")
     if reason == "already_recorded":
@@ -1458,17 +1461,44 @@ async def cmd_democard(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
     import demo_card
 
     opts = demo_card.parse_args(context.args or [], default_id=user.id)
+    kwargs = {
+        "product": str(opts["product"]), "side": str(opts["side"]),
+        "mirror": bool(opts["mirror"]), "source": opts["source"],
+        "trade_id": opts["trade_id"],
+    }
     loop = asyncio.get_running_loop()
+
+    if opts["everyone"]:
+        batch = await loop.run_in_executor(
+            None, lambda: demo_card.send_many(demo_card.recipients(), **kwargs)
+        )
+        sent, failed = batch["sent"], batch["failed"]
+        if not sent:
+            reasons = ", ".join(sorted({str(f.get("reason")) for f in failed}))
+            await _reply(update, f"No cards sent ({reasons or 'no recipients'}).")
+            return
+        quoted = sum(1 for s in sent if s.get("quotes_a_size"))
+        lines = [
+            f"Demo card sent to {len(sent)} account(s) — "
+            f"{sent[0]['product']} "
+            f"{'long' if sent[0]['side'] == 'buy' else 'short'}"
+            + (f" (mirrors live {sent[0]['mirrored_source']} "
+               f"#{sent[0]['mirrored_trade_id']})"
+               if sent[0].get("mirrored_trade_id") else ""),
+            f"{quoted} of them are funded and saw a real size; "
+            f"{len(sent) - quoted} were invited to /deposit.",
+        ]
+        if failed:
+            lines.append(
+                "Could not reach: "
+                + ", ".join(f"{f['telegram_id']} ({f.get('reason')})"
+                            for f in failed)
+            )
+        await _reply(update, "\n".join(lines))
+        return
+
     result = await loop.run_in_executor(
-        None,
-        lambda: demo_card.send(
-            int(opts["telegram_id"]),
-            product=str(opts["product"]),
-            side=str(opts["side"]),
-            mirror=bool(opts["mirror"]),
-            source=opts["source"],
-            trade_id=opts["trade_id"],
-        ),
+        None, lambda: demo_card.send(int(opts["telegram_id"]), **kwargs)
     )
 
     if not result.get("ok"):

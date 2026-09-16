@@ -375,6 +375,14 @@ POOL_RISK_PCT: float = LIVE_HQ_RISK_PCT
 # Cash floor to Accept into the pool. Below this a 0.7% risk budget is under
 # $3.50 and the share becomes dust that only complicates the audit trail.
 POOL_MIN_EQUITY_USD: float = 500.0
+# Hard ceiling on how long an Accept may sit reserved before the sweep returns
+# the money and tells the tester. The normal release is ref-based — the reserve
+# comes back as soon as the order path is gone — and this only catches the case
+# where that bookkeeping is wrong, which has happened. Deliberately above
+# LIVE_MILL_REOFFER_MAX_AGE_MIN, the longest window in which a mill ref can
+# still legitimately fill, so the backstop can never race a real fill and drop
+# a tester out of a trade they were promised. 0 disables.
+POOL_INTENT_TTL_MIN: int = 150
 # Smallest deposit worth the manual ops round-trip.
 POOL_MIN_DEPOSIT_USD: float = 500.0
 # Reconcile drift beyond this alerts ops and freezes NEW pool intents (house

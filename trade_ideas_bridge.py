@@ -272,19 +272,44 @@ def idea_pool_open(idea_id: int) -> bool:
 
 
 def pool_active_mill_refs() -> set[str]:
-    """Intent refs (mill_<id>) that can still fire — for the stale-intent sweep."""
+    """Intent refs (mill_<id>) that can still fire — for the stale-intent sweep.
+
+    Anything omitted here has its testers' reserves returned, so this must
+    describe what can *actually* still fill rather than what is merely still
+    on offer. Two ways a mill idea fills: a live card someone taps, and the
+    re-offer sweep, which deliberately replays **expired** ideas within its own
+    lookback because it re-prices against the live mark first. Listing only the
+    live statuses would release a reserve at the 15-minute expiry and then let
+    the sweep fill the same idea at minute 40 without the tester who accepted
+    it — the one accounting outcome worse than a late release.
+    """
     conn = _connect()
     if conn is None:
         return set()
+
+    statuses = list(_LIVE_STATUSES)
+    args: list[Any] = []
+    clause = f"status IN ({', '.join('?' * len(statuses))})"
+    args.extend(statuses)
+    if bot_config.LIVE_MILL_REOFFER_ENABLED:
+        cutoff = max(
+            (
+                datetime.now(timezone.utc)
+                - timedelta(minutes=int(bot_config.LIVE_MILL_REOFFER_MAX_AGE_MIN))
+            ).strftime("%Y-%m-%dT%H:%M:%SZ"),
+            _sweep_floor(),
+        )
+        clause += (
+            " OR (status = 'expired' AND COALESCE(sent_at, created_at) >= ?)"
+        )
+        args.append(cutoff)
+
     try:
         with conn:
             rows = conn.execute(
-                f"""
-                SELECT id FROM ideas
-                WHERE status IN ({", ".join("?" * len(_LIVE_STATUSES))})
-                  AND live_fill_type IS NULL
-                """,
-                _LIVE_STATUSES,
+                f"SELECT id FROM ideas WHERE live_fill_type IS NULL"
+                f" AND ({clause})",
+                args,
             ).fetchall()
     except sqlite3.Error:
         logger.exception("pool_active_mill_refs read failed")
@@ -402,6 +427,17 @@ def expire_stale_ideas(minutes: int | None = None) -> int:
     anything" an explicit outcome, and takes the idea out of the broadcast
     queue and out of reach of a late Accept.
 
+    An Accept exempts the card from the clock, but **only a fill operator's**.
+    That exemption exists because an operator's Accept is the thing that fills
+    the clip, and expiring the card underneath them would refuse their own
+    action. A pool tester's Accept is not that: it is a claim on a fill someone
+    else has to make. Exempting it too made a tester's Accept pin the idea open
+    forever, which kept `mill_<id>` in the active-ref set forever, which meant
+    the stale-intent sweep never released their reserve and the "I'll DM you
+    when it fills or gets pulled" promise was never kept — the Accept just went
+    quiet with their money held. Silence is the one outcome an Accept may never
+    have.
+
     Returns how many ideas were expired.
     """
     window = int(minutes if minutes is not None else bot_config.IDEA_EXPIRY_MINUTES)
@@ -413,6 +449,17 @@ def expire_stale_ideas(minutes: int | None = None) -> int:
     cutoff = (
         datetime.now(timezone.utc) - timedelta(minutes=window)
     ).strftime("%Y-%m-%dT%H:%M:%SZ")
+    operators = tuple(int(x) for x in bot_config.LIVE_MILL_FILL_TELEGRAM_IDS)
+    held = (
+        f"""
+              AND id NOT IN (
+                  SELECT idea_id FROM decisions
+                  WHERE decision = 'accept'
+                    AND user_id IN ({", ".join("?" * len(operators))})
+              )
+        """
+        if operators else ""
+    )
     try:
         with conn:
             cur = conn.execute(
@@ -421,11 +468,9 @@ def expire_stale_ideas(minutes: int | None = None) -> int:
                 WHERE status IN ({", ".join("?" * len(_LIVE_STATUSES))})
                   AND live_fill_type IS NULL
                   AND COALESCE(sent_at, created_at) < ?
-                  AND id NOT IN (
-                      SELECT idea_id FROM decisions WHERE decision = 'accept'
-                  )
+                  {held}
                 """,
-                (*_LIVE_STATUSES, cutoff),
+                (*_LIVE_STATUSES, cutoff, *operators),
             )
             n = cur.rowcount or 0
     except sqlite3.Error:
