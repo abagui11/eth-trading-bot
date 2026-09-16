@@ -884,7 +884,13 @@ def broadcast_plain_text(text: str) -> None:
 
 
 async def send_missed_connection_async(target: dict) -> None:
-    """DM late-join invite to users who rejected/expired an offer."""
+    """DM late-join invite to users who rejected/expired an offer.
+
+    Demo-book only. "Join now" enters at the current mark against the original
+    stop, which is a chase — acceptable when the money is imaginary, and not
+    something to offer someone whose balance is real. Live accounts are
+    filtered out here rather than at the tap, so they never see the invite.
+    """
     offer_id = target["offer_id"]
     chart = target.get("decision_chart_path")
     r_mult = float(target.get("r_multiple") or 0)
@@ -897,7 +903,14 @@ async def send_missed_connection_async(target: dict) -> None:
     )
     bot = Bot(token=config.TELEGRAM_BOT_TOKEN)
     keyboard = telegram_ui.missed_connection_keyboard(offer_id)
-    for tid in target.get("telegram_ids") or []:
+    recipients = list(target.get("telegram_ids") or [])
+    if bot_config.POOL_ENABLED:
+        import pool
+        recipients = [t for t in recipients if not pool.is_approved(int(t))]
+        if not recipients:
+            user_books.mark_missed_connection_sent(offer_id)
+            return
+    for tid in recipients:
         try:
             if chart and Path(str(chart)).exists():
                 await send_photo_with_caption(

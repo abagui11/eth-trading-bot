@@ -8,6 +8,7 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
+import bot_config
 import trade_ideas_bridge
 
 # Mirrors the mill's schema (trade_ideas/trade_ideas/store.py).
@@ -335,10 +336,19 @@ class TradeIdeasBridgeTests(unittest.TestCase):
             "Accepted",
             trade_ideas_bridge.format_decision_reply("recorded", "accept", 5),
         )
-        self.assertIn(
-            "/me",
-            trade_ideas_bridge.format_decision_reply("recorded", "accept", 5),
-        )
+        with mock.patch.object(bot_config, "POOL_ENABLED", False):
+            self.assertIn(
+                "/me",
+                trade_ideas_bridge.format_decision_reply("recorded", "accept", 5),
+            )
+
+    def test_a_live_accept_is_not_called_a_paper_book(self) -> None:
+        """On the live product /me shows the real portfolio, so describing the
+        Accept as a paper entry told the tester the opposite of the truth."""
+        with mock.patch.object(bot_config, "POOL_ENABLED", True):
+            reply = trade_ideas_bridge.format_decision_reply("recorded", "accept", 5)
+        self.assertNotIn("paper", reply.lower())
+        self.assertIn("live", reply.lower())
         self.assertIn(
             "Rejected",
             trade_ideas_bridge.format_decision_reply("recorded", "reject", 5),

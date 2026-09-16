@@ -451,6 +451,41 @@ Pinned by `DemoCardTests` and `SendDemoCardTests`, including that a demo intent
 contributes nothing to a real order, and that `/democard` is admin-only (it can
 address any telegram id, so a tester must not be able to card another tester).
 
+#### The old demo paper book is off for funded accounts
+
+`user_books` is the pre-pool product: a personal $500/$1,000/$2,500 demo
+account with its own Accept, its own ledger, and "missed connection" invites to
+join a trade late. It is switched off for anyone the pool has approved, because
+showing a real depositor a second imaginary balance is the fastest way to make
+them doubt the first one. Concretely, when `POOL_ENABLED`:
+
+- **Open account / My Metrics / My book are gone** from the button menu,
+  replaced by **Portfolio / Deposit**. Agent journal stays — it is read-only.
+- **Those buttons are also refused if tapped**, not just hidden. Telegram keeps
+  old inline keyboards alive forever, so a card from last week is still live in
+  someone's scrollback. The refusal points at `/portfolio`, `/deposit`,
+  `/withdraw`.
+- **Missed-connection DMs are not sent to funded accounts at all.** Join now
+  enters at the current mark against the *original* stop, which is the chase
+  `LIVE_MAX_CHASE_R` exists to stop. Fine with pretend money; not something to
+  put in front of real money.
+
+This is what produced "I clicked a missed connection and it opened a paper book
+at $2,500" — Join now refused with `no_account`, and the refusal arrived
+carrying the menu whose first button opens a demo account.
+
+Four legacy demo books still exist in `user_accounts` (all opened Jul–Aug,
+before the pool). They are unreachable now and are left alone rather than
+deleted, since they hold real trade history. To remove one:
+
+```bash
+sudo -u ethagent .venv/bin/python deploy/_drop_demo_book.py <telegram_id>
+sudo -u ethagent .venv/bin/python deploy/_drop_demo_book.py <telegram_id> --delete
+```
+
+It dry-runs by default and touches `user_*` tables only, so it cannot reach
+`pool_*` or `live_trades` — real balances are out of its scope by construction.
+
 #### Rehearsing the whole thing
 
 `deploy/_rehearse_tester.py` walks one tester from `/start` to settled

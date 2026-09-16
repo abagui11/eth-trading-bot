@@ -251,6 +251,28 @@ def _pool_hq_accept(offer_id: str, user_id: int) -> str:
 
 DEMO_REF_PREFIX = "demo_"
 
+# The demo paper book's own surface. Accept/Reject are deliberately absent:
+# those callbacks are shared with the live cards and are already pool-aware,
+# so they route to the real order rather than the demo one.
+_LEGACY_PAPER_DATA = frozenset({
+    telegram_ui.CB_OPEN, telegram_ui.CB_FUND,
+    telegram_ui.CB_METRICS, telegram_ui.CB_MY_BOOK,
+})
+_LEGACY_PAPER_PREFIXES = (
+    telegram_ui.CB_OPEN_SIZE_PREFIX,
+    telegram_ui.CB_TRADE_JOIN_PREFIX,
+    telegram_ui.CB_TRADE_SKIP_PREFIX,
+)
+
+
+def _is_legacy_paper(data: str) -> bool:
+    return data in _LEGACY_PAPER_DATA or data.startswith(_LEGACY_PAPER_PREFIXES)
+
+
+def _pool_live(user_id: int) -> bool:
+    """This account is on the live product, so the demo book does not apply."""
+    return bool(bot_config.POOL_ENABLED) and pool.is_approved(user_id)
+
 
 def _pool_demo_accept(token: str, user_id: int) -> str:
     """Accept on a demo card. Real reservation, no order, self-clearing.
@@ -955,6 +977,26 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
             note = trade_ideas_bridge.format_manual_fill_reply(verdict, idea_id)
             if note:
                 await context.bot.send_message(chat_id, note[:4096])
+        return
+
+    # --- legacy demo paper book ------------------------------------------
+    # `user_books` predates the pool: a personal $500/$1k/$2.5k demo account
+    # with its own Accept, its own ledger, and missed-connection re-invites.
+    # None of it means anything once an account holds real money, and leaving
+    # the buttons live let a funded tester open a $2,500 demo book by tapping
+    # "Join now" on a missed-connection DM and then "Open account" on the
+    # keyboard that came back with the refusal. Two books, one of them
+    # imaginary, is the worst possible thing to show someone checking whether
+    # their money is safe.
+    if _pool_live(user_id) and _is_legacy_paper(data):
+        await context.bot.send_message(
+            user_id,
+            "That's the old demo book, which this account no longer uses — "
+            "you're on the live product now.\n\n"
+            "/portfolio for your real balance and positions, /deposit to add "
+            "funds, /withdraw to take them out.",
+            reply_markup=telegram_ui.pool_account_keyboard(),
+        )
         return
 
     if data == telegram_ui.CB_OPEN or data == telegram_ui.CB_FUND:

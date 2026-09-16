@@ -796,6 +796,12 @@ def format_manual_fill_reply(verdict: dict[str, Any], idea_id: int) -> str | Non
 def format_decision_reply(status: DecisionStatus, decision: str, idea_id: int) -> str:
     if status == "recorded":
         if decision == "accept":
+            # `record_decision` still writes a `user_paper_trades` row, but on
+            # the live product /me shows the real portfolio, so calling it a
+            # paper book told the tester the opposite of what happened. The
+            # fill result arrives in the next message either way.
+            if bot_config.POOL_ENABLED:
+                return f"Accepted idea #{idea_id} — checking the live sleeve now."
             return (
                 f"Accepted idea #{idea_id}. Added to your personal paper book — /me"
             )

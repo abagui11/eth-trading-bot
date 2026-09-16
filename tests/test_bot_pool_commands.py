@@ -30,6 +30,7 @@ import pool
 import research
 import telegram_ui
 import trade_ideas_bridge
+import user_books
 from telegram.error import BadRequest
 
 ADMIN = 555000
@@ -398,6 +399,100 @@ class PoolMillAcceptTests(unittest.TestCase):
         with patch.object(bot_config, "LIVE_MILL_ANY_ACCEPT_FILLS", False):
             self.assertFalse(trade_ideas_bridge.may_fill(UID))
             self.assertTrue(trade_ideas_bridge.may_fill(ADMIN))
+
+
+class LegacyPaperBookTests(unittest.TestCase):
+    """The demo paper book is off for live accounts.
+
+    A funded tester tapped "Join now" on a missed-connection DM, got a refusal
+    carrying the old main keyboard, tapped "Open account" on it, and ended up
+    with a $2,500 demo book sitting beside their real balance. Two books, one
+    imaginary, shown to someone checking whether their money is safe.
+    """
+
+    def setUp(self) -> None:
+        self._tmp = tempfile.TemporaryDirectory(ignore_cleanup_errors=True)
+        db = Path(self._tmp.name) / "ledger.db"
+        self._patches = [
+            patch.object(config, "LEDGER_DB", db),
+            patch.object(bot_config, "POOL_ENABLED", True),
+            patch.object(bot_config, "POOL_ADMIN_TELEGRAM_IDS", (ADMIN,)),
+        ]
+        for p in self._patches:
+            p.start()
+            self.addCleanup(p.stop)
+        self.addCleanup(self._tmp.cleanup)
+        pool.init_db()
+        access.init_db()
+        pool.approve_user(UID, admin_id=ADMIN)
+
+    def _tap(self, data: str, uid: int = UID):
+        update = MagicMock()
+        query = update.callback_query
+        query.from_user.id = uid
+        query.from_user.username = "tester"
+        query.data = data
+        query.answer = AsyncMock()
+        context = MagicMock()
+        context.bot.send_message = AsyncMock()
+        with patch.object(access, "is_allowed", return_value=True):
+            asyncio.run(bot.on_callback(update, context))
+        return context
+
+    def test_every_demo_book_button_is_refused(self) -> None:
+        for data in (
+            telegram_ui.CB_OPEN,
+            telegram_ui.CB_METRICS,
+            telegram_ui.CB_MY_BOOK,
+            f"{telegram_ui.CB_OPEN_SIZE_PREFIX}2500",
+            f"{telegram_ui.CB_TRADE_JOIN_PREFIX}offer-1",
+            f"{telegram_ui.CB_TRADE_SKIP_PREFIX}offer-1",
+        ):
+            with self.subTest(data=data), \
+                    patch.object(user_books, "open_paper_account") as opened, \
+                    patch.object(user_books, "late_join_offer") as joined:
+                context = self._tap(data)
+                opened.assert_not_called()
+                joined.assert_not_called()
+                reply = str(context.bot.send_message.await_args.args[1])
+                self.assertIn("old demo book", reply)
+                self.assertIn("/portfolio", reply)
+
+    def test_the_size_picker_cannot_open_a_2500_book(self) -> None:
+        """The exact tap that created one."""
+        with patch.object(user_books, "open_paper_account") as opened:
+            self._tap(f"{telegram_ui.CB_OPEN_SIZE_PREFIX}2500")
+        opened.assert_not_called()
+
+    def test_a_non_pool_user_keeps_the_demo_book(self) -> None:
+        """Nothing here should break the pre-pool product."""
+        with patch.object(bot_config, "POOL_ENABLED", False), \
+                patch.object(user_books, "has_account", return_value=False):
+            context = self._tap(telegram_ui.CB_OPEN, uid=424242)
+        reply = str(context.bot.send_message.await_args.args[1])
+        self.assertNotIn("old demo book", reply)
+
+    def test_live_accounts_are_not_sent_missed_connection_invites(self) -> None:
+        """'Join now' enters at the mark against the original stop — a chase.
+        Fine with imaginary money, not something to offer a real balance."""
+        import notify
+
+        async def _run():
+            with patch.object(notify, "Bot") as bot_cls, \
+                    patch.object(user_books, "mark_missed_connection_sent") as marked:
+                bot_cls.return_value.send_message = AsyncMock()
+                await notify.send_missed_connection_async({
+                    "offer_id": "offer-1",
+                    "telegram_ids": [UID],
+                    "r_multiple": 1.2, "spot": 2400.0,
+                    "product_id": "ETH-USD",
+                })
+                return bot_cls.return_value.send_message, marked
+
+        sent, marked = asyncio.run(_run())
+        sent.assert_not_awaited()
+        # Still closed out, so the sweep does not retry it every cycle.
+        marked.assert_called_once_with("offer-1")
 
 
 class SendDemoCardTests(unittest.TestCase):

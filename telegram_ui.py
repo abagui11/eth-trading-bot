@@ -48,16 +48,28 @@ RESEARCH_HELP = (
 
 
 def main_keyboard() -> InlineKeyboardMarkup:
-    rows: list[list[InlineKeyboardButton]] = [
-        [
-            InlineKeyboardButton("Open account", callback_data=CB_OPEN),
-            InlineKeyboardButton("My Metrics", callback_data=CB_METRICS),
-        ],
-        [
-            InlineKeyboardButton("My book", callback_data=CB_MY_BOOK),
-            InlineKeyboardButton("Idea feed", callback_data=CB_FEED),
-        ],
-    ]
+    # With the pool live there is no demo account to open and no demo book to
+    # read, so those buttons are replaced by the real ones rather than left to
+    # be tapped and refused.
+    if bot_config.POOL_ENABLED:
+        rows: list[list[InlineKeyboardButton]] = [
+            [
+                InlineKeyboardButton("Portfolio", callback_data=CB_POOL_PORTFOLIO),
+                InlineKeyboardButton("Deposit", callback_data=CB_POOL_DEPOSIT),
+            ],
+            [InlineKeyboardButton("Idea feed", callback_data=CB_FEED)],
+        ]
+    else:
+        rows = [
+            [
+                InlineKeyboardButton("Open account", callback_data=CB_OPEN),
+                InlineKeyboardButton("My Metrics", callback_data=CB_METRICS),
+            ],
+            [
+                InlineKeyboardButton("My book", callback_data=CB_MY_BOOK),
+                InlineKeyboardButton("Idea feed", callback_data=CB_FEED),
+            ],
+        ]
     dash = config.DASHBOARD_PUBLIC_URL
     if dash:
         rows.append(

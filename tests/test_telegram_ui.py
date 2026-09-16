@@ -20,15 +20,16 @@ from telegram_ui import (
 
 
 class TelegramUiTests(unittest.TestCase):
+    def _buttons(self, keyboard):
+        return [b for row in keyboard.inline_keyboard for b in row]
+
     def test_main_keyboard_has_open_account_and_journal(self) -> None:
-        with patch.object(config, "DASHBOARD_PUBLIC_URL", "https://dash.example"):
+        """The demo-book menu, still shown when the pool is off."""
+        with patch.object(config, "DASHBOARD_PUBLIC_URL", "https://dash.example"), \
+                patch.object(bot_config, "POOL_ENABLED", False):
             keyboard = main_keyboard()
 
-        buttons = [
-            button
-            for row in keyboard.inline_keyboard
-            for button in row
-        ]
+        buttons = self._buttons(keyboard)
         open_btn = next(button for button in buttons if button.text == "Open account")
         self.assertEqual(open_btn.callback_data, CB_OPEN)
         journal = next(button for button in buttons if button.text == "Agent journal")
@@ -37,6 +38,21 @@ class TelegramUiTests(unittest.TestCase):
         self.assertEqual(my_book.callback_data, "ui:mybook")
         feed = next(button for button in buttons if button.text == "Idea feed")
         self.assertEqual(feed.callback_data, "ui:feed")
+
+    def test_the_live_menu_offers_no_demo_account(self) -> None:
+        """A funded account tapping "Open account" got a $2,500 demo book
+        beside their real balance. The button should not be there to tap."""
+        with patch.object(config, "DASHBOARD_PUBLIC_URL", "https://dash.example"), \
+                patch.object(bot_config, "POOL_ENABLED", True):
+            keyboard = main_keyboard()
+
+        labels = {b.text for b in self._buttons(keyboard)}
+        self.assertNotIn("Open account", labels)
+        self.assertNotIn("My book", labels)
+        self.assertIn("Portfolio", labels)
+        self.assertIn("Deposit", labels)
+        # The read-only journal is not a demo thing and stays.
+        self.assertIn("Agent journal", labels)
 
     def test_format_open_account_result(self) -> None:
         success = format_open_account_result(
