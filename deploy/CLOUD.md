@@ -396,6 +396,27 @@ A lookup failure is **not** a mismatch. An Etherscan outage leaves the wallet
 `pending` and is retried, rather than being recorded as a failed proof, so a
 bad afternoon at Etherscan never refuses an honest tester their own money.
 
+#### Demo cards
+
+HQ runs every 30 minutes and most cycles legitimately find no trade, so a real
+trade card cannot be summoned for a recording or a walkthrough.
+`deploy/_send_demo_card.py <telegram_id>` sends one on demand, labelled as a
+demo, built by the **live** card renderer with the **live** sizing rule — so
+the size it quotes is the size a real card would quote for that account.
+
+Accept is real: it reserves the tester's actual budget through
+`pool.record_intent`, so the reply they see is the genuine one. It cannot
+trade, and that is structural rather than careful — every executor resolves
+pooled intents *by ref* (`pending_intents(ref)`), and the ref here is
+`demo_<token>`, which matches no live pending cycle id and no `mill_<id>`.
+There is no code path from a demo ref to a position. About a minute later the
+stale-intent sweep sees a ref that is not active, returns the reserve, and
+sends the real "that order never fired, your money is back" message — which is
+worth showing, since it is how a non-filling Accept always behaves.
+
+Safe to press with real money in the account. Pinned by `DemoCardTests`,
+including that a demo intent contributes nothing to a real order.
+
 #### Rehearsing the whole thing
 
 `deploy/_rehearse_tester.py` walks one tester from `/start` to settled

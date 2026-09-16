@@ -1041,6 +1041,32 @@ def send_pool_dm(telegram_id: int, text: str) -> bool:
         return False
 
 
+async def send_pool_dm_with_keyboard_async(
+    telegram_id: int, text: str, keyboard
+) -> bool:
+    bot = Bot(token=config.TELEGRAM_BOT_TOKEN)
+    try:
+        await bot.send_message(
+            chat_id=int(telegram_id), text=text.strip()[:4096],
+            reply_markup=keyboard,
+        )
+        return True
+    except Exception:
+        logger.exception("Pool DM with keyboard failed for user %s", telegram_id)
+        return False
+
+
+def send_pool_dm_with_keyboard(telegram_id: int, text: str, keyboard) -> bool:
+    """A pool DM carrying inline buttons. Sync wrapper; never raises."""
+    try:
+        return asyncio.run(
+            send_pool_dm_with_keyboard_async(telegram_id, text, keyboard)
+        )
+    except Exception:
+        logger.exception("Pool DM keyboard wrapper failed for %s", telegram_id)
+        return False
+
+
 def send_pool_admin_alert(text: str) -> None:
     """Alert every pool admin by DM. Never raises."""
     import pool

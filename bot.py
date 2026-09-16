@@ -246,6 +246,29 @@ def _pool_hq_accept(offer_id: str, user_id: int) -> str:
     return _pool_intent_reply(pool.record_intent(str(offer_id), user_id))
 
 
+DEMO_REF_PREFIX = "demo_"
+
+
+def _pool_demo_accept(token: str, user_id: int) -> str:
+    """Accept on a demo card. Real reservation, no order, self-clearing.
+
+    Deliberately routed through `pool.record_intent` rather than faked: the
+    reply a tester sees is then the real one, computed from their real
+    available cash by the real sizing rule, so a demo cannot flatter the
+    product by quoting a number the live path would not produce.
+
+    Nothing can fill, and that is structural rather than careful. Every
+    executor looks intents up **by ref** — a live pending cycle id or
+    `mill_<id>` — and a `demo_` ref matches neither, so no code path exists
+    that could turn this into a position. The watchdog's stale-intent sweep
+    then sees a ref that is not active, releases the reserve, and sends the
+    genuine "that order never fired, your money is back" DM within a minute.
+    """
+    return _pool_intent_reply(
+        pool.record_intent(f"{DEMO_REF_PREFIX}{token}", user_id)
+    )
+
+
 def _pool_mill_accept(idea_id: int, user_id: int) -> str:
     """A funded tester's Accept on a mill card → pool intent (sync, executor)."""
     if not trade_ideas_bridge.idea_pool_open(idea_id):
@@ -468,6 +491,34 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
     chat_id = query.message.chat_id if query.message else user_id
 
     # --- Tester pool: admin Admit/Deny, deposit decisions, Account buttons ---
+    if data.startswith(telegram_ui.CB_POOL_DEMO_PREFIX):
+        rest = data[len(telegram_ui.CB_POOL_DEMO_PREFIX):]
+        choice, _, token = rest.partition(":")
+        if choice not in ("yes", "no") or not token:
+            return
+        if choice == "no":
+            reply = ("Skipped — nothing reserved. That is all a Reject does: "
+                     "no position, no cost.")
+        elif not pool.is_funded(user_id):
+            reply = (
+                "Your account has no funds yet, so this Accept was not "
+                "placed. /deposit to join live trades."
+            )
+        else:
+            loop = asyncio.get_running_loop()
+            try:
+                reply = await loop.run_in_executor(
+                    None, _pool_demo_accept, token, user_id
+                )
+            except Exception:
+                logger.exception("pool demo accept failed for %s", token)
+                reply = "Could not record your Accept — try again."
+        try:
+            await context.bot.send_message(user_id, reply)
+        except Exception:
+            logger.exception("Pool demo reply DM failed for %s", user_id)
+        return
+
     if data.startswith(telegram_ui.CB_POOL_USER_PREFIX):
         if not pool.is_admin(user_id):
             return

@@ -25,6 +25,7 @@ import bot
 import bot_config
 import config
 import pool
+import telegram_ui
 from telegram.error import BadRequest
 
 ADMIN = 555000
@@ -183,6 +184,113 @@ class PoolCommandTests(unittest.TestCase):
         with patch("research.get_spot_prices", return_value={}):
             update, _ = self._run(bot.cmd_portfolio)
         self.assertIn("1,000.00", self._texts(update))
+
+
+class DemoCardTests(unittest.TestCase):
+    """The demo card, whose whole value depends on Accept being both real and
+    incapable of trading.
+
+    Real, because a demo that quotes a size the live path would not produce is
+    a demo of something that does not exist. Incapable, because it will be
+    pressed on camera with real money in the account. The second property is
+    structural -- every executor resolves intents by ref, and a `demo_` ref
+    matches no order -- so the test that matters most is that a demo intent
+    contributes nothing to a real one.
+    """
+
+    def setUp(self) -> None:
+        self._tmp = tempfile.TemporaryDirectory(ignore_cleanup_errors=True)
+        db = Path(self._tmp.name) / "ledger.db"
+        self._patches = [
+            patch.object(config, "LEDGER_DB", db),
+            patch.object(bot_config, "POOL_ENABLED", True),
+            patch.object(bot_config, "POOL_ADMIN_TELEGRAM_IDS", (ADMIN,)),
+            patch.object(bot_config, "POOL_RISK_PCT", 0.007),
+            patch.object(bot_config, "POOL_MIN_EQUITY_USD", 500.0),
+        ]
+        for p in self._patches:
+            p.start()
+            self.addCleanup(p.stop)
+        self.addCleanup(self._tmp.cleanup)
+        pool.init_db()
+        access.init_db()
+        pool.approve_user(UID, admin_id=ADMIN)
+        pool.credit(UID, 1000.0, admin_id=ADMIN, ref="fund")
+
+    def _press(self, choice: str, token: str = "abc123"):
+        update = MagicMock()
+        query = update.callback_query
+        query.from_user.id = UID
+        query.from_user.username = "tester"
+        query.data = f"{telegram_ui.CB_POOL_DEMO_PREFIX}{choice}:{token}"
+        query.answer = AsyncMock()
+        context = MagicMock()
+        context.bot.send_message = AsyncMock()
+        with patch.object(access, "is_allowed", return_value=True):
+            asyncio.run(bot.on_callback(update, context))
+        return context
+
+    def test_accept_reserves_the_real_budget(self) -> None:
+        context = self._press("yes")
+        reply = str(context.bot.send_message.await_args.args[1])
+        self.assertIn("You're in if it fills", reply)
+
+        intents = pool.pending_intents("demo_abc123")
+        self.assertEqual(len(intents), 1)
+        # 0.7% of $1,000 available — the live rule, not a demo constant.
+        self.assertAlmostEqual(float(intents[0]["risk_usd"]), 7.0, places=2)
+        self.assertAlmostEqual(
+            float(pool.get_account(UID)["reserved_usd"]), 7.0, places=2
+        )
+
+    def test_a_demo_intent_cannot_join_a_real_order(self) -> None:
+        """The property that makes this safe to press with real money."""
+        self._press("yes")
+        extra, intents = pool.extra_contracts_for(
+            "20260916T150000Z", risk_per_unit=10.0, floor=0.01
+        )
+        self.assertEqual(extra, 0.0)
+        self.assertEqual(intents, [])
+
+        opened = pool.open_stakes(
+            1, "20260916T150000Z", fill_qty=0.01, fill_price=100_000.0,
+            risk_per_unit=10.0, house_risk_usd=14.0,
+        )
+        self.assertEqual(opened, [])
+        self.assertEqual(pool.open_stakes_for(1), [])
+
+    def test_the_reserve_comes_back_on_the_next_sweep(self) -> None:
+        """No order exists, so the ref is never active and the real
+        stale-intent path returns the money with the real message."""
+        self._press("yes")
+        released = pool.expire_stale_intents(set())
+        self.assertEqual(len(released), 1)
+        self.assertEqual(str(released[0]["ref"]), "demo_abc123")
+        self.assertEqual(float(pool.get_account(UID)["reserved_usd"]), 0.0)
+        self.assertEqual(float(pool.get_account(UID)["cash_usd"]), 1000.0)
+
+    def test_a_real_ref_is_not_released_by_the_demo_sweep(self) -> None:
+        """Guard against the demo path teaching the sweep to be too eager."""
+        pool.record_intent("20260916T150000Z", UID)
+        released = pool.expire_stale_intents({"20260916T150000Z"})
+        self.assertEqual(released, [])
+        self.assertGreater(float(pool.get_account(UID)["reserved_usd"]), 0.0)
+
+    def test_reject_reserves_nothing(self) -> None:
+        context = self._press("no")
+        self.assertIn("Skipped", str(context.bot.send_message.await_args.args[1]))
+        self.assertEqual(pool.pending_intents("demo_abc123"), [])
+        self.assertEqual(float(pool.get_account(UID)["reserved_usd"]), 0.0)
+
+    def test_an_unfunded_account_is_told_to_deposit(self) -> None:
+        pool.debit(UID, 1000.0, admin_id=ADMIN, ref="drain")
+        context = self._press("yes")
+        self.assertIn("/deposit", str(context.bot.send_message.await_args.args[1]))
+        self.assertEqual(pool.pending_intents("demo_abc123"), [])
+
+    def test_malformed_demo_data_is_ignored(self) -> None:
+        context = self._press("maybe")
+        context.bot.send_message.assert_not_awaited()
 
 
 if __name__ == "__main__":

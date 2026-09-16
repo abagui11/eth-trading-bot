@@ -197,6 +197,10 @@ CB_POOL_WALLET_PREFIX = "poolwal:"     # poolwal:approve:<row_id> / poolwal:reje
 CB_POOL_WITHDRAW_PREFIX = "poolwd:"    # poolwd:approve:<id> / poolwd:reject:<id>
 CB_POOL_PORTFOLIO = "pool:portfolio"
 CB_POOL_DEPOSIT = "pool:deposit"
+# Demo card Accept. A separate prefix on purpose: it carries a ref no
+# executor ever reads, which is what makes pressing Accept structurally
+# incapable of placing an order. See bot._pool_demo_accept.
+CB_POOL_DEMO_PREFIX = "pooldemo:"      # pooldemo:yes:<token> / pooldemo:no:<token>
 
 PENDING_APPROVAL_MESSAGE = (
     "Thanks for your interest in Eva.\n\n"
@@ -288,6 +292,22 @@ def pool_admin_deposit_keyboard(request_id: int) -> InlineKeyboardMarkup:
                 ),
                 InlineKeyboardButton(
                     "Deny", callback_data=f"{CB_POOL_DEPOSIT_PREFIX}deny:{request_id}"
+                ),
+            ]
+        ]
+    )
+
+
+def pool_demo_keyboard(token: str) -> InlineKeyboardMarkup:
+    """Accept/Reject for a demo card. Same shape as the real trade keyboard."""
+    return InlineKeyboardMarkup(
+        [
+            [
+                InlineKeyboardButton(
+                    "Accept", callback_data=f"{CB_POOL_DEMO_PREFIX}yes:{token}"
+                ),
+                InlineKeyboardButton(
+                    "Reject", callback_data=f"{CB_POOL_DEMO_PREFIX}no:{token}"
                 ),
             ]
         ]
