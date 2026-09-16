@@ -401,6 +401,89 @@ class PoolMillAcceptTests(unittest.TestCase):
             self.assertTrue(trade_ideas_bridge.may_fill(ADMIN))
 
 
+class LiveCardTests(unittest.TestCase):
+    """`/democard real` sends a card that can actually fill.
+
+    A demo card never fills — its ref matches no executor — so "accept it on
+    camera and watch it go in" needs a real mill card, with the real Accept
+    callback and a banner that says so.
+    """
+
+    def test_a_fillable_idea_is_preferred_over_a_refusable_one(self) -> None:
+        rows = [
+            {"id": 30, "would_fill": False, "preview": {"skip_reason": "expired"}},
+            {"id": 29, "would_fill": True, "preview": {"born_rr": 1.4}},
+            {"id": 28, "would_fill": True, "preview": {"born_rr": 2.0}},
+        ]
+        with patch.object(trade_ideas_bridge, "fillable_ideas", return_value=rows):
+            picked = demo_card.pick_fillable_idea(UID)
+        self.assertEqual(picked["id"], 29)  # newest that would fill
+
+    def test_no_card_is_sent_when_nothing_would_fill(self) -> None:
+        """Better to say so than to hand someone a card that will refuse."""
+        rows = [{"id": 30, "would_fill": False, "preview": {}}]
+        with patch.object(trade_ideas_bridge, "fillable_ideas", return_value=rows), \
+                patch.object(bot_config, "POOL_ENABLED", True), \
+                patch.object(pool, "is_approved", return_value=True):
+            result = demo_card.send(UID, live_idea=True)
+        self.assertEqual(result["reason"], "nothing_fillable")
+
+    def test_the_live_card_carries_the_real_accept_and_says_it_is_real(self) -> None:
+        idea = {"id": 29, "would_fill": True, "preview": {"born_rr": 1.4}}
+        row = {
+            "id": 29, "product_id": "ETH-USD", "direction": "short",
+            "entry": 2400.0, "stop_loss": 2450.0,
+            "take_profits_json": "[2300.0]", "title": "ETH short",
+        }
+        captured: dict = {}
+
+        def _capture(uid, text, keyboard):
+            captured["text"] = text
+            captured["keyboard"] = keyboard
+            return True
+
+        with patch.object(trade_ideas_bridge, "fillable_ideas", return_value=[idea]), \
+                patch.object(trade_ideas_bridge, "_idea_row", return_value=row), \
+                patch.object(bot_config, "POOL_ENABLED", True), \
+                patch.object(pool, "is_approved", return_value=True), \
+                patch.object(pool, "prospective_accept",
+                             return_value={"ok": True, "risk_usd": 3.5,
+                                           "risk_pct": 0.007,
+                                           "available_usd": 500.0,
+                                           "notional_usd": 168.0}), \
+                patch.object(notify, "send_pool_dm_with_keyboard", _capture):
+            result = demo_card.send(UID, live_idea=True)
+
+        self.assertTrue(result["ok"])
+        self.assertTrue(result["live"])
+        self.assertEqual(result["ref"], "mill_29")
+        # Levels are the idea's own, not invented.
+        self.assertEqual(result["entry"], 2400.0)
+        self.assertEqual(result["stop_loss"], 2450.0)
+
+        # A card that spends money must not be labelled a demo.
+        self.assertIn("LIVE CARD", captured["text"])
+        self.assertNotIn("DEMO CARD", captured["text"])
+
+        data = [b.callback_data
+                for row_ in captured["keyboard"].inline_keyboard for b in row_]
+        self.assertIn("idea:accept:29", data)
+        self.assertFalse(
+            any(d.startswith(telegram_ui.CB_POOL_DEMO_PREFIX) for d in data),
+            "a live card must not carry the demo callback",
+        )
+
+    def test_real_does_not_hijack_the_existing_live_argument(self) -> None:
+        """`/democard live` already means "mirror an open position"."""
+        mirror = demo_card.parse_args(["live"], default_id=1)
+        self.assertTrue(mirror["mirror"])
+        self.assertFalse(mirror["live_idea"])
+
+        real = demo_card.parse_args(["real"], default_id=1)
+        self.assertTrue(real["live_idea"])
+        self.assertFalse(real["mirror"])
+
+
 class LegacyPaperBookTests(unittest.TestCase):
     """The demo paper book is off for live accounts.
 

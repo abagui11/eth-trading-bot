@@ -57,6 +57,13 @@ MIRROR_BANNER = (
     "your budget and then returns it."
 )
 
+LIVE_BANNER = (
+    "LIVE CARD — this is mill idea #{idea_id}, not a demo. Accept places a "
+    "real trade with real money at the size shown below. It is not a promise "
+    "of a fill: the levels are re-checked against the market at the moment "
+    "you tap, and a setup the price has left behind is refused."
+)
+
 PRODUCTS = {
     "btc": "BTC-USD", "bitcoin": "BTC-USD", "btc-usd": "BTC-USD",
     "eth": "ETH-USD", "ether": "ETH-USD", "eth-usd": "ETH-USD",
@@ -68,6 +75,11 @@ SIDES = {
 # 'mill'/'hq' both pick a real trade and narrow which book it comes from.
 MIRRORS = {"live": None, "real": None, "open": None, "mill": "mill", "hq": "hq"}
 EVERYONE = ("all", "everyone", "broadcast")
+# Send a real, fillable mill card instead of a demo one. Deliberately not a
+# synonym of `live` -- `/democard live` already means "mirror an open
+# position", and quietly changing that into "spend money" is not a thing to do
+# with a word someone has already been using.
+REAL = ("real", "fillable", "forreal")
 
 
 def parse_args(args: list[str], *, default_id: int) -> dict[str, Any]:
@@ -80,11 +92,14 @@ def parse_args(args: list[str], *, default_id: int) -> dict[str, Any]:
     out: dict[str, Any] = {
         "telegram_id": default_id, "product": "BTC-USD", "side": "buy",
         "mirror": False, "source": None, "trade_id": None, "everyone": False,
+        "live_idea": False,
     }
     for raw in args:
         token = str(raw).strip().lower().lstrip("-#")
         if token in EVERYONE:
             out["everyone"] = True
+        elif token in REAL:
+            out["live_idea"] = True
         elif token in MIRRORS:
             out["mirror"] = True
             out["source"] = MIRRORS[token] or out["source"]
@@ -237,11 +252,58 @@ def build_from_trade(trade: dict[str, Any]) -> Suggestion:
     )
 
 
+def pick_fillable_idea(user_id: int, *, limit: int = 30) -> dict[str, Any] | None:
+    """The newest mill idea that would fill for this user right now.
+
+    A demo card cannot fill — its ref matches no executor — so asking for a
+    genuine fill means sending a *real* card instead. This picks one that is
+    not already refusable, which is a strong no and a weak yes: the final
+    exposure, contract-floor and dedupe checks only run when an order is
+    actually sent.
+    """
+    import trade_ideas_bridge as bridge
+
+    for row in bridge.fillable_ideas(user_id, limit=limit):
+        if row.get("would_fill"):
+            return row
+    return None
+
+
+def build_from_idea(idea: dict[str, Any]) -> Suggestion:
+    """A card off a live mill idea, levels untouched."""
+    import json
+
+    import trade_ideas_bridge as bridge
+
+    row = bridge._idea_row(int(idea["id"])) or idea
+    long = str(row.get("direction") or "") == "long"
+    try:
+        tps = [float(x) for x in json.loads(row.get("take_profits_json") or "[]")]
+    except (TypeError, ValueError):
+        tps = []
+    return Suggestion(
+        action="spot_buy" if long else "spot_sell",
+        size=0.0,
+        entry=float(row["entry"]),
+        stop_loss=float(row["stop_loss"]),
+        take_profits=tps,
+        rationale=str(row.get("title") or f"mill idea #{row['id']}"),
+        product_id=str(row["product_id"]),
+    )
+
+
 def send(telegram_id: int, *, product: str = "BTC-USD",
          side: str = "buy", mirror: bool = False,
          source: str | None = None,
-         trade_id: int | None = None) -> dict[str, Any]:
-    """Build and DM one demo card. Returns what happened; never raises."""
+         trade_id: int | None = None,
+         live_idea: bool = False) -> dict[str, Any]:
+    """Build and DM one card. Returns what happened; never raises.
+
+    `live_idea` sends a **real** mill card rather than a demo one: real levels,
+    the real Accept callback, and therefore a real trade if it is tapped. The
+    banner says so. A card that spends money must never be labelled a demo —
+    that is the one combination worse than either on its own.
+    """
     import display_summary
     import notify
     import pool
@@ -254,7 +316,16 @@ def send(telegram_id: int, *, product: str = "BTC-USD",
         return {"ok": False, "reason": "not_approved"}
 
     trade = None
-    if mirror:
+    idea = None
+    if live_idea:
+        idea = pick_fillable_idea(telegram_id)
+        if idea is None:
+            return {"ok": False, "reason": "nothing_fillable"}
+        suggestion = build_from_idea(idea)
+        product = str(suggestion.product_id)
+        side = "buy" if suggestion.action == "spot_buy" else "sell"
+        banner = LIVE_BANNER.format(idea_id=idea["id"])
+    elif mirror:
         trade = pick_trade(trade_id, source)
         if trade is None:
             return {"ok": False, "reason": "no_open_trade"}
@@ -274,7 +345,7 @@ def send(telegram_id: int, *, product: str = "BTC-USD",
     except Exception:
         logger.exception("demo card: spot read failed")
         spot = 0.0
-    if trade is None:
+    if trade is None and idea is None:
         if spot <= 0:
             return {"ok": False, "reason": "no_spot"}
         suggestion = build_suggestion(product, side, spot)
@@ -294,14 +365,29 @@ def send(telegram_id: int, *, product: str = "BTC-USD",
         stop_loss=float(suggestion.stop_loss),
     )
 
+    keyboard = (
+        telegram_ui.idea_live_keyboard(int(idea["id"])) if idea is not None
+        else telegram_ui.pool_demo_keyboard(token)
+    )
     sent = notify.send_pool_dm_with_keyboard(
-        telegram_id, f"{banner}\n\n{body}"[:4096],
-        telegram_ui.pool_demo_keyboard(token),
+        telegram_id, f"{banner}\n\n{body}"[:4096], keyboard,
     )
     if not sent:
         return {"ok": False, "reason": "send_failed"}
 
     entry = float(suggestion.entry)
+    if idea is not None:
+        return {
+            "ok": True, "live": True, "idea_id": int(idea["id"]),
+            "ref": f"mill_{int(idea['id'])}", "product": product, "side": side,
+            "spot": spot, "entry": entry,
+            "stop_loss": float(suggestion.stop_loss),
+            "take_profits": list(suggestion.take_profits or []),
+            "risk_usd": float(prosp.get("risk_usd") or 0.0),
+            "notional_usd": float(prosp.get("notional_usd") or 0.0),
+            "quotes_a_size": bool(prosp.get("ok")),
+            "born_rr": (idea.get("preview") or {}).get("born_rr"),
+        }
     return {
         "ok": True, "ref": f"{REF_PREFIX}{token}", "product": product,
         "side": side, "spot": spot, "entry": entry,

@@ -416,6 +416,7 @@ a real card would quote for that account.
 | `/democard mill` / `/democard hq` | mirrors the newest open trade in that book |
 | `/democard 85` | mirrors live trade #85 specifically |
 | `/democard all live` | mirrors it **to every approved account** |
+| `/democard real` | **a real, fillable mill card — Accept places a real trade** |
 
 Telegram ids are long and trade ids are short, which is what keeps `85` and
 `8708390551` apart. Without `all` it goes to one account — yourself by default,
@@ -447,6 +448,23 @@ worth showing, since it is how a non-filling Accept always behaves.
 
 Safe to press with real money in the account — including on a mirror of a live
 position, since the mirror copies levels but never touches the real trade.
+
+**`/democard real` is the exception, and it is not a demo.** A demo card can
+never fill, so if you need a genuine fill on camera this sends an actual mill
+card: real levels, the real `idea:accept:<id>` callback, and a real trade with
+real money if it is tapped. The banner says LIVE CARD rather than DEMO CARD —
+a card that spends money must never be labelled a demo, which is the one
+combination worse than either alone.
+
+It picks the newest idea that would fill *right now*, checked by running the
+real gates in dry-run mode (`deploy/_show_fillable.py <id>` shows the same
+scan). Treat that as a strong no and a weak yes: exposure, contract-floor and
+dedupe checks only run when an order is genuinely sent, so a card can still be
+refused after passing the preview. If nothing is fillable the command says so
+instead of sending a card that will bounce.
+
+`real` is not a synonym for `live` — `/democard live` still means "mirror an
+open position", and that word is already in use.
 Pinned by `DemoCardTests` and `SendDemoCardTests`, including that a demo intent
 contributes nothing to a real order, and that `/democard` is admin-only (it can
 address any telegram id, so a tester must not be able to card another tester).

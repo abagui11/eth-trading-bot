@@ -426,6 +426,101 @@ def request_manual_fill(idea_id: int, user_id: int) -> dict[str, Any]:
         conn.close()
 
 
+def _idea_row(idea_id: int) -> dict[str, Any] | None:
+    conn = _connect()
+    if conn is None:
+        return None
+    try:
+        row = conn.execute(
+            """
+            SELECT id, product_id, direction, entry, stop_loss,
+                   take_profits_json, signal_key, confidence, status, title
+            FROM ideas WHERE id = ?
+            """,
+            (int(idea_id),),
+        ).fetchone()
+        return dict(row) if row else None
+    except sqlite3.Error:
+        logger.exception("idea read failed for #%s", idea_id)
+        return None
+    finally:
+        conn.close()
+
+
+def preview_fill(idea_id: int, user_id: int) -> dict[str, Any]:
+    """Would this Accept fill right now? Runs the gates, places nothing.
+
+    A strong no and a weak yes: `maybe_execute_live` has exposure, contract
+    floor and dedupe rules a dry run cannot reach without sending an order.
+    Use it to avoid handing someone a card that is already refusable, not to
+    promise them a fill.
+    """
+    if not may_fill(user_id):
+        return {"would_fill": False, "skip_reason": "not_authorized"}
+    row = _idea_row(idea_id)
+    if row is None:
+        return {"would_fill": False, "skip_reason": "unknown_idea"}
+    if str(row.get("status") or "") == "expired":
+        return {"would_fill": False, "skip_reason": "expired"}
+    if row.get("entry") is None or row.get("stop_loss") is None:
+        return {"would_fill": False, "skip_reason": "unsized"}
+    if not idea_pool_open(int(idea_id)):
+        return {"would_fill": False, "skip_reason": "already_filled"}
+
+    try:
+        import execute
+
+        verdict = execute.execute_mill_idea(
+            idea_id=int(idea_id),
+            product_id=str(row["product_id"]),
+            direction=str(row["direction"] or ""),
+            entry=float(row["entry"]),
+            stop_loss=float(row["stop_loss"]),
+            take_profits=_parse_take_profits(row["take_profits_json"]),
+            signal_key=str(row["signal_key"] or "") or None,
+            confidence=row["confidence"],
+            fill_type="manual",
+            accepted_by=int(user_id),
+            dry_run=True,
+        )
+    except Exception:
+        logger.exception("fill preview failed for idea #%s", idea_id)
+        return {"would_fill": False, "skip_reason": "error"}
+    verdict.setdefault("would_fill", False)
+    verdict["born_rr"] = _rr_at_mint(row)
+    return verdict
+
+
+def fillable_ideas(user_id: int, *, limit: int = 30) -> list[dict[str, Any]]:
+    """Recent mill ideas that would fill for this user right now, newest first.
+
+    Each row carries the preview verdict, so a caller can report *why* nothing
+    is fillable rather than only that nothing is.
+    """
+    conn = _connect()
+    if conn is None:
+        return []
+    try:
+        rows = [dict(r) for r in conn.execute(
+            "SELECT id, product_id, direction, title, status, created_at "
+            "FROM ideas ORDER BY id DESC LIMIT ?",
+            (int(limit),),
+        )]
+    except sqlite3.Error:
+        logger.exception("fillable scan failed")
+        return []
+    finally:
+        conn.close()
+
+    out: list[dict[str, Any]] = []
+    for row in rows:
+        verdict = preview_fill(int(row["id"]), user_id)
+        row["preview"] = verdict
+        row["would_fill"] = bool(verdict.get("would_fill"))
+        out.append(row)
+    return out
+
+
 def _rr_at_mint(row: dict[str, Any]) -> float | None:
     """The fill gate's own R:R measure, scored at the idea's published entry.
 

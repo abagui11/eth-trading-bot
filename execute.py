@@ -1613,6 +1613,26 @@ def _revalidated_plan(
     return plan
 
 
+def _may_fill(user_id: int) -> bool:
+    """Whose Accept may take a live mill clip.
+
+    Deferred to `trade_ideas_bridge` rather than re-read from the allowlist
+    here, because holding the rule in two places is what made
+    `LIVE_MILL_ANY_ACCEPT_FILLS` a half-measure: the Accept handler's gate
+    widened to any approved, funded tester while this one still demanded an
+    operator id, so a tester's tap passed the check that decides whether to
+    *try* and failed the one that decides whether to *fill* — reported as
+    `not_authorized` after their budget had already been reserved.
+    """
+    try:
+        import trade_ideas_bridge
+
+        return bool(trade_ideas_bridge.may_fill(int(user_id)))
+    except Exception:
+        logger.exception("mill fill authorization check failed for %s", user_id)
+        return int(user_id) in tuple(bot_config.LIVE_MILL_FILL_TELEGRAM_IDS)
+
+
 def execute_mill_idea(
     *,
     idea_id: int,
@@ -1625,6 +1645,7 @@ def execute_mill_idea(
     confidence: float | None = None,
     fill_type: str = "auto",
     accepted_by: int | None = None,
+    dry_run: bool = False,
 ) -> dict[str, Any]:
     """Single gate for both mill entry paths. Returns a structured verdict.
 
@@ -1637,6 +1658,12 @@ def execute_mill_idea(
     ``skip_reason`` is the contract the Telegram reply is built from — in
     particular ``sleeve_full`` is what tells an operator there are too many
     trades already open.
+
+    ``dry_run`` answers "would this Accept fill right now?" without placing
+    anything: every gate above runs and the verdict comes back with
+    ``would_fill`` instead of ``executed``. It is a strong *no* and a weak
+    *yes* — `maybe_execute_live` applies exposure, contract-floor and dedupe
+    rules of its own that a dry run cannot reach without sending an order.
     """
     capacity = mill_capacity()
     verdict: dict[str, Any] = {
@@ -1657,9 +1684,7 @@ def execute_mill_idea(
         return _skip("bad_direction")
 
     if fill_type == "manual":
-        if accepted_by is None or int(accepted_by) not in tuple(
-            bot_config.LIVE_MILL_FILL_TELEGRAM_IDS
-        ):
+        if accepted_by is None or not _may_fill(int(accepted_by)):
             return _skip("not_authorized")
     elif fill_type == "auto":
         if not bot_config.LIVE_MILL_AUTO_FILL_ENABLED:
@@ -1699,6 +1724,13 @@ def execute_mill_idea(
     entry = float(plan["entry"])
     stop_loss = float(plan["stop_loss"])
     take_profits = list(plan["take_profits"])
+
+    if dry_run:
+        verdict["would_fill"] = True
+        verdict["entry"] = entry
+        verdict["stop_loss"] = stop_loss
+        verdict["take_profits"] = list(take_profits or [])
+        return verdict
 
     suggestion = Suggestion(
         action="deriv_buy" if direction == "long" else "deriv_sell",

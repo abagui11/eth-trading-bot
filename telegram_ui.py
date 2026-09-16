@@ -124,6 +124,26 @@ def trade_decision_keyboard(offer_id: str) -> InlineKeyboardMarkup:
     )
 
 
+def idea_live_keyboard(idea_id: int) -> InlineKeyboardMarkup:
+    """The real mill card's buttons — Accept here places a real trade.
+
+    `bot.on_callback` services `idea:accept:<id>` / `idea:reject:<id>` because
+    the mill shares this bot's token and cannot poll for its own updates.
+    """
+    return InlineKeyboardMarkup(
+        [
+            [
+                InlineKeyboardButton(
+                    "Accept", callback_data=f"idea:accept:{int(idea_id)}"
+                ),
+                InlineKeyboardButton(
+                    "Reject", callback_data=f"idea:reject:{int(idea_id)}"
+                ),
+            ]
+        ]
+    )
+
+
 def missed_connection_keyboard(offer_id: str) -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(
         [

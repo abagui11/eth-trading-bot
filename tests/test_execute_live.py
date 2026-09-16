@@ -498,6 +498,50 @@ class MillSleeveTests(unittest.TestCase):
         self.assertFalse(verdict["executed"])
         self.assertEqual(verdict["skip_reason"], "not_authorized")
 
+    def test_a_funded_testers_accept_fills(self) -> None:
+        """The shipped half-measure. `LIVE_MILL_ANY_ACCEPT_FILLS` widened the
+        Accept handler's gate but not this one, so a funded tester passed the
+        check that decides whether to *try* and failed the check that decides
+        whether to *fill* — reported as `not_authorized` after their budget
+        had already been reserved."""
+        tester = 555000111
+        with patch.object(execute, "_may_fill", return_value=True):
+            verdict = execute.execute_mill_idea(
+                **self._idea(fill_type="manual", accepted_by=tester)
+            )
+        self.assertTrue(verdict["executed"], verdict.get("skip_reason"))
+
+    def test_the_executor_defers_to_one_authorization_rule(self) -> None:
+        """Holding the allowlist in two places is what caused the above."""
+        import trade_ideas_bridge
+
+        with patch.object(trade_ideas_bridge, "may_fill", return_value=True) as gate:
+            execute.execute_mill_idea(
+                **self._idea(fill_type="manual", accepted_by=777)
+            )
+        gate.assert_called_once_with(777)
+
+    def test_a_dry_run_places_nothing(self) -> None:
+        """`would_fill` has to be answerable without sending an order."""
+        with patch.object(execute, "maybe_execute_live") as place:
+            verdict = execute.execute_mill_idea(
+                **self._idea(fill_type="manual", accepted_by=self.OPERATOR),
+                dry_run=True,
+            )
+        place.assert_not_called()
+        self.assertTrue(verdict["would_fill"])
+        self.assertFalse(verdict["executed"])
+        self.assertIsNone(verdict["result"])
+
+    def test_a_dry_run_reports_the_same_refusal_as_a_real_attempt(self) -> None:
+        self._open_mill_clip(bot_config.LIVE_MILL_MAX_OPEN)
+        verdict = execute.execute_mill_idea(
+            **self._idea(fill_type="manual", accepted_by=self.OPERATOR),
+            dry_run=True,
+        )
+        self.assertFalse(verdict.get("would_fill"))
+        self.assertEqual(verdict["skip_reason"], "sleeve_full")
+
     def test_manual_at_max_reports_sleeve_full(self) -> None:
         """The 'too many trades' notification depends on this exact reason."""
         self._open_mill_clip(bot_config.LIVE_MILL_MAX_OPEN)

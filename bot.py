@@ -1576,7 +1576,7 @@ async def cmd_democard(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
     kwargs = {
         "product": str(opts["product"]), "side": str(opts["side"]),
         "mirror": bool(opts["mirror"]), "source": opts["source"],
-        "trade_id": opts["trade_id"],
+        "trade_id": opts["trade_id"], "live_idea": bool(opts["live_idea"]),
     }
     loop = asyncio.get_running_loop()
 
@@ -1625,11 +1625,41 @@ async def cmd_democard(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
                            "the bot at least once",
             "pool_disabled": "POOL_ENABLED is off",
             "render_failed": "card render failed — check the logs",
+            "nothing_fillable": "no mill idea would fill right now — every "
+                                "recent card is expired, already taken, or "
+                                "refusable at the current mark. Try again "
+                                "after the next mill cycle, or drop 'real' "
+                                "for a demo card",
         }
         await _reply(
             update,
             f"No card sent: {reasons.get(str(result.get('reason')), result.get('reason'))}",
         )
+        return
+
+    if result.get("live"):
+        lines = [
+            f"LIVE card sent to {opts['telegram_id']} — mill idea "
+            f"#{result['idea_id']}, {result['product']} "
+            f"{'long' if result['side'] == 'buy' else 'short'}",
+            f"Entry ${result['entry']:,.2f} · stop ${result['stop_loss']:,.2f} "
+            f"(spot ${result['spot']:,.2f})",
+            "Accept on this one places a real trade. It passed the fill gate "
+            "just now, which is a strong no and a weak yes — exposure and "
+            "contract-floor checks only run when the order is actually sent.",
+        ]
+        if result["quotes_a_size"]:
+            lines.append(
+                f"Their Accept risks ${result['risk_usd']:,.2f} on "
+                f"${result['notional_usd']:,.0f} notional, and deploys the "
+                f"house clip alongside it."
+            )
+        else:
+            lines.append(
+                "That account is unfunded, so it cannot take this — fund it "
+                "first or the Accept will be refused."
+            )
+        await _reply(update, "\n".join(lines))
         return
 
     origin = (
