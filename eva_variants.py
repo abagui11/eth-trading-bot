@@ -41,13 +41,10 @@ SWING_MECH = "eva_swing_mech"
 SWING_LLM = "eva_swing_llm"
 DAY = "eva_day"
 
-# SWING_MECH retired 2026-09-16: vol-conditioned geometry (bot_config
-# EVA_GEOM_*) now re-brackets the control book itself, so a paper twin of the
-# live rule measures nothing. The constant stays so historical rows in
-# variant_positions remain readable; it is out of VARIANTS/WRITABLE so no new
-# positions open and the dashboard stops listing it.
-VARIANTS: tuple[str, ...] = (CONTROL, SWING_LLM, DAY)
-WRITABLE: tuple[str, ...] = (SWING_LLM, DAY)
+GEOM = "eva_geom"
+
+VARIANTS: tuple[str, ...] = (CONTROL, SWING_MECH, SWING_LLM, DAY, GEOM)
+WRITABLE: tuple[str, ...] = (SWING_MECH, SWING_LLM, DAY, GEOM)
 
 # Every book risks the same dollars per trade, so a wider stop buys a smaller
 # position. Without this the swing arms would out-earn control by betting more
@@ -81,18 +78,23 @@ LABELS = {
     SWING_MECH: "Swing — mechanical re-bracket",
     SWING_LLM: "Swing — H12/D1 mandate",
     DAY: "Day — fast ICT",
+    GEOM: "Geometry — vol-conditioned brackets",
 }
 
 BLURBS = {
     CONTROL: "The shipped bot, untouched. LLM vision every 30 min, ~1% stop, "
              "three-rung ladder. The baseline every variant is measured against.",
-    SWING_MECH: "RETIRED 2026-09-16. Control's exact entries with a "
-                "mechanical H4-structure re-bracket — superseded by the "
-                "vol-conditioned geometry now applied to control itself.",
+    SWING_MECH: "Control's exact entries with the stop moved beyond the H4 "
+                "structure that invalidates the thesis and targets scaled out. "
+                "No LLM, no prompt change — isolates exit geometry.",
     SWING_LLM: "Same brain, swing mandate: sees H12/D1 and is told to place "
                "stops at structural invalidation and targets at HTF objectives.",
     DAY: "Fast ICT. Deterministic M1/M5 triggers gated on the last vision "
          "stance, plus day-bracketed mirrors of vision entries. Hard 4h close.",
+    GEOM: "Control's exact entries with brackets calibrated to the tape: stop "
+          "floored at 7x trailing-24h ATR, TP rungs capped at kx8xATR. The "
+          "replay-winning rule from the 09-16 regime study, run as paper "
+          "before it may touch control. Skips when ATR is unavailable.",
 }
 
 _SCHEMA = """

@@ -77,19 +77,10 @@ class TestRefusalPaths:
         assert not info["applied"]
         assert stop == 1990.0 and tps == []
 
-    def test_apply_skips_no_trade(self):
-        class S:
-            action = "no_trade"
-            entry = None
-            stop_loss = None
-            take_profits = []
-            product_id = "ETH-USD"
+class TestGeomMirror:
+    """The paper book: control's entries, conditioned brackets, never live."""
 
-        assert eg.apply_to_suggestion(S()) is None
-
-    def test_apply_uses_fetched_atr_and_mutates(self, monkeypatch):
-        monkeypatch.setattr(eg, "atr24_pct", lambda p: ATR)
-
+    def _suggestion(self):
         class S:
             action = "spot_buy"
             entry = 2000.0
@@ -97,8 +88,54 @@ class TestRefusalPaths:
             take_profits = [2200.0]
             product_id = "ETH-USD"
 
-        s = S()
-        info = eg.apply_to_suggestion(s)
-        assert info["applied"]
-        assert s.stop_loss == pytest.approx(2000.0 * (1 - 0.014))
-        assert s.take_profits[0] == pytest.approx(2032.0)
+        return S()
+
+    def test_mirror_opens_with_conditioned_brackets(self, tmp_path, monkeypatch):
+        import config
+        import eva_geom
+        import eva_variants as ev
+
+        monkeypatch.setattr(config, "LEDGER_DB", tmp_path / "t.db")
+        monkeypatch.setattr(eg, "atr24_pct", lambda p: ATR)
+
+        pid = eva_geom.mirror(self._suggestion(), cycle_id="T1")
+        assert pid is not None
+        import json
+
+        row = ev.open_positions(ev.GEOM)[0]
+        # Stop floored to 7 x 0.20% = 1.4%; TP capped at 1 x 8 x 0.20% = 1.6%.
+        assert row["stop_loss"] == pytest.approx(2000.0 * (1 - 0.014))
+        tps = row["take_profits"]
+        if isinstance(tps, str):
+            tps = json.loads(tps)
+        assert tps[0] == pytest.approx(2032.0)
+        # Control's entry untouched — the comparison isolates geometry.
+        assert row["entry"] == pytest.approx(2000.0)
+
+    def test_mirror_skips_when_atr_unavailable(self, tmp_path, monkeypatch):
+        """No ATR, no position: an unconditioned twin would blur the book."""
+        import config
+        import eva_geom
+        import eva_variants as ev
+
+        monkeypatch.setattr(config, "LEDGER_DB", tmp_path / "t.db")
+        monkeypatch.setattr(eg, "atr24_pct", lambda p: None)
+
+        assert eva_geom.mirror(self._suggestion()) is None
+        assert ev.open_positions(ev.GEOM) == []
+        assert ev.skip_counts(ev.GEOM) == 1
+
+    def test_mirror_ignores_no_trade(self, tmp_path, monkeypatch):
+        import config
+        import eva_geom
+
+        monkeypatch.setattr(config, "LEDGER_DB", tmp_path / "t.db")
+
+        class S:
+            action = "no_trade"
+            entry = None
+            stop_loss = None
+            take_profits = []
+            product_id = "ETH-USD"
+
+        assert eva_geom.mirror(S()) is None

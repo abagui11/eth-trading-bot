@@ -167,27 +167,6 @@ def run_cycle() -> list[tuple[Suggestion, list[str]]] | None:
                     llm_body, context_block
                 )
 
-            # Vol-conditioned geometry (2026-09-16): stop floored at
-            # EVA_GEOM_STOP_FLOOR_ATR x trailing-24h ATR, TP rungs capped at
-            # rank x EVA_GEOM_TP_CAP_ATR x ATR. Applied to the finalized
-            # suggestion *before* charts/ledger/paper/live so every consumer
-            # sees one set of levels. Measured on the recorded book before
-            # shipping (trade_ideas/analysis/_q0916_dynamic_geometry.py).
-            if (
-                getattr(bot_config, "EVA_GEOM_ENABLED", False)
-                and suggestion.action != "no_trade"
-            ):
-                try:
-                    import eva_geometry
-
-                    eva_geometry.apply_to_suggestion(suggestion)
-                except Exception:
-                    logger.exception(
-                        "Vol-conditioned geometry failed for %s — "
-                        "suggestion levels left as proposed",
-                        product_id,
-                    )
-
             output_paths = charts.build_trade_broadcast_charts(
                 suggestion,
                 data_by_product[product_id],
@@ -224,12 +203,14 @@ def run_cycle() -> list[tuple[Suggestion, list[str]]] | None:
             # Experiment mirrors. Paper-only books that re-bracket this same
             # suggestion; they never place an order and never touch paper.py.
             # Wrapped because a variant failing must not cost control a cycle.
-            # (eva_swing_mech retired 2026-09-16 — EVA_GEOM_* made its
-            # mechanical re-bracket redundant; see bot_config.)
             if bot_config.EVA_VARIANTS_ENABLED and suggestion.action != "no_trade":
                 try:
                     import eva_day
+                    import eva_geom
+                    import eva_swing
 
+                    eva_swing.mirror(suggestion, cycle_id=product_cycle_id)
+                    eva_geom.mirror(suggestion, cycle_id=product_cycle_id)
                     eva_day.mirror_vision_suggestion(
                         suggestion, cycle_id=product_cycle_id
                     )

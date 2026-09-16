@@ -1,4 +1,4 @@
-"""Volatility-conditioned SL/TP for Eva HQ suggestions — all active books.
+"""Volatility-conditioned SL/TP — the bracket rule behind the eva_geom book.
 
 Why this exists (measured 2026-09-16, analysis/_q0916_dynamic_geometry.py in
 trade_ideas): across the 52-entry recorded book, Eva's stop width was
@@ -23,11 +23,19 @@ flip negative. n=52, so this is calibration to the tape's measured noise
 envelope, not proof of P&L; the floor sits at the book's own p75 stop ratio
 and the cap between p25 and p50 of favorable excursion — structural anchors,
 not swept optima. The (floor, cap) plateau is broad (5–7 x 6–8 all beat
-baseline), which is what makes it shippable.
+baseline), which is what makes it testable.
+
+STATUS: paper experiment only (eva_geom book — see eva_geom.py). It shipped
+onto control/live/swing-llm on 2026-09-16 and was rolled back within the hour,
+before any position was booked under it: the rule overrides the LLM's
+structural ICT levels, and whether that breaks the vision thesis is exactly
+what the paper book must answer first. Nothing outside eva_geom.py may call
+this module to alter a live or control-book level until the book clears a
+pre-registered bar (deploy/EVA_VARIANTS_PREREG.md).
 
 ATR24 here is the study's definition exactly: trailing-24h mean M5 bar range
-as a fraction of price. If candles cannot be fetched the suggestion's own
-levels stand — this module only ever refuses to act, never guesses.
+as a fraction of price. If candles cannot be fetched, callers receive None
+and must refuse to act — this module never guesses.
 """
 from __future__ import annotations
 
@@ -129,30 +137,3 @@ def condition_levels(
     return new_stop, new_tps, info
 
 
-def apply_to_suggestion(suggestion) -> dict[str, Any] | None:
-    """Mutate a finalized HQ suggestion in place. Returns info or None."""
-    if suggestion.action == "no_trade":
-        return None
-    if not (suggestion.entry and suggestion.stop_loss and suggestion.take_profits):
-        return None
-    side = "long" if "buy" in suggestion.action else "short"
-    atr = atr24_pct(suggestion.product_id)
-    stop, tps, info = condition_levels(
-        side, float(suggestion.entry), float(suggestion.stop_loss),
-        [float(t) for t in suggestion.take_profits], atr,
-    )
-    if not info["applied"]:
-        return info
-    if info["stop_widened"] or info["tps_capped"]:
-        logger.info(
-            "eva_geometry %s %s: ATR24 %.3f%% | stop %.2f -> %.2f (%s) | "
-            "tps %s -> %s (%d capped)",
-            suggestion.product_id, side, atr,
-            info["orig_stop"], stop,
-            "floored" if info["stop_widened"] else "kept",
-            [round(t, 2) for t in info["orig_tps"]],
-            [round(t, 2) for t in tps], info["tps_capped"],
-        )
-    suggestion.stop_loss = stop
-    suggestion.take_profits = tps
-    return info

@@ -267,25 +267,6 @@ def run_swing_llm_cycle() -> dict:
             )
             continue
 
-        # Vol-conditioned geometry (2026-09-16): same floor/cap rule the HQ
-        # cycle applies to control. This *is* a coercion of the model's plan —
-        # accepted deliberately, epoch was reset the same day, so this book
-        # now scores "LLM swing entries + vol-conditioned brackets" rather
-        # than the raw plan. Validation above still gates the raw proposal.
-        if getattr(bot_config, "EVA_GEOM_ENABLED", False):
-            try:
-                import eva_geometry
-
-                stop, tps, _info = eva_geometry.condition_levels(
-                    action, entry, stop, tps,
-                    eva_geometry.atr24_pct(product_id),
-                )
-            except Exception:
-                logger.exception(
-                    "eva_swing_llm: geometry conditioning failed for %s — "
-                    "using the plan's own levels", product_id,
-                )
-
         pid = eva_variants.open_position(
             eva_variants.SWING_LLM,
             product_id=product_id,

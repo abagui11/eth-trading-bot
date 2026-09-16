@@ -21,20 +21,32 @@ thresholds, rather than later against whichever book happens to be ahead. The
 Eva Lab tab deliberately labels its front-runner a "candidate only" for the
 same reason. Evidence for the hypotheses is in `EVA_VARIANTS_PLAN.md` §1.
 
-**Amendment 2026-09-16 — experiment redesigned, epoch re-based again
-(`2026-09-16T17:00:00Z`).** Vol-conditioned geometry (`eva_geometry.py`,
-`EVA_GEOM_*`) shipped **onto control itself** — stop floored at 7×ATR24, TP
-rungs capped at k×8×ATR24, measured on the 52-entry recorded book before
-shipping (`trade_ideas/analysis/_q0916_dynamic_geometry.py`). Consequences for
-this pre-registration: (1) `eva_swing_mech` is **retired**, not falsified —
-its question ("does mechanical re-bracketing of control's entries beat
-control?") was answered by measurement and the answer shipped into control, so
-a paper twin of the live rule measures nothing; its H1/H2 comparisons below
-are void. (2) `eva_swing_llm` plans are now conditioned by the same rule after
-validation, so that book now scores "LLM swing entries + conditioned
-brackets"; its comparison to control remains fair because both books carry the
-same geometry rule. (3) Hypotheses against `eva_swing_mech` are struck;
-day-book and swing-llm-vs-control thresholds stand unchanged.
+**Amendment 2026-09-16 — a fourth arm registered: `eva_geom` (vol-conditioned
+brackets on control's entries). All existing arms and thresholds unchanged.**
+For the record: the rule briefly shipped onto control/live/swing-llm directly
+(16:56Z–17:5xZ) and was rolled back the same hour — every cycle in the window
+said `no_trade`, so zero positions were booked under it, the epoch did not
+move, and no book's sample was touched. The lesson stands with the rollback:
+the rule overrides the LLM's structural ICT levels, which is a hypothesis this
+experiment must test, not a fact it may assume.
+
+- **Arm:** `eva_geom` — control's exact entries; stop = max(LLM stop,
+  7×ATR24) capped at 4.5%; TP rung k = min(LLM rung, k×8×ATR24); 48h hard
+  close (the replay's measurement horizon). Skips (never opens a raw twin)
+  when ATR is unavailable.
+- **Registered evidence:** 52-entry replay (`trade_ideas/analysis/
+  _q0916_dynamic_geometry.py`): +0.251 mean R vs control's +0.128, placebo
+  delta +0.33; 11 tail winners truncated, none flipped negative. Parameters
+  are structural anchors on a broad plateau, not swept optima.
+- **Hypothesis H4:** `eva_geom` beats control in mean R at equal $ risk, with
+  a lower stopped-then-paid rate, *without* the LLM's structural levels
+  proving load-bearing (i.e. the truncation cost staying below the noise-stop
+  savings, as the replay claims).
+- **Falsified if:** after ≥30 resolved geom positions, mean R does not exceed
+  control's over the same entries, or the book's stopped-then-paid rate is
+  not lower than control's.
+- **Promotion bar:** same as §4 — no part of this rule touches control or
+  live until the bar clears on the forward paper book.
 
 ---
 

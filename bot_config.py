@@ -131,25 +131,31 @@ LIVE_PENDING_EXPIRY_HOURS: float = 4.0
 # its pre-registered bar in EVA_VARIANTS_PREREG.md to clear first.
 EVA_VARIANTS_ENABLED = True
 EVA_LIVE_VARIANT = "control"          # the ONLY book that trades real money
-# Compared as a string against `closed_at`, so it can carry a time. Reset
-# 2026-09-16: vol-conditioned geometry (EVA_GEOM_*) changed stop/target
-# placement on every HQ book, so positions bracketed under the old rules are
-# not measurements of the current system and must not share its sample.
-# (Previous reset 2026-09-15 was the candle-window fix.)
-EVA_EXPERIMENT_EPOCH = "2026-09-16T17:00:00Z"
+# Compared as a string against `closed_at`, so it can carry a time. It is set
+# to the moment the candle-window fix shipped rather than to midnight: every
+# position resolved before it — control's included — was walked against bars
+# that predated its own entry, so those results are not measurements of
+# anything and must not sit in the same sample as what follows.
+# (2026-09-16: vol-conditioned geometry was briefly applied to control/live/
+# swing-llm and rolled back the same hour into the eva_geom paper book below.
+# Zero positions were booked in the window — every cycle said no_trade — so
+# this epoch did not need to move.)
+EVA_EXPERIMENT_EPOCH = "2026-09-15T15:10:00Z"
 
-# Vol-conditioned geometry — applied to every finalized HQ suggestion (control
-# paper, live, mirrors) and to swing-LLM plans. Measured before shipping on
-# the 52-entry recorded book (trade_ideas/analysis/_q0916_dynamic_geometry.py):
-# replay mean R +0.128 -> +0.251, placebo delta +0.33; cost is truncated tail
-# winners (none flipped negative). The floor is the book's own p75 stop/ATR
-# ratio and the cap sits between p25 and p50 of 48h favorable excursion —
-# structural anchors on a broad plateau (floor 5-7 x cap 6-8 all beat
-# baseline), not swept optima. n=52: calibration, not proof.
+# eva_geom — control's exact entries, vol-conditioned brackets. PAPER ONLY:
+# the rule replay-won on the recorded book (trade_ideas/analysis/
+# _q0916_dynamic_geometry.py: mean R +0.128 -> +0.251, placebo delta +0.33,
+# cost = truncated tail winners, none flipped negative) but overriding the
+# LLM's structural ICT levels is itself an untested hypothesis, so it earns a
+# forward paper book before it may touch control. The floor is the recorded
+# book's p75 stop/ATR ratio and the cap sits between p25 and p50 of 48h
+# favorable excursion — structural anchors on a broad plateau (floor 5-7 x
+# cap 6-8 all beat baseline), not swept optima. n=52: calibration, not proof.
 EVA_GEOM_ENABLED = True
 EVA_GEOM_STOP_FLOOR_ATR = 7.0   # stop >= 7 x trailing-24h mean M5 range %
 EVA_GEOM_TP_CAP_ATR = 8.0       # TP rung k <= k x 8 x ATR24 from entry
 EVA_GEOM_MAX_STOP_PCT = 0.045   # hard ceiling on the floored stop (4.5%)
+EVA_GEOM_MAX_HOLD_H = 48.0      # the replay's horizon; unresolved = unmeasured
 
 # Equal dollar risk per trade across all books, so a wider stop buys a smaller
 # position. Without this the swing arms would beat control by betting more.
@@ -163,14 +169,13 @@ EVA_DAY_TP_R = 1.0                    # single near target, swept in paper
 EVA_DAY_MIN_STOP_PCT = 0.0015         # 0.15% — below this the stop is spread
 EVA_DAY_MAX_STOP_PCT = 0.0060         # 0.60% — above this it is not a day trade
 
-# Swing-arm shared knobs (eva_swing_llm; also bound the retired mech arm).
-# eva_swing_mech was retired 2026-09-16: its whole purpose was testing
-# mechanical re-bracketing of control's entries, which EVA_GEOM_* now does on
-# the control book itself — a paper twin of the live rule measures nothing.
-# Historical rows remain in variant_positions under 'eva_swing_mech'.
+# eva_swing_mech — control's entries, structural stop, no LLM.
 EVA_SWING_MAX_HOLD_H = 168.0          # 7 days
-EVA_SWING_MIN_STOP_PCT = 0.010        # 1.0% — swing-LLM plan validation floor
-EVA_SWING_MAX_STOP_PCT = 0.045        # 4.5% — swing-LLM plan validation ceiling
+EVA_SWING_TP_RUNGS = (1.5, 3.0, 5.0)  # control's ladder shape, swing distances
+EVA_SWING_MIN_STOP_PCT = 0.010        # 1.0% — floor, roughly control's stop
+EVA_SWING_MAX_STOP_PCT = 0.045        # 4.5% — ceiling on structural placement
+EVA_SWING_FALLBACK_STOP_PCT = 0.025   # used when H4 pivots are unavailable
+EVA_SWING_ATR_BUFFER = 0.5            # ATR multiples beyond the swing
 # Reach is tested on the furthest rung, not the nearest: with a structural (so
 # wide) stop, a real intermediate objective can legitimately sit under 1R.
 EVA_SWING_MIN_FIRST_TARGET_R = 0.5
