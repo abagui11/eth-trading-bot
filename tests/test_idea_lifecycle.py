@@ -230,6 +230,45 @@ class ExpiryTests(IdeasDbTestCase):
         self.assertFalse(verdict["executed"])
         self.assertEqual(verdict["skip_reason"], "expired")
 
+    def test_a_card_that_never_qualified_is_not_blamed_on_the_market(self) -> None:
+        """Idea #1027 refused an Accept made seconds after it posted, saying
+        the market had moved. It had not: the card's targets averaged 0.79R
+        against a 1.0R floor at its own mint price, so it was never fillable.
+        Blaming drift sent us looking for a latency bug that did not exist.
+        """
+        reply = bridge.format_manual_fill_reply(
+            {"executed": False, "skip_reason": "rr_collapsed",
+             "born_rr": 0.79, "revalidation": {"spot": 2379.5},
+             "capacity": {}},
+            1027,
+        )
+        self.assertIn("did not clear the risk:reward floor", reply)
+        self.assertIn("0.79R", reply)
+        self.assertNotIn("the market moved", reply)
+
+    def test_a_card_that_did_qualify_still_reports_drift(self) -> None:
+        reply = bridge.format_manual_fill_reply(
+            {"executed": False, "skip_reason": "chased", "born_rr": 2.5,
+             "revalidation": {"spot": 2379.5}, "capacity": {}},
+            1027,
+        )
+        self.assertIn("the market moved", reply)
+
+    def test_rr_at_mint_scores_the_published_plan(self) -> None:
+        """The exact numbers off idea #1027."""
+        rr = bridge._rr_at_mint({
+            "entry": 2383.98, "stop_loss": 2445.61, "direction": "short",
+            "take_profits_json": "[2360.87, 2337.76, 2306.94]",
+        })
+        self.assertAlmostEqual(rr, 0.79, places=2)
+
+    def test_rr_at_mint_is_zero_when_no_target_is_ahead(self) -> None:
+        rr = bridge._rr_at_mint({
+            "entry": 2300.0, "stop_loss": 2350.0, "direction": "short",
+            "take_profits_json": "[2400.0]",
+        })
+        self.assertEqual(rr, 0.0)
+
     def test_the_operator_is_told_the_card_expired(self) -> None:
         reply = bridge.format_manual_fill_reply(
             {"executed": False, "skip_reason": "expired", "capacity": {}}, 42

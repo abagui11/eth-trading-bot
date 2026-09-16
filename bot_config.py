@@ -315,6 +315,14 @@ LIVE_MILL_AUTO_MIN_CONFIDENCE = 0.5
 # Telegram ids whose Accept fills a real clip, bypassing the conviction gate.
 # Everyone else's Accept stays paper-only (user_paper_trades).
 LIVE_MILL_FILL_TELEGRAM_IDS: tuple[int, ...] = (8282981740, 2037245798)
+# Widen that to any approved, funded tester. Without it a tester's Accept only
+# reserves a claim against a house fill, and the house filled 62 of 544 recent
+# ideas — so the common outcome was "you're in if it fills" followed by nothing.
+# The cost of turning it on: a tester's tap deploys house money at house size,
+# and trade selection moves from "auto-fill takes the first qualifying mint" to
+# "whatever someone taps". Sleeve caps still bound exposure; the selection
+# change is **unmeasured** and was shipped as a deliberate product call.
+LIVE_MILL_ANY_ACCEPT_FILLS: bool = True
 
 # --- Accept-time revalidation -------------------------------------------
 # An idea is priced when it is minted and filled whenever someone taps Accept,

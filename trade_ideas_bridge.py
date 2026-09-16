@@ -340,13 +340,34 @@ def _mark_idea_live_fill(
     )
 
 
+def may_fill(user_id: int) -> bool:
+    """Whose Accept is allowed to take a real mill clip.
+
+    `LIVE_MILL_ANY_ACCEPT_FILLS` widens this from the operator allowlist to any
+    approved, funded tester, so an Accept puts them in the trade there and then
+    instead of reserving against a house fill that lands 62 times in 544. Note
+    what it also means: a tester's tap now deploys **house** money at house
+    size. The sleeve caps still bound total exposure, but which trades get
+    taken moves from "auto-fill takes the first qualifying mint" to "whatever
+    someone taps", and that selection change is unmeasured.
+    """
+    if is_fill_operator(user_id):
+        return True
+    if not getattr(bot_config, "LIVE_MILL_ANY_ACCEPT_FILLS", False):
+        return False
+    if not bot_config.POOL_ENABLED:
+        return False
+    import pool
+    return pool.is_approved(user_id) and pool.is_funded(user_id)
+
+
 def request_manual_fill(idea_id: int, user_id: int) -> dict[str, Any]:
-    """Fill a real mill clip from an operator's Accept.
+    """Fill a real mill clip from an Accept.
 
     Blocking (SQLite + Coinbase REST) — call it off the event loop. Fail-soft:
     any error reports a skip so the Accept itself still succeeds.
     """
-    if not is_fill_operator(user_id):
+    if not may_fill(user_id):
         return {"executed": False, "skip_reason": "not_authorized"}
 
     conn = _connect()
@@ -395,12 +416,69 @@ def request_manual_fill(idea_id: int, user_id: int) -> dict[str, Any]:
                     _mark_idea_live_fill(conn, int(idea_id), "manual", int(user_id))
             except sqlite3.Error:
                 logger.exception("manual fill idea tag failed for #%s", idea_id)
+        else:
+            verdict["born_rr"] = _rr_at_mint(dict(row))
         return verdict
     except Exception:
         logger.exception("manual fill failed for idea #%s", idea_id)
         return {"executed": False, "skip_reason": "error"}
     finally:
         conn.close()
+
+
+def _rr_at_mint(row: dict[str, Any]) -> float | None:
+    """The fill gate's own R:R measure, scored at the idea's published entry.
+
+    Below `LIVE_MIN_FILL_RR` here means the card was refusable from the moment
+    it was created — no market movement required. Telling someone "the market
+    moved since it was posted" in that case is simply untrue, and it sent us
+    looking for a latency bug that did not exist.
+    """
+    try:
+        entry = float(row["entry"])
+        stop = float(row["stop_loss"])
+        tps = _parse_take_profits(row["take_profits_json"])
+    except (TypeError, ValueError, KeyError):
+        return None
+    risk = abs(entry - stop)
+    if risk <= 0 or not tps:
+        return None
+    long = str(row.get("direction") or "") == "long"
+    ahead = [t for t in tps if (t > entry if long else t < entry)]
+    if not ahead:
+        return 0.0
+    return abs(sum(ahead) / len(ahead) - entry) / risk
+
+
+# Plain-language refusals for a tester, who did not write the plan and should
+# not be shown an internal skip code.
+_SKIP_PLAIN = {
+    "rr_collapsed": "From here it would risk more than it stands to make.",
+    "chased": "Price has already run past the entry — taking it now would be "
+              "chasing.",
+    "stop_breached": "Price has already traded through the stop, so the setup "
+                     "is invalid.",
+    "targets_passed": "Price has already reached the targets — there is no "
+                      "room left in it.",
+    "sleeve_full": "We're already holding the maximum number of trades. A slot "
+                   "has to close before another opens.",
+    "halted": "Live trading is paused right now.",
+    "expired": "The card timed out before this went through — the levels were "
+               "too old to trade.",
+    "loss_cooldown": "This market has stopped us out several times in a row, "
+                     "so it's on a short cooldown.",
+    "bad_levels": "The idea's levels are inconsistent, so it was not placed.",
+    "no_mark": "No live price was available to check it against.",
+    "not_authorized": "Your account isn't set up to take live fills yet.",
+}
+
+
+def explain_skip(reason: str | None) -> str:
+    """One honest sentence a tester can act on."""
+    return _SKIP_PLAIN.get(
+        str(reason or ""),
+        "The setup no longer qualified when the order was about to go in.",
+    )
 
 
 # Refusals that mean "the plan was fine, the price is not any more".
@@ -678,9 +756,29 @@ def format_manual_fill_reply(verdict: dict[str, Any], idea_id: int) -> str | Non
     if reason in _STALE_REASONS:
         rv = verdict.get("revalidation") or {}
         spot = rv.get("spot")
-        head = f"Idea #{idea_id} was NOT filled — the market moved since it was posted."
-        detail = _STALE_REASONS[reason]
-        lines = [head, "", detail]
+        born = verdict.get("born_rr")
+        floor = float(bot_config.LIVE_MIN_FILL_RR)
+        # Don't blame drift for a card that never qualified. 37.5% of recent
+        # mill ideas fail this gate at their own mint price, and reporting
+        # those as "the market moved" sent us hunting a latency bug instead of
+        # the geometry.
+        never = born is not None and born < floor
+        if never:
+            lines = [
+                f"Idea #{idea_id} was NOT filled — it did not clear the "
+                "risk:reward floor.",
+                "",
+                f"Its targets averaged {born:.2f}R against the {floor:.2f}R "
+                "minimum when it was posted, so this one was never fillable — "
+                "the market moving is not what stopped it.",
+            ]
+        else:
+            lines = [
+                f"Idea #{idea_id} was NOT filled — the market moved since it "
+                "was posted.",
+                "",
+                _STALE_REASONS[reason],
+            ]
         if spot:
             lines.append(f"Mark is now {_fmt_px(spot)}.")
         lines.append("Wait for the next card rather than chasing this one.")

@@ -29,6 +29,7 @@ import notify
 import pool
 import research
 import telegram_ui
+import trade_ideas_bridge
 from telegram.error import BadRequest
 
 ADMIN = 555000
@@ -294,6 +295,109 @@ class DemoCardTests(unittest.TestCase):
     def test_malformed_demo_data_is_ignored(self) -> None:
         context = self._press("maybe")
         context.bot.send_message.assert_not_awaited()
+
+
+class PoolMillAcceptTests(unittest.TestCase):
+    """A funded tester's Accept on a mill card.
+
+    Two properties, both learned the hard way. It must *fill* rather than
+    reserve-and-hope, because the house filled 62 of 544 recent ideas and the
+    common outcome was "you're in if it fills" followed by nothing. And when it
+    cannot fill, the money must come back **now**, with the real reason, rather
+    than sitting pending until a sweep notices up to two hours later.
+    """
+
+    def setUp(self) -> None:
+        self._tmp = tempfile.TemporaryDirectory(ignore_cleanup_errors=True)
+        db = Path(self._tmp.name) / "ledger.db"
+        self._patches = [
+            patch.object(config, "LEDGER_DB", db),
+            patch.object(bot_config, "POOL_ENABLED", True),
+            patch.object(bot_config, "POOL_ADMIN_TELEGRAM_IDS", (ADMIN,)),
+            patch.object(bot_config, "POOL_RISK_PCT", 0.007),
+            patch.object(bot_config, "POOL_MIN_EQUITY_USD", 500.0),
+            patch.object(bot_config, "LIVE_MILL_ANY_ACCEPT_FILLS", True),
+            patch.object(bot_config, "LIVE_MILL_FILL_TELEGRAM_IDS", (ADMIN,)),
+        ]
+        for p in self._patches:
+            p.start()
+            self.addCleanup(p.stop)
+        self.addCleanup(self._tmp.cleanup)
+        pool.init_db()
+        access.init_db()
+        pool.approve_user(UID, admin_id=ADMIN)
+        pool.credit(UID, 1000.0, admin_id=ADMIN, ref="fund")
+
+    def _accept(self, verdict: dict):
+        with patch.object(trade_ideas_bridge, "idea_pool_open", return_value=True), \
+                patch.object(trade_ideas_bridge, "request_manual_fill",
+                             return_value=verdict) as fill:
+            reply = bot._pool_mill_accept(1025, UID)
+        return reply, fill
+
+    def test_an_accept_fills_there_and_then(self) -> None:
+        reply, fill = self._accept({
+            "executed": True,
+            "result": {"trade_id": 7, "fill": 2380.0},
+        })
+        fill.assert_called_once_with(1025, UID)
+        self.assertIn("You're in", reply)
+
+    def test_the_intent_exists_before_the_fill_is_attempted(self) -> None:
+        """Ordering is load-bearing: the pooled aggregation in
+        execute_mill_idea resolves intents by ref, so an intent recorded after
+        the fill would leave the tester out of the order they just joined."""
+        seen: dict = {}
+
+        def _capture(idea_id, user_id):
+            seen["pending"] = pool.pending_intents(f"mill_{idea_id}")
+            return {"executed": True, "result": {"trade_id": 7, "fill": 2380.0}}
+
+        with patch.object(trade_ideas_bridge, "idea_pool_open", return_value=True), \
+                patch.object(trade_ideas_bridge, "request_manual_fill", _capture):
+            bot._pool_mill_accept(1025, UID)
+
+        self.assertEqual(len(seen["pending"]), 1)
+        self.assertEqual(int(seen["pending"][0]["telegram_id"]), UID)
+
+    def test_a_refusal_returns_the_money_immediately(self) -> None:
+        reply, _ = self._accept({"executed": False, "skip_reason": "rr_collapsed"})
+
+        self.assertEqual(pool.pending_intents("mill_1025"), [])
+        self.assertEqual(float(pool.get_account(UID)["reserved_usd"]), 0.0)
+        self.assertEqual(float(pool.get_account(UID)["cash_usd"]), 1000.0)
+        self.assertIn("Not filled", reply)
+        self.assertIn("nothing was risked", reply)
+
+    def test_a_refusal_says_why_in_words_a_tester_can_act_on(self) -> None:
+        reply, _ = self._accept({"executed": False, "skip_reason": "sleeve_full"})
+        self.assertIn("maximum number of trades", reply)
+        self.assertNotIn("sleeve_full", reply)
+
+    def test_an_unknown_skip_reason_still_returns_the_money(self) -> None:
+        reply, _ = self._accept({"executed": False, "skip_reason": "wat"})
+        self.assertEqual(float(pool.get_account(UID)["reserved_usd"]), 0.0)
+        self.assertIn("no longer qualified", reply)
+
+    def test_a_crash_in_the_fill_does_not_strand_the_reserve_silently(self) -> None:
+        """Fail-soft, but the tester is told they are still pending rather
+        than told they are in."""
+        with patch.object(trade_ideas_bridge, "idea_pool_open", return_value=True), \
+                patch.object(trade_ideas_bridge, "request_manual_fill",
+                             side_effect=RuntimeError("coinbase 503")):
+            reply = bot._pool_mill_accept(1025, UID)
+        self.assertIn("You're in if it fills", reply)
+        self.assertEqual(len(pool.pending_intents("mill_1025")), 1)
+
+    def test_an_unfunded_tester_cannot_trigger_a_house_fill(self) -> None:
+        """The flag deploys house money, so it must require a real stake."""
+        pool.approve_user(999123, admin_id=ADMIN)
+        self.assertFalse(trade_ideas_bridge.may_fill(999123))
+
+    def test_the_flag_off_restores_the_operator_allowlist(self) -> None:
+        with patch.object(bot_config, "LIVE_MILL_ANY_ACCEPT_FILLS", False):
+            self.assertFalse(trade_ideas_bridge.may_fill(UID))
+            self.assertTrue(trade_ideas_bridge.may_fill(ADMIN))
 
 
 class SendDemoCardTests(unittest.TestCase):

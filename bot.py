@@ -273,13 +273,81 @@ def _pool_demo_accept(token: str, user_id: int) -> str:
 
 
 def _pool_mill_accept(idea_id: int, user_id: int) -> str:
-    """A funded tester's Accept on a mill card → pool intent (sync, executor)."""
+    """A funded tester's Accept on a mill card (sync, executor).
+
+    Order matters: the intent is recorded **before** the fill is attempted, so
+    the pooled aggregation in `execute_mill_idea` sees this tester's budget and
+    they ride the same fill at the same price.
+
+    If the fill is refused, the intent is released right here rather than left
+    pending. Previously an Accept on an idea that could never fill reserved the
+    money and said "you're in if it fills", and the tester heard nothing until
+    the stale sweep caught it up to two hours later. The refusal reason is
+    known at this moment; sitting on it helps nobody.
+    """
+    ref = f"mill_{idea_id}"
     if not trade_ideas_bridge.idea_pool_open(idea_id):
         return (
             "This idea has already filled or expired — your Accept came after "
             "the window, so you're not in this one."
         )
-    return _pool_intent_reply(pool.record_intent(f"mill_{idea_id}", user_id))
+
+    recorded = pool.record_intent(ref, user_id)
+    if not recorded.get("ok"):
+        return _pool_intent_reply(recorded)
+
+    if not trade_ideas_bridge.may_fill(user_id):
+        return _pool_intent_reply(recorded)
+
+    try:
+        verdict = trade_ideas_bridge.request_manual_fill(idea_id, user_id)
+    except Exception:
+        logger.exception("pool-triggered mill fill failed for idea %s", idea_id)
+        return _pool_intent_reply(recorded)
+
+    if verdict.get("executed"):
+        return _pool_fill_reply(recorded, verdict, user_id)
+
+    # Refused, and we know why now.
+    released = pool.release_intents(ref, status="missed")
+    mine = next(
+        (r for r in released if int(r["telegram_id"]) == int(user_id)), None
+    )
+    back = float(mine["risk_usd"]) if mine else float(recorded.get("risk_usd") or 0)
+    why = trade_ideas_bridge.explain_skip(verdict.get("skip_reason"))
+    return (
+        f"Not filled — nothing was risked and your ${back:,.2f} is free "
+        f"again.\n\n{why}\n\nI'll send the next card when one sets up."
+    )
+
+
+def _pool_fill_reply(recorded: dict, verdict: dict, user_id: int) -> str:
+    """Confirm a tester is in, quoting the share they actually got.
+
+    Their real share can be smaller than the reservation implied: the venue
+    fills whole contracts, so a budget that did not grow the order still buys a
+    pro-rata slice of it. Quote the stake, not the intent.
+    """
+    result = verdict.get("result") or {}
+    trade_id = result.get("trade_id")
+    fill = float(result.get("fill") or 0)
+    stake = None
+    if trade_id is not None:
+        stake = next(
+            (s for s in pool.open_stakes_for(int(trade_id))
+             if int(s["telegram_id"]) == int(user_id)), None
+        )
+    if stake is None:
+        return _pool_intent_reply(recorded)
+
+    notional = float(stake["qty"]) * fill if fill else float(stake["cost_usd"])
+    return (
+        f"You're in — filled at ${fill:,.2f}.\n\n"
+        f"Your share: ${notional:,.2f} notional, "
+        f"${float(stake['risk_usd']):,.2f} at risk. Same fill price as the "
+        "house. Exits are automatic — I'll DM you when it closes. "
+        "/portfolio any time."
+    )
 
 
 async def _handle_chart(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
