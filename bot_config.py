@@ -440,6 +440,14 @@ POOL_PAYOUTS_ENABLED: bool = True
 # Turning this off pays out to an address whose owner is unproven, which is
 # the failure that loses a tester's money to whoever took their account.
 POOL_REQUIRE_VERIFIED_WALLET: bool = True
+# Send a withdrawal as soon as it clears the coded limits, rather than holding
+# it for an admin tap. The approval step was never making a decision — halt,
+# caps, a chain-verified destination and the balance check all run at request
+# time — so all it added was however long it took someone to see the message.
+# A tester watching their own money sit still learns something about us that
+# no amount of copy undoes. Turning this off restores the Approve/Deny card,
+# which is the thing to do if a payout ever needs a human look.
+POOL_AUTO_APPROVE_WITHDRAWALS: bool = True
 
 # Macro headline context (RSS + webhook advisory layer).
 MACRO_CONTEXT_ENABLED = True

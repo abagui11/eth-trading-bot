@@ -107,9 +107,9 @@ CREATE TABLE IF NOT EXISTS pool_deposit_requests (
     decided_by INTEGER
 );
 
--- One on-chain transfer credits exactly once. The deposit address is shared
--- with the yield sleeve's wallet, so the txid is the only thing that tells a
--- tester's transfer apart from house capital sitting in the same place --
+-- One on-chain transfer credits exactly once. Testers and the house fund the
+-- same Coinbase deposit address, so the txid is the only thing that tells a
+-- tester's transfer apart from house capital arriving in the same place --
 -- which makes double-crediting one hash the way a tester's balance silently
 -- becomes someone else's money. Denied requests are excluded so a hash can be
 -- re-filed after a typo'd amount.
@@ -1550,11 +1550,23 @@ def request_withdrawal(telegram_id: int, amount_usd: float) -> dict[str, Any]:
                     "max_usd": max(round(available - reserve, 2), 0.0),
                     "fee_reserve_usd": reserve}
 
+        # Auto-approval is not a relaxation of any check. Everything that
+        # decides whether this payout may happen — halt switch, payouts flag,
+        # minimum, per-request cap, per-user and global daily caps, a
+        # chain-verified destination, and the available balance read inside
+        # this very transaction — has already run above. The admin step added
+        # human latency to a decision no human was making, which meant a
+        # tester's money sat still because someone was asleep.
+        auto = bool(getattr(bot_config, "POOL_AUTO_APPROVE_WITHDRAWALS", False))
+        now = _now()
         cur = conn.execute(
             "INSERT INTO pool_withdrawals (telegram_id, amount_usd, fee_usd, "
-            "debited_usd, to_address, status, requested_at) "
-            "VALUES (?, ?, ?, ?, ?, 'requested', ?)",
-            (telegram_id, amount_usd, reserve, debit_total, address, _now()),
+            "debited_usd, to_address, status, requested_at, approved_at, note) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            (telegram_id, amount_usd, reserve, debit_total, address,
+             "approved" if auto else "requested", now,
+             now if auto else None,
+             "auto-approved: within caps" if auto else None),
         )
         wid = int(cur.lastrowid)
         booked = _apply_event(
@@ -1571,7 +1583,7 @@ def request_withdrawal(telegram_id: int, amount_usd: float) -> dict[str, Any]:
     )
     return {"ok": True, "withdrawal_id": wid, "amount_usd": amount_usd,
             "fee_reserve_usd": reserve, "debited_usd": debit_total,
-            "address": address,
+            "address": address, "auto_approved": auto,
             "cash_usd": float((get_account(telegram_id) or {}).get("cash_usd") or 0)}
 
 

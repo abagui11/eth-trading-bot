@@ -404,7 +404,7 @@ def format_deposit_instructions(
         "",
         "*The hash is what credits you.* We watch the exchange for it and "
         "credit your balance automatically the moment your transfer settles — "
-        "usually a few minutes, no waiting on anyone. Send from your "
+        "usually about 5 minutes, no waiting on anyone. Send from your "
         "registered wallet so we can also confirm the wallet is yours.",
         "",
         f"Only USDC, only on {network}. Anything else sent to that address "

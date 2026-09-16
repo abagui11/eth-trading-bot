@@ -362,6 +362,10 @@ class WithdrawalTests(PoolTestCase):
         self._patch(bot_config, "POOL_MAX_USER_DAILY_WITHDRAWAL_USD", 2500.0)
         self._patch(bot_config, "POOL_MAX_GLOBAL_DAILY_WITHDRAWAL_USD", 5000.0)
         self._patch(bot_config, "POOL_PAYOUTS_ENABLED", True)
+        # Most of this class exercises the admin-gated lifecycle (approve,
+        # reject, refund), which only exists on a `requested` row. The
+        # auto-approval cases opt back in explicitly.
+        self._patch(bot_config, "POOL_AUTO_APPROVE_WITHDRAWALS", False)
         pool.approve_user(ALICE, admin_id=ADMIN)
         self.alice_wallet = self._wallet(ALICE)
         pool.mark_wallet_verified(self.alice_wallet)
@@ -371,6 +375,61 @@ class WithdrawalTests(PoolTestCase):
         p = patch.object(target, attr, value)
         p.start()
         self.addCleanup(p.stop)
+
+    def test_auto_approved_payouts_still_obey_every_limit(self) -> None:
+        """Auto-approval removes a human step, not a check.
+
+        The admin tap never decided anything — halt, caps, destination and
+        balance all resolve at request time. If any of them stopped enforcing
+        when the human left, this is where a tester's money walks out.
+        """
+        self._patch(bot_config, "POOL_AUTO_APPROVE_WITHDRAWALS", True)
+        cases = {
+            "below_minimum": lambda: pool.request_withdrawal(ALICE, 5.0),
+            "above_max": lambda: pool.request_withdrawal(ALICE, 99_000.0),
+            # Under the per-request cap, over the balance.
+            "insufficient_available": lambda: pool.request_withdrawal(ALICE, 1200.0),
+        }
+        for reason, call in cases.items():
+            with self.subTest(reason=reason):
+                self.assertEqual(call().get("reason"), reason)
+
+        pool.halt_payouts("testing")
+        self.assertEqual(pool.request_withdrawal(ALICE, 100.0)["reason"], "halted")
+        pool.resume_payouts()
+
+        # An unverified destination is still refused: return-to-source is the
+        # guard that auto-approval leans on hardest.
+        pool.approve_user(BOB, admin_id=ADMIN)
+        pool.credit(BOB, 1000.0, admin_id=ADMIN, ref="seed-bob")
+        self._wallet(BOB)  # registered but never proven on-chain
+        self.assertFalse(pool.request_withdrawal(BOB, 100.0)["ok"])
+
+    def test_auto_approval_sends_without_an_admin(self) -> None:
+        self._patch(bot_config, "POOL_AUTO_APPROVE_WITHDRAWALS", True)
+        result = pool.request_withdrawal(ALICE, 100.0)
+        self.assertTrue(result["ok"], result)
+        self.assertTrue(result["auto_approved"])
+        # The payout sweep picks up `approved`, so this goes out on the next
+        # 60s pass with nobody in the loop.
+        queued = [w["id"] for w in pool.pending_withdrawals("approved")]
+        self.assertIn(int(result["withdrawal_id"]), queued)
+        row = pool.get_withdrawal(int(result["withdrawal_id"]))
+        self.assertEqual(row["status"], "approved")
+        self.assertIsNotNone(row["approved_at"])
+        self.assertIsNone(row["approved_by"])  # no human claimed it
+
+    def test_the_flag_off_restores_the_admin_gate(self) -> None:
+        self._patch(bot_config, "POOL_AUTO_APPROVE_WITHDRAWALS", False)
+        result = pool.request_withdrawal(ALICE, 100.0)
+        self.assertTrue(result["ok"], result)
+        self.assertFalse(result.get("auto_approved"))
+        self.assertEqual(pool.pending_withdrawals("approved"), [])
+        wid = int(result["withdrawal_id"])
+        self.assertEqual(pool.get_withdrawal(wid)["status"], "requested")
+        self.assertTrue(
+            pool.decide_withdrawal(wid, admin_id=ADMIN, approve=True)["ok"]
+        )
 
     def test_the_debit_happens_at_request_time(self) -> None:
         """Money is taken when the request is made, not when it is sent.

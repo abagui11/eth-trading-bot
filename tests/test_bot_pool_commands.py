@@ -97,15 +97,18 @@ class PoolCommandTests(unittest.TestCase):
         update, _ = self._run(bot.cmd_withdraw)
         self.assertIn("Available now", self._texts(update))
 
-    def test_withdraw_confirms_and_cards_the_admin(self) -> None:
-        """The debit happens before the reply, so a failure here means money
-        held with nobody told. Both notifications must actually go out."""
+    def _fund_for_withdrawal(self) -> None:
         pool.approve_user(UID, admin_id=ADMIN)
         pool.register_wallet(UID, WALLET)
         pool.mark_wallet_verified(WALLET)
         pool.credit(UID, 1000.0, admin_id=ADMIN, ref="t")
 
-        update, context = self._run(bot.cmd_withdraw, ["100"])
+    def test_withdraw_confirms_and_cards_the_admin(self) -> None:
+        """The debit happens before the reply, so a failure here means money
+        held with nobody told. Both notifications must actually go out."""
+        self._fund_for_withdrawal()
+        with patch.object(bot_config, "POOL_AUTO_APPROVE_WITHDRAWALS", False):
+            update, context = self._run(bot.cmd_withdraw, ["100"])
 
         self.assertIn("queued", self._texts(update))
         pending = pool.pending_withdrawals("requested")
@@ -113,6 +116,26 @@ class PoolCommandTests(unittest.TestCase):
         # The admin card is what makes the payout progress at all.
         self.assertEqual(context.bot.send_message.await_count, 1)
         self.assertEqual(context.bot.send_message.await_args.args[0], ADMIN)
+        self.assertIsNotNone(context.bot.send_message.await_args.kwargs["reply_markup"])
+
+    def test_an_auto_approved_withdrawal_waits_on_nobody(self) -> None:
+        """The admin was never deciding anything — every limit resolves at
+        request time — so the tap only added however long it took them to look."""
+        self._fund_for_withdrawal()
+        with patch.object(bot_config, "POOL_AUTO_APPROVE_WITHDRAWALS", True):
+            update, context = self._run(bot.cmd_withdraw, ["100"])
+
+        text = self._texts(update)
+        self.assertIn("approved", text)
+        self.assertNotIn("queued", text)
+        # Tells them how long, so they are not left watching the screen.
+        self.assertIn("five minutes", text)
+        self.assertEqual(pool.pending_withdrawals("approved")[0]["telegram_id"], UID)
+
+        # Admin is still told, but offered no buttons: Approve/Deny act only
+        # on a `requested` row, so they would be controls that do nothing.
+        self.assertEqual(context.bot.send_message.await_args.args[0], ADMIN)
+        self.assertIsNone(context.bot.send_message.await_args.kwargs["reply_markup"])
 
     def test_a_markdown_failure_still_delivers_the_text(self) -> None:
         """Telegram refuses a whole message it cannot parse. On this path that

@@ -1524,8 +1524,11 @@ async def cmd_deposit(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
     await _reply(
         update,
         f"Got it — watching the exchange for that transfer (#{request_id}).\n\n"
+        "Give it about 5 minutes. That's the Ethereum confirmations plus the "
+        "exchange crediting it; a busy network can make it longer.\n\n"
         "You'll be credited automatically the moment it settles, and I'll "
-        "message you here with your balance. Nothing else for you to do.",
+        "message you here with your new balance. Nothing else for you to do — "
+        "you don't need to wait on this screen.",
     )
     name = f"@{user.username}" if user.username else str(user.id)
     txid_line = f"\ntxid: `{result['txid']}`" if result.get("txid") else ""
@@ -1844,6 +1847,9 @@ async def cmd_withdraw(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
             "network fee comes out of your balance on top of the amount, so "
             "you receive exactly what you ask for.",
             "",
+            *(["Withdrawals send automatically — nobody has to approve them. "
+               "Expect the money in your wallet within about five minutes.", ""]
+              if bot_config.POOL_AUTO_APPROVE_WITHDRAWALS else []),
             "Funds go back to the wallet you registered, and nowhere else "
             "(/wallet to check).",
             "",
@@ -1864,13 +1870,23 @@ async def cmd_withdraw(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         return
 
     wid = int(result["withdrawal_id"])
+    auto = bool(result.get("auto_approved"))
+    timing = (
+        "It goes out on the next payout pass — usually within a minute or "
+        "two, and on-chain a minute or so after that. Call it under five "
+        "minutes end to end."
+        if auto else
+        "It's queued for a final check before sending."
+    )
     await _reply(
         update,
-        f"Withdrawal #{wid} queued: *${amount:,.2f}*\n"
+        f"Withdrawal #{wid} {'approved' if auto else 'queued'}: *${amount:,.2f}*\n"
         f"To: `{result['address']}`\n\n"
         f"${float(result['debited_usd']):,.2f} is held from your balance "
         "(the extra covers the network fee; anything unused comes back).\n\n"
-        "You'll get a message here the moment it's sent.",
+        f"{timing}\n\n"
+        "I'll message you when it's sent, and again when it lands in your "
+        "wallet. You don't need to wait here.",
         markdown=True,
     )
 
@@ -1881,9 +1897,17 @@ async def cmd_withdraw(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
                 f"Withdrawal #{wid}: *${amount:,.2f}* for "
                 f"`{user.id}` ({user.username or 'no handle'})\n"
                 f"To: `{result['address']}`\n"
-                f"Balance after hold: ${float(result['cash_usd']):,.2f}",
+                f"Balance after hold: ${float(result['cash_usd']):,.2f}"
+                + ("\n\n_Auto-approved — within caps, destination verified. "
+                   "Sending on the next pass._" if auto else ""),
                 parse_mode="Markdown",
-                reply_markup=telegram_ui.pool_admin_withdrawal_keyboard(wid),
+                # No Approve/Deny on an auto-approved payout: those buttons
+                # only act on a `requested` row, so offering them would be
+                # offering control that is not there.
+                reply_markup=(
+                    None if auto
+                    else telegram_ui.pool_admin_withdrawal_keyboard(wid)
+                ),
             )
         except Exception:
             logger.exception("Withdrawal admin card failed for %s", admin)

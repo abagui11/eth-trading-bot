@@ -337,10 +337,27 @@ confirm in the Coinbase UI before anyone sends to it.
 
 #### Withdrawals
 
-`/withdraw 100` debits the tester immediately and queues a payout; you get a
-**Send / Reject** card. Approving only *queues* it — `watchdog._payout_sweep`
-does the sending within a minute, one payout at a time. Rejecting refunds in
-full.
+`/withdraw 100` debits the tester immediately and — with
+`POOL_AUTO_APPROVE_WITHDRAWALS` on, which is the default — **sends without
+waiting for you**. `watchdog._payout_sweep` picks it up on the next 60s pass,
+one payout at a time, and the tester has it about a minute later. You still
+get the notification, but it carries no buttons: `decide_withdrawal` only acts
+on a `requested` row, so an Approve button on an already-approved payout would
+do nothing.
+
+You are not skipping a safety check by not being in the loop. Everything that
+decides whether a payout may happen runs at request time and is unchanged: the
+halt switch, `POOL_PAYOUTS_ENABLED`, the $50 minimum, the per-request and
+per-user-daily and global-daily caps, a chain-verified destination, and the
+available balance read under the write lock. The approval step was arbitrating
+a decision no human was making, and what it added in practice was however long
+it took you to see the message.
+
+**If you want the gate back**, set `POOL_AUTO_APPROVE_WITHDRAWALS = False` and
+restart: requests land as `requested` again and you get the **Send / Reject**
+card, where approving only *queues* and rejecting refunds in full. That is the
+switch to reach for if a specific payout needs a human look — `/payouts halt`
+is the blunter one that stops the whole queue.
 
 The thing to know before you touch it: **Coinbase offers no idempotency on
 sends.** It rejects the `idem` parameter outright, so a resend is a second
@@ -366,9 +383,19 @@ Ethereum). Minimum withdrawal is $50 because the fee is flat.
 **Speed, measured rather than assumed:** the $2 test send returned at 21:20:13
 UTC and was in the destination wallet at 21:21:11 — **58 seconds**. The
 earlier "about 10 minutes" was the interval at which I was checking the
-Coinbase balance, not anything about the payout. Tester copy still says "a few
-minutes": someone told "a few" who waits ten is fine, someone told "one" who
-waits three starts wondering where their money went.
+Coinbase balance, not anything about the payout. Tester copy quotes **under
+five minutes** against that 58-second measurement: someone told "five" who
+waits one is delighted, someone told "one" who waits three starts wondering
+where their money went.
+
+Deposit copy quotes **~5 minutes** on the same principle, and that one is a
+genuine estimate rather than a padded measurement — the wait is Ethereum
+confirmations plus Coinbase crediting, neither of which we control, so the
+message says a busy network can make it longer. Our own leg is fast: the
+watchdog credits and DMs within 60 seconds of the transfer settling.
+
+`deploy/_show_money_copy.py` prints every deposit and withdrawal message a
+tester sees, plus the limits in force. Read-only — it sends nothing.
 
 #### Wallet verification gates every withdrawal
 
