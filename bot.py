@@ -1443,6 +1443,90 @@ async def cmd_deposit(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
             logger.exception("Deposit admin ping failed for %s", admin_id)
 
 
+async def cmd_democard(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """`/democard [id] [btc|eth] [long|short]` — send one demo trade card.
+
+    Admin only, and from Telegram rather than a server script so it can be
+    fired mid-recording without an SSH session in the shot.
+    """
+    user = update.effective_user
+    if user is None or update.message is None:
+        return
+    if not bot_config.POOL_ENABLED or not pool.is_admin(user.id):
+        return
+
+    import demo_card
+
+    opts = demo_card.parse_args(context.args or [], default_id=user.id)
+    loop = asyncio.get_running_loop()
+    result = await loop.run_in_executor(
+        None,
+        lambda: demo_card.send(
+            int(opts["telegram_id"]),
+            product=str(opts["product"]),
+            side=str(opts["side"]),
+            mirror=bool(opts["mirror"]),
+            source=opts["source"],
+            trade_id=opts["trade_id"],
+        ),
+    )
+
+    if not result.get("ok"):
+        reasons = {
+            "not_approved": "that id is not approved — Admit them first, or "
+                            "the card will say 'Access required' instead of "
+                            "showing a size",
+            "no_spot": "could not read a spot price just now",
+            "no_open_trade": "nothing is open to mirror — drop the 'live' "
+                             "argument for a synthetic setup off current spot",
+            "send_failed": "could not DM that id — they must have messaged "
+                           "the bot at least once",
+            "pool_disabled": "POOL_ENABLED is off",
+            "render_failed": "card render failed — check the logs",
+        }
+        await _reply(
+            update,
+            f"No card sent: {reasons.get(str(result.get('reason')), result.get('reason'))}",
+        )
+        return
+
+    origin = (
+        f"mirrors live {result['mirrored_source']} #{result['mirrored_trade_id']}"
+        if result.get("mirrored_trade_id") else "synthetic setup off spot"
+    )
+    lines = [
+        f"Demo card sent to {opts['telegram_id']} — "
+        f"{result['product']} {'long' if result['side'] == 'buy' else 'short'} "
+        f"({origin})",
+        f"Entry ${result['entry']:,.2f} · stop ${result['stop_loss']:,.2f} "
+        f"(spot ${result['spot']:,.2f})",
+    ]
+    drift = result.get("drift_pct")
+    if drift is not None and drift >= 0.5:
+        # Worth knowing before filming: a mirrored entry can be well behind
+        # the market, which looks odd on camera even though it is real.
+        lines.append(
+            f"Heads up: spot is {drift:.1f}% off that entry, since the real "
+            f"trade opened earlier."
+        )
+    if result["quotes_a_size"]:
+        lines.append(
+            f"Their Accept would risk ${result['risk_usd']:,.2f} on "
+            f"${result['notional_usd']:,.0f} notional."
+        )
+    else:
+        # Say it here rather than let it be discovered on playback.
+        lines.append(
+            "That account is unfunded, so the card invites them to /deposit "
+            "instead of quoting a size."
+        )
+    lines.append(
+        "Accept reserves their real budget; nothing can fill, and the reserve "
+        "comes back within a minute with the real 'never fired' message."
+    )
+    await _reply(update, "\n".join(lines))
+
+
 async def cmd_wallet(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """`/wallet` shows the payout address; `/wallet 0x…` sets or changes it."""
     user = update.effective_user
@@ -2048,6 +2132,7 @@ def build_application() -> Application:
     app.add_handler(CommandHandler("portfolio", cmd_portfolio))
     app.add_handler(CommandHandler("deposit", cmd_deposit))
     app.add_handler(CommandHandler("wallet", cmd_wallet))
+    app.add_handler(CommandHandler("democard", cmd_democard))
     app.add_handler(CommandHandler("assign", cmd_assign))
     app.add_handler(CommandHandler("withdraw", cmd_withdraw))
     app.add_handler(CommandHandler("payouts", cmd_payouts))

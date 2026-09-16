@@ -399,10 +399,35 @@ bad afternoon at Etherscan never refuses an honest tester their own money.
 #### Demo cards
 
 HQ runs every 30 minutes and most cycles legitimately find no trade, so a real
-trade card cannot be summoned for a recording or a walkthrough.
-`deploy/_send_demo_card.py <telegram_id>` sends one on demand, labelled as a
-demo, built by the **live** card renderer with the **live** sizing rule — so
-the size it quotes is the size a real card would quote for that account.
+trade card cannot be summoned for a recording or a walkthrough. Send one with
+the admin command **`/democard`**, or with `deploy/_send_demo_card.py` if you
+want it scripted. Either way it is labelled as a demo and built by the **live**
+card renderer with the **live** sizing rule, so the size it quotes is the size
+a real card would quote for that account.
+
+`/democard` takes its arguments in any order, because it gets typed live:
+
+| Command | Sends |
+|---|---|
+| `/democard` | synthetic BTC long, to yourself |
+| `/democard 8708390551` | same, to that tester |
+| `/democard eth short` | synthetic ETH short |
+| `/democard live 8708390551` | **mirrors the newest open position** |
+| `/democard mill` / `/democard hq` | mirrors the newest open trade in that book |
+| `/democard 85` | mirrors live trade #85 specifically |
+
+Telegram ids are long and trade ids are short, which is what keeps `85` and
+`8708390551` apart.
+
+**Mirror mode is the one to use for anything measurement-like.** It copies a
+real open position's entry, its *initial* stop, its *original* target ladder,
+and its original rationale — the mill idea title, or the HQ `suggestions`
+rationale. Nothing is invented, so the quoted size is genuinely the size that
+account would have taken on that trade. Two things to know: the stop and
+targets are the planned ones rather than the current trailed ones, which is
+what the trade was sized against; and a mirrored entry can sit well behind
+spot, since the real trade opened earlier. The command replies with that drift
+when it exceeds 0.5%, so you find out before filming rather than on playback.
 
 Accept is real: it reserves the tester's actual budget through
 `pool.record_intent`, so the reply they see is the genuine one. It cannot
@@ -414,8 +439,11 @@ stale-intent sweep sees a ref that is not active, returns the reserve, and
 sends the real "that order never fired, your money is back" message — which is
 worth showing, since it is how a non-filling Accept always behaves.
 
-Safe to press with real money in the account. Pinned by `DemoCardTests`,
-including that a demo intent contributes nothing to a real order.
+Safe to press with real money in the account — including on a mirror of a live
+position, since the mirror copies levels but never touches the real trade.
+Pinned by `DemoCardTests` and `SendDemoCardTests`, including that a demo intent
+contributes nothing to a real order, and that `/democard` is admin-only (it can
+address any telegram id, so a tester must not be able to card another tester).
 
 #### Rehearsing the whole thing
 

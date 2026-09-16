@@ -24,7 +24,10 @@ import access
 import bot
 import bot_config
 import config
+import demo_card
+import notify
 import pool
+import research
 import telegram_ui
 from telegram.error import BadRequest
 
@@ -291,6 +294,239 @@ class DemoCardTests(unittest.TestCase):
     def test_malformed_demo_data_is_ignored(self) -> None:
         context = self._press("maybe")
         context.bot.send_message.assert_not_awaited()
+
+
+class SendDemoCardTests(unittest.TestCase):
+    """`/democard` — the send side.
+
+    It gets typed on camera, so the arguments have to be forgiving; and it can
+    address any telegram id, so it has to be admin-only.
+    """
+
+    def setUp(self) -> None:
+        self._tmp = tempfile.TemporaryDirectory(ignore_cleanup_errors=True)
+        db = Path(self._tmp.name) / "ledger.db"
+        self._patches = [
+            patch.object(config, "LEDGER_DB", db),
+            patch.object(bot_config, "POOL_ENABLED", True),
+            patch.object(bot_config, "POOL_ADMIN_TELEGRAM_IDS", (ADMIN,)),
+            patch.object(bot_config, "POOL_RISK_PCT", 0.007),
+        ]
+        for p in self._patches:
+            p.start()
+            self.addCleanup(p.stop)
+        self.addCleanup(self._tmp.cleanup)
+        pool.init_db()
+        access.init_db()
+        pool.approve_user(ADMIN, admin_id=ADMIN)
+        pool.approve_user(UID, admin_id=ADMIN)
+
+    def _run(self, caller: int, args=None):
+        update = MagicMock()
+        update.effective_user.id = caller
+        update.message = MagicMock()
+        update.message.reply_text = AsyncMock()
+        context = MagicMock()
+        context.args = args or []
+        with patch.object(research, "get_spot_price", return_value=75_000.0), \
+                patch.object(notify, "send_pool_dm_with_keyboard",
+                             return_value=True) as sent:
+            asyncio.run(bot.cmd_democard(update, context))
+        replies = "\n".join(
+            str(c.args[0]) for c in update.message.reply_text.call_args_list
+        )
+        return replies, sent
+
+    # -- access ------------------------------------------------------------
+
+    def test_a_tester_cannot_send_cards_to_anyone(self) -> None:
+        """It takes an arbitrary telegram id, so this is the guard that
+        matters: a tester must not be able to card another tester."""
+        replies, sent = self._run(UID, [str(ADMIN)])
+        self.assertEqual(replies, "")
+        sent.assert_not_called()
+
+    # -- arguments ---------------------------------------------------------
+
+    def test_bare_command_cards_the_admin_themselves(self) -> None:
+        opts = demo_card.parse_args([], default_id=ADMIN)
+        self.assertEqual(opts["telegram_id"], ADMIN)
+        self.assertEqual(opts["product"], "BTC-USD")
+        self.assertEqual(opts["side"], "buy")
+        self.assertFalse(opts["mirror"])
+
+    def test_arguments_are_order_insensitive(self) -> None:
+        """Typed live, so 'eth short 777001' must work as well as the
+        documented order."""
+        canonical = demo_card.parse_args(
+            [str(UID), "eth", "short"], default_id=ADMIN)
+        for order in (["eth", "short", str(UID)],
+                      ["short", str(UID), "ETH"],
+                      ["--eth", str(UID), "sell"]):
+            self.assertEqual(
+                demo_card.parse_args(order, default_id=ADMIN), canonical, order
+            )
+        self.assertEqual(canonical["product"], "ETH-USD")
+        self.assertEqual(canonical["side"], "sell")
+
+    def test_junk_arguments_fall_back_rather_than_raise(self) -> None:
+        opts = demo_card.parse_args(["banana", "42"], default_id=ADMIN)
+        self.assertEqual(opts["telegram_id"], ADMIN)
+        self.assertEqual(opts["product"], "BTC-USD")
+
+    # -- what gets sent ----------------------------------------------------
+
+    def test_a_funded_target_is_quoted_the_live_size(self) -> None:
+        pool.credit(UID, 1000.0, admin_id=ADMIN, ref="fund")
+        replies, sent = self._run(ADMIN, [str(UID)])
+
+        sent.assert_called_once()
+        body = str(sent.call_args.args[1])
+        self.assertIn("DEMO CARD", body)
+        # 0.7% of $1,000, straight off the live rule.
+        self.assertIn("7.00", replies)
+
+    def test_an_unfunded_target_is_flagged_to_the_sender(self) -> None:
+        """Otherwise it is discovered on playback."""
+        replies, sent = self._run(ADMIN, [str(UID)])
+        sent.assert_called_once()
+        self.assertIn("/deposit", replies)
+
+    def test_levels_track_spot_and_respect_side(self) -> None:
+        long = demo_card.build_suggestion("BTC-USD", "buy", 75_000.0)
+        self.assertLess(long.stop_loss, long.entry)
+        self.assertGreater(long.take_profits[0], long.entry)
+        self.assertLess(abs(long.entry - 75_000.0) / 75_000.0, 0.01)
+
+        short = demo_card.build_suggestion("BTC-USD", "sell", 75_000.0)
+        self.assertGreater(short.stop_loss, short.entry)
+        self.assertLess(short.take_profits[0], short.entry)
+
+    def test_the_ref_is_demo_prefixed(self) -> None:
+        """The prefix is the whole safety property — it matches no order."""
+        with patch.object(research, "get_spot_price", return_value=75_000.0), \
+                patch.object(notify, "send_pool_dm_with_keyboard",
+                             return_value=True):
+            result = demo_card.send(UID)
+        self.assertTrue(str(result["ref"]).startswith("demo_"))
+
+    # -- mirroring a real position -----------------------------------------
+
+    def test_live_is_recognised_in_any_position(self) -> None:
+        for args in (["live"], ["live", str(UID)], ["mill"], ["85"]):
+            self.assertTrue(
+                demo_card.parse_args(args, default_id=ADMIN)["mirror"], args
+            )
+        self.assertEqual(
+            demo_card.parse_args(["mill"], default_id=ADMIN)["source"], "mill"
+        )
+
+    def test_a_short_number_is_a_trade_id_not_a_telegram_id(self) -> None:
+        """`85` and `8708390551` must not be confused for each other."""
+        opts = demo_card.parse_args(["85", "8708390551"], default_id=ADMIN)
+        self.assertEqual(opts["trade_id"], 85)
+        self.assertEqual(opts["telegram_id"], 8708390551)
+
+    def test_a_mirror_copies_the_real_levels_untouched(self) -> None:
+        """The whole point: nothing about the setup is invented."""
+        trade = {
+            "id": 85, "source": "mill", "cycle_id": "mill_969",
+            "product_id": "ETH-USD", "side": "short", "entry": 2382.5,
+            "stop_loss": 2400.0, "initial_stop_loss": 2445.73,
+            "take_profits_json": "[2344.91]",
+            "plan_take_profits_json": "[2344.91, 2300.0]",
+            "status": "open",
+        }
+        with patch.object(demo_card, "_original_rationale", return_value=None):
+            s = demo_card.build_from_trade(trade)
+
+        self.assertEqual(s.action, "spot_sell")
+        self.assertEqual(s.entry, 2382.5)
+        self.assertEqual(s.product_id, "ETH-USD")
+        # The original plan, not the shrunken list left after a target fills.
+        self.assertEqual(s.take_profits, [2344.91, 2300.0])
+        # The stop the trade was sized against, not a trailed one.
+        self.assertEqual(s.stop_loss, 2445.73)
+        self.assertIn("#85", s.rationale)
+
+    def test_a_mirror_quotes_the_size_that_trade_would_have_taken(self) -> None:
+        pool.credit(UID, 510.0, admin_id=ADMIN, ref="fund")
+        trade = {
+            "id": 85, "source": "mill", "cycle_id": "mill_969",
+            "product_id": "ETH-USD", "side": "short", "entry": 2382.5,
+            "stop_loss": 2445.73, "initial_stop_loss": 2445.73,
+            "plan_take_profits_json": "[2344.91]", "status": "open",
+        }
+        with patch.object(demo_card, "pick_trade", return_value=trade), \
+                patch.object(demo_card, "_original_rationale", return_value=None), \
+                patch.object(research, "get_spot_price", return_value=2400.0), \
+                patch.object(notify, "send_pool_dm_with_keyboard",
+                             return_value=True) as sent:
+            result = demo_card.send(UID, mirror=True)
+
+        self.assertTrue(result["ok"])
+        self.assertEqual(result["mirrored_trade_id"], 85)
+        self.assertEqual(result["product"], "ETH-USD")
+        # 0.7% of $510 at the real stop distance — the live rule on real levels.
+        self.assertAlmostEqual(result["risk_usd"], 3.57, places=2)
+        self.assertIn("mirrors a real open position", str(sent.call_args.args[1]))
+
+    def test_a_stale_mirrored_entry_is_flagged_before_filming(self) -> None:
+        trade = {
+            "id": 85, "source": "mill", "cycle_id": "mill_969",
+            "product_id": "ETH-USD", "side": "short", "entry": 2382.5,
+            "stop_loss": 2445.73, "initial_stop_loss": 2445.73,
+            "plan_take_profits_json": "[2344.91]", "status": "open",
+        }
+        update = MagicMock()
+        update.effective_user.id = ADMIN
+        update.message = MagicMock()
+        update.message.reply_text = AsyncMock()
+        context = MagicMock()
+        context.args = ["live"]
+        with patch.object(demo_card, "pick_trade", return_value=trade), \
+                patch.object(demo_card, "_original_rationale", return_value=None), \
+                patch.object(research, "get_spot_price", return_value=2600.0), \
+                patch.object(notify, "send_pool_dm_with_keyboard",
+                             return_value=True):
+            asyncio.run(bot.cmd_democard(update, context))
+
+        replies = "\n".join(
+            str(c.args[0]) for c in update.message.reply_text.call_args_list
+        )
+        self.assertIn("mirrors live mill #85", replies)
+        self.assertIn("off that entry", replies)
+
+    def test_nothing_open_says_so_rather_than_inventing_a_trade(self) -> None:
+        update = MagicMock()
+        update.effective_user.id = ADMIN
+        update.message = MagicMock()
+        update.message.reply_text = AsyncMock()
+        context = MagicMock()
+        context.args = ["live"]
+        with patch.object(demo_card, "pick_trade", return_value=None), \
+                patch.object(notify, "send_pool_dm_with_keyboard",
+                             return_value=True) as sent:
+            asyncio.run(bot.cmd_democard(update, context))
+
+        sent.assert_not_called()
+        replies = "\n".join(
+            str(c.args[0]) for c in update.message.reply_text.call_args_list
+        )
+        self.assertIn("nothing is open to mirror", replies)
+
+    def test_a_closed_trade_is_not_mirrored(self) -> None:
+        with patch("live_ledger.get_trade",
+                   return_value={"id": 85, "status": "closed"}):
+            self.assertIsNone(demo_card.pick_trade(85))
+
+    def test_an_unapproved_target_is_refused(self) -> None:
+        with patch.object(research, "get_spot_price", return_value=75_000.0), \
+                patch.object(notify, "send_pool_dm_with_keyboard",
+                             return_value=True) as sent:
+            result = demo_card.send(999999)
+        self.assertFalse(result["ok"])
+        sent.assert_not_called()
 
 
 if __name__ == "__main__":
