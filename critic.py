@@ -578,6 +578,35 @@ def _m5_ob_match(low: float, high: float, ctx: MarketContext) -> bool:
     return False
 
 
+def nearest_zone_gap_pct(
+    low: float,
+    high: float,
+    zones: list,
+) -> float | None:
+    """Distance from a cited band to the closest detected one, in % of price.
+
+    A cited-but-not-found level has two completely different causes with
+    different fixes: the model invented it (perception), or it read a real
+    zone and priced the boundary slightly off (localization). The finding
+    message cannot tell them apart, so record the gap and let the data say.
+    Midpoint-to-midpoint, because a boundary-to-boundary measure reads as
+    tiny for a wide zone that happens to overlap nothing.
+    """
+    mid = (min(low, high) + max(low, high)) / 2
+    if mid <= 0:
+        return None
+    best: float | None = None
+    for zone in zones:
+        z_lo = float(getattr(zone, "low", 0.0) or 0.0)
+        z_hi = float(getattr(zone, "high", 0.0) or 0.0)
+        if z_lo <= 0 or z_hi <= 0:
+            continue
+        gap = abs(((z_lo + z_hi) / 2) - mid) / mid * 100.0
+        if best is None or gap < best:
+            best = gap
+    return best
+
+
 def _mentions_positive_sfp(text: str, timeframe: str) -> bool:
     if timeframe == "H4":
         pattern = _H4_SFP_RE
@@ -659,12 +688,21 @@ def _check_m5_ob_bounds(text: str, ctx: MarketContext) -> list[AuditFinding]:
                 )
             )
         else:
+            gap = nearest_zone_gap_pct(low, high, list(ctx.order_blocks))
+            # The gap distinguishes a hallucinated level from a real one read
+            # slightly off; it is in the message because AuditFinding has no
+            # metadata field and the verdict JSON is what analysis reads.
+            gap_note = (
+                f"; nearest detected M5 OB is {gap:.3f}% away"
+                if gap is not None
+                else "; no M5 order blocks detected at all"
+            )
             findings.append(
                 AuditFinding(
                     code="M5_OB_NOT_FOUND",
                     message=(
                         f"M5 OB {low:,.2f}-{high:,.2f} cited in text but no matching "
-                        f"detected M5 order block in snapshot"
+                        f"detected M5 order block in snapshot{gap_note}"
                     ),
                     severity="warning",
                 )

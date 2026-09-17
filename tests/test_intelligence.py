@@ -23,8 +23,10 @@ from intelligence.funding import (
 from intelligence.stance import (
     STANCE_PRODUCTS,
     STANCE_TIMEFRAMES,
+    _cites_price,
     _extract_json,
     _fallback_stances,
+    apply_override_policy,
     compute_timeframe_features,
     run_stance_cycle,
 )
@@ -185,6 +187,253 @@ class TestStanceCycle(TempDbTestCase):
         stored = store.latest_stances()
         self.assertEqual(len(stored), 6)
         self.assertTrue(all(s["stance"] == "bullish" for s in stored))
+
+    def _run_with_llm_stance(self, stance: str, **extra) -> list[dict]:
+        """Drive the real cycle with the model returning `stance` everywhere."""
+        import json as _json
+
+        payload = {
+            "stances": [
+                {"product_id": p, "timeframe": tf, "stance": stance,
+                 "confidence": 0.7, "rationale": "test", **extra}
+                for p in STANCE_PRODUCTS
+                for tf in STANCE_TIMEFRAMES
+            ],
+            "medium_summary": "s",
+            "btc_eth_note": "n",
+        }
+        block = mock.Mock()
+        block.type = "text"
+        block.text = _json.dumps(payload)
+        response = mock.Mock()
+        response.content = [block]
+        with mock.patch(
+            "intelligence.stance.gather_bars", return_value={}
+        ), mock.patch(
+            "intelligence.stance.gather_features", return_value=self._fake_features()
+        ), mock.patch(
+            "intelligence.stance.render_structure_board"
+        ), mock.patch("anthropic.Anthropic") as anthropic_cls:
+            anthropic_cls.return_value.messages.create.return_value = response
+            run_stance_cycle("2026-09-17T12:00:00Z")
+        return store.latest_stances()
+
+    def test_counterfactual_is_recorded_end_to_end(self) -> None:
+        """Flags off through the real cycle: override published AND logged."""
+        # _fake_features is a clean uptrend, so the deterministic score is bullish.
+        with mock.patch.object(bot_config, "STANCE_PUBLISH_DETERMINISTIC", False):
+            stored = self._run_with_llm_stance("neutral")
+        self.assertTrue(all(s["stance"] == "neutral" for s in stored))
+        self.assertTrue(all(s["det_stance"] == "bullish" for s in stored))
+        self.assertTrue(all(s["llm_stance"] == "neutral" for s in stored))
+        self.assertTrue(
+            all(s["override_kind"] == store.OVERRIDE_MUTED for s in stored)
+        )
+
+    def test_publish_deterministic_reverts_through_the_real_cycle(self) -> None:
+        """Phase 1 live: consumers get the deterministic score, ledger keeps all."""
+        with mock.patch.object(bot_config, "STANCE_PUBLISH_DETERMINISTIC", True):
+            stored = self._run_with_llm_stance("bearish")
+        self.assertTrue(all(s["stance"] == "bullish" for s in stored))
+        # The attempt survives the revert structurally, not just in prose.
+        self.assertTrue(all(s["llm_stance"] == "bearish" for s in stored))
+        self.assertTrue(
+            all(s["override_kind"] == store.OVERRIDE_FLIPPED for s in stored)
+        )
+        self.assertTrue(
+            all("[reverted:bearish]" in s["override_reason"] for s in stored)
+        )
+
+
+class TestOverridePolicy(unittest.TestCase):
+    """INTEL_BOARD_PLAN Phase 0/1: counterfactual logging and override gating."""
+
+    def _features(self, det: str, score: int = 2) -> dict:
+        cell = {"stance": det, "score": score, "range_pos": 0.5,
+                "higher_highs": True, "lower_lows": False}
+        return {"BTC-USD": {"H1": cell}}
+
+    def test_confidence_moves_with_a_reverted_stance(self) -> None:
+        """A reverted row must not carry the model's confidence in its old call.
+
+        Downstream gates (Kalshi eva_wick thresholds on m15 confidence) read
+        that number as conviction in the stance beside it.
+        """
+        with mock.patch.object(bot_config, "STANCE_PUBLISH_DETERMINISTIC", True):
+            out = apply_override_policy(
+                self._row("neutral", confidence=0.7),
+                self._features("bullish", score=3),
+            )
+        self.assertEqual(out[0]["stance"], "bullish")
+        self.assertEqual(out[0]["confidence"], 1.0)   # |3|/3, not the LLM's 0.7
+
+    def test_confidence_untouched_when_the_override_stands(self) -> None:
+        with mock.patch.object(bot_config, "STANCE_PUBLISH_DETERMINISTIC", False), \
+                mock.patch.object(
+                    bot_config, "STANCE_OVERRIDE_REQUIRE_EVIDENCE", False):
+            out = apply_override_policy(
+                self._row("neutral", confidence=0.7), self._features("bullish")
+            )
+        self.assertEqual(out[0]["confidence"], 0.7)
+
+    def _row(self, stance: str, **kw) -> list[dict]:
+        row = {"product_id": "BTC-USD", "timeframe": "H1", "stance": stance}
+        row.update(kw)
+        return [row]
+
+    def test_cites_price_needs_a_real_level(self) -> None:
+        self.assertTrue(_cites_price("H4 OB 63,433-64,188 holding"))
+        self.assertTrue(_cites_price("reclaimed 2401.5"))
+        self.assertFalse(_cites_price("order block is holding"))
+        self.assertFalse(_cites_price("at the 0.618 fib"))
+        self.assertFalse(_cites_price(None))
+
+    def test_counterfactual_attached_without_changing_stance(self) -> None:
+        """Both flags off must annotate only, never rewrite."""
+        with mock.patch.object(bot_config, "STANCE_PUBLISH_DETERMINISTIC", False), \
+                mock.patch.object(
+                    bot_config, "STANCE_OVERRIDE_REQUIRE_EVIDENCE", False):
+            out = apply_override_policy(
+                self._row("bearish"), self._features("bullish")
+            )
+        self.assertEqual(out[0]["stance"], "bearish")
+        self.assertEqual(out[0]["det_stance"], "bullish")
+
+    def test_unevidenced_override_reverts_when_evidence_required(self) -> None:
+        with mock.patch.object(bot_config, "STANCE_PUBLISH_DETERMINISTIC", False), \
+                mock.patch.object(
+                    bot_config, "STANCE_OVERRIDE_REQUIRE_EVIDENCE", True):
+            out = apply_override_policy(
+                self._row("neutral", override_reason="looks toppy"),
+                self._features("bullish"),
+            )
+        self.assertEqual(out[0]["stance"], "bullish")
+        # The attempt must survive the revert, or the ledger loses it.
+        self.assertIn("[reverted:neutral]", out[0]["override_reason"])
+
+    def test_evidenced_override_stands_when_only_evidence_required(self) -> None:
+        with mock.patch.object(bot_config, "STANCE_PUBLISH_DETERMINISTIC", False), \
+                mock.patch.object(
+                    bot_config, "STANCE_OVERRIDE_REQUIRE_EVIDENCE", True):
+            out = apply_override_policy(
+                self._row("neutral", override_reason="H4 OB 63,433-64,188 holding"),
+                self._features("bullish"),
+            )
+        self.assertEqual(out[0]["stance"], "neutral")
+
+    def test_publish_deterministic_reverts_even_evidenced_overrides(self) -> None:
+        with mock.patch.object(bot_config, "STANCE_PUBLISH_DETERMINISTIC", True), \
+                mock.patch.object(
+                    bot_config, "STANCE_OVERRIDE_REQUIRE_EVIDENCE", True):
+            out = apply_override_policy(
+                self._row("neutral", override_reason="H4 OB 63,433-64,188 holding"),
+                self._features("bullish"),
+            )
+        self.assertEqual(out[0]["stance"], "bullish")
+
+    def test_agreement_is_never_an_override(self) -> None:
+        with mock.patch.object(bot_config, "STANCE_PUBLISH_DETERMINISTIC", True):
+            out = apply_override_policy(
+                self._row("bullish"), self._features("bullish")
+            )
+        self.assertEqual(out[0]["stance"], "bullish")
+        self.assertIsNone(out[0].get("override_reason"))
+
+    def test_missing_features_leave_the_row_alone(self) -> None:
+        """A feature gap must not silently rewrite a published stance."""
+        with mock.patch.object(bot_config, "STANCE_PUBLISH_DETERMINISTIC", True):
+            out = apply_override_policy(self._row("bearish"), {})
+        self.assertEqual(out[0]["stance"], "bearish")
+        self.assertIsNone(out[0].get("det_stance"))
+
+    def test_fallback_rows_are_their_own_counterfactual(self) -> None:
+        f = compute_timeframe_features(_bars([100 + i for i in range(60)]))
+        features = {p: {tf: dict(f) for tf in STANCE_TIMEFRAMES}
+                    for p in STANCE_PRODUCTS}
+        for row in _fallback_stances(features):
+            self.assertEqual(row["det_stance"], row["stance"])
+
+
+class TestOverridePersistence(TempDbTestCase):
+    def test_override_kind_is_derived_from_the_pair(self) -> None:
+        store.insert_stances(
+            "2026-09-17T12:00:00Z",
+            [
+                {"product_id": "BTC-USD", "timeframe": "H4",
+                 "stance": "neutral", "det_stance": "bullish"},
+                {"product_id": "BTC-USD", "timeframe": "H1",
+                 "stance": "bearish", "det_stance": "neutral"},
+                {"product_id": "BTC-USD", "timeframe": "M15",
+                 "stance": "bearish", "det_stance": "bullish"},
+                {"product_id": "ETH-USD", "timeframe": "H4",
+                 "stance": "bullish", "det_stance": "bullish"},
+            ],
+        )
+        kinds = {
+            (r["product_id"], r["timeframe"]): r["override_kind"]
+            for r in store.latest_stances()
+        }
+        self.assertEqual(kinds[("BTC-USD", "H4")], store.OVERRIDE_MUTED)
+        self.assertEqual(kinds[("BTC-USD", "H1")], store.OVERRIDE_INVENTED)
+        self.assertEqual(kinds[("BTC-USD", "M15")], store.OVERRIDE_FLIPPED)
+        self.assertIsNone(kinds[("ETH-USD", "H4")])
+
+    def test_reverted_row_still_records_the_attempt(self) -> None:
+        """The load-bearing one: Phase 1 must not blind the Phase 0 ledger."""
+        store.insert_stances(
+            "2026-09-17T12:00:00Z",
+            [{"product_id": "BTC-USD", "timeframe": "H1", "stance": "bullish",
+              "det_stance": "bullish", "llm_stance": "neutral",
+              "override_reason": "[reverted:neutral] policy"}],
+        )
+        row = store.latest_stances()[0]
+        self.assertEqual(row["stance"], "bullish")       # what consumers see
+        self.assertEqual(row["llm_stance"], "neutral")   # what the model wanted
+        self.assertEqual(row["override_kind"], store.OVERRIDE_MUTED)
+
+    def test_llm_stance_defaults_to_the_published_stance(self) -> None:
+        """Nothing reverted means the model's stance *is* the published one."""
+        store.insert_stances(
+            "2026-09-17T13:00:00Z",
+            [{"product_id": "BTC-USD", "timeframe": "H4", "stance": "bearish",
+              "det_stance": "bearish"}],
+        )
+        row = store.latest_stances()[0]
+        self.assertEqual(row["llm_stance"], "bearish")
+        self.assertIsNone(row["override_kind"])
+
+    def test_rows_without_a_counterfactual_persist_cleanly(self) -> None:
+        store.insert_stances(
+            "2026-09-17T13:00:00Z",
+            [{"product_id": "BTC-USD", "timeframe": "H4", "stance": "bullish"}],
+        )
+        row = store.latest_stances()[0]
+        self.assertIsNone(row["det_stance"])
+        self.assertIsNone(row["override_kind"])
+
+    def test_legacy_book_gains_the_columns(self) -> None:
+        """Books written before Phase 0 must migrate, not crash."""
+        import sqlite3
+
+        with sqlite3.connect(config.LEDGER_DB) as conn:
+            conn.execute("DROP TABLE intel_stances")
+            conn.execute(
+                "CREATE TABLE intel_stances ("
+                "id INTEGER PRIMARY KEY AUTOINCREMENT, cycle_ts TEXT NOT NULL,"
+                "product_id TEXT NOT NULL, timeframe TEXT NOT NULL,"
+                "stance TEXT NOT NULL, confidence REAL, rationale TEXT,"
+                "source TEXT NOT NULL DEFAULT 'llm', created_at TEXT NOT NULL)"
+            )
+            conn.commit()
+        store.insert_stances(
+            "2026-09-17T14:00:00Z",
+            [{"product_id": "BTC-USD", "timeframe": "H4", "stance": "neutral",
+              "det_stance": "bearish"}],
+        )
+        row = store.latest_stances()[0]
+        self.assertEqual(row["det_stance"], "bearish")
+        self.assertEqual(row["llm_stance"], "neutral")
+        self.assertEqual(row["override_kind"], store.OVERRIDE_MUTED)
 
 
 class TestFundingRegimes(TempDbTestCase):

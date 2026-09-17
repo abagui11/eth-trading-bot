@@ -19,11 +19,46 @@ CREATE TABLE IF NOT EXISTS intel_stances (
     confidence REAL,
     rationale TEXT,
     source TEXT NOT NULL DEFAULT 'llm',
-    created_at TEXT NOT NULL
+    created_at TEXT NOT NULL,
+    det_stance TEXT,
+    llm_stance TEXT,
+    override_kind TEXT,
+    override_reason TEXT
 );
 
 CREATE INDEX IF NOT EXISTS idx_intel_stances_cycle ON intel_stances(cycle_ts);
 CREATE INDEX IF NOT EXISTS idx_intel_stances_product ON intel_stances(product_id, timeframe);
+
+-- INTEL_BOARD_PLAN Phase 2. Shadow artifact: written every cycle, consumed by
+-- nobody until the nightly scorer clears its pre-registered bar. Prices here
+-- always come from a detector, never from the model (see conditional.py).
+CREATE TABLE IF NOT EXISTS intel_reads (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    cycle_ts TEXT NOT NULL,
+    product_id TEXT NOT NULL,
+    timeframe TEXT NOT NULL,
+    bias TEXT,
+    attracting_kind TEXT,
+    attracting_lo REAL,
+    attracting_hi REAL,
+    repelling_kind TEXT,
+    repelling_side TEXT,
+    repelling_lo REAL,
+    repelling_hi REAL,
+    repelling_state TEXT,
+    location TEXT,
+    invalidation_price REAL,
+    invalidation_trigger TEXT,
+    spot REAL,
+    rationale TEXT,
+    source TEXT NOT NULL DEFAULT 'llm',
+    stale_invalidation INTEGER NOT NULL DEFAULT 0,
+    dropped_reason TEXT,
+    created_at TEXT NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_intel_reads_cycle ON intel_reads(cycle_ts);
+CREATE INDEX IF NOT EXISTS idx_intel_reads_product ON intel_reads(product_id, timeframe);
 
 CREATE TABLE IF NOT EXISTS intel_medium (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -96,6 +131,30 @@ CREATE INDEX IF NOT EXISTS idx_zmove_events_created ON zmove_events(created_at);
 VALID_STANCES = ("bullish", "neutral", "bearish")
 STANCE_TIMEFRAMES = ("H4", "H1", "M15")
 
+# How the published stance departed from the deterministic score. The three
+# kinds are separated because the recorded book shows them costing differently
+# and they imply different fixes.
+OVERRIDE_MUTED = "muted_to_neutral"
+OVERRIDE_INVENTED = "invented_direction"
+OVERRIDE_FLIPPED = "sign_flip"
+
+
+def classify_override(det_stance: str | None, llm_stance: str | None) -> str | None:
+    """Classify what the model *attempted*, not what was published.
+
+    Keyed on the LLM's stance rather than the published one so the record
+    survives a Phase 1 revert: with `STANCE_PUBLISH_DETERMINISTIC` on, the
+    published stance equals the deterministic score and the attempt would
+    otherwise vanish from the row.
+    """
+    if not det_stance or not llm_stance or det_stance == llm_stance:
+        return None
+    if det_stance in ("bullish", "bearish") and llm_stance == "neutral":
+        return OVERRIDE_MUTED
+    if det_stance == "neutral" and llm_stance in ("bullish", "bearish"):
+        return OVERRIDE_INVENTED
+    return OVERRIDE_FLIPPED
+
 
 def _connect() -> sqlite3.Connection:
     conn = sqlite3.connect(config.LEDGER_DB)
@@ -103,9 +162,18 @@ def _connect() -> sqlite3.Connection:
     return conn
 
 
+def _ensure_stance_columns(conn: sqlite3.Connection) -> None:
+    """Counterfactual columns on books created before INTEL_BOARD_PLAN Phase 0."""
+    cols = {row[1] for row in conn.execute("PRAGMA table_info(intel_stances)")}
+    for name in ("det_stance", "llm_stance", "override_kind", "override_reason"):
+        if name not in cols:
+            conn.execute(f"ALTER TABLE intel_stances ADD COLUMN {name} TEXT")
+
+
 def init_db() -> None:
     with _connect() as conn:
         conn.executescript(_SCHEMA)
+        _ensure_stance_columns(conn)
         conn.commit()
 
 
@@ -122,7 +190,14 @@ def insert_stances(
     *,
     source: str = "llm",
 ) -> int:
-    """Persist one hourly batch of per-product/per-timeframe stances."""
+    """Persist one hourly batch of per-product/per-timeframe stances.
+
+    Three stances go on every row and all of them are always recorded:
+    `det_stance` (the deterministic score), `llm_stance` (what the model
+    wanted) and `stance` (what was published). That makes every policy
+    measurable whatever the Phase 1 flags are set to, so the Phase 0 ledger
+    and the Phase 1 intervention can run at the same time.
+    """
     init_db()
     created = _now_iso()
     count = 0
@@ -131,12 +206,22 @@ def insert_stances(
             stance = str(s.get("stance") or "neutral").lower()
             if stance not in VALID_STANCES:
                 stance = "neutral"
+
+            def _norm(value: Any) -> str | None:
+                value = str(value).lower() if value else None
+                return value if value in VALID_STANCES else None
+
+            det = _norm(s.get("det_stance"))
+            # Absent when nothing was reverted: the model's stance *is* the
+            # published one, so record it rather than leaving a hole.
+            llm = _norm(s.get("llm_stance")) or stance
             conn.execute(
                 """
                 INSERT INTO intel_stances
                     (cycle_ts, product_id, timeframe, stance, confidence,
-                     rationale, source, created_at)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                     rationale, source, created_at, det_stance, llm_stance,
+                     override_kind, override_reason)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     cycle_ts,
@@ -147,6 +232,10 @@ def insert_stances(
                     str(s.get("rationale") or ""),
                     source,
                     created,
+                    det,
+                    llm,
+                    classify_override(det, llm),
+                    str(s.get("override_reason") or "") or None,
                 ),
             )
             count += 1
@@ -179,6 +268,80 @@ def latest_stances() -> list[dict[str, Any]]:
             ORDER BY product_id, timeframe
             """,
             (cycle_ts,),
+        ).fetchall()
+    return [dict(r) for r in rows]
+
+
+# ---------------------------------------------------------------------------
+# Conditional reads (Phase 2 shadow artifact)
+
+_READ_FIELDS = (
+    "product_id", "timeframe", "bias", "attracting_kind", "attracting_lo",
+    "attracting_hi", "repelling_kind", "repelling_side", "repelling_lo",
+    "repelling_hi", "repelling_state", "location", "invalidation_price",
+    "invalidation_trigger", "spot", "rationale", "stale_invalidation",
+    "dropped_reason",
+)
+
+
+def insert_reads(
+    cycle_ts: str,
+    reads: list[dict[str, Any]],
+    *,
+    source: str = "llm",
+) -> int:
+    init_db()
+    created = _now_iso()
+    columns = ", ".join(_READ_FIELDS)
+    placeholders = ", ".join("?" for _ in _READ_FIELDS)
+    count = 0
+    with _connect() as conn:
+        for r in reads:
+            values = [r.get(f) for f in _READ_FIELDS]
+            # SQLite has no bool; the scorer aggregates this column.
+            values[_READ_FIELDS.index("stale_invalidation")] = int(
+                bool(r.get("stale_invalidation"))
+            )
+            conn.execute(
+                f"INSERT INTO intel_reads (cycle_ts, {columns}, source, created_at) "
+                f"VALUES (?, {placeholders}, ?, ?)",
+                [cycle_ts, *values, source, created],
+            )
+            count += 1
+        conn.commit()
+    return count
+
+
+def latest_reads() -> list[dict[str, Any]]:
+    """Newest read per (product, timeframe) from the most recent cycle."""
+    init_db()
+    with _connect() as conn:
+        row = conn.execute(
+            "SELECT cycle_ts FROM intel_reads ORDER BY created_at DESC, id DESC "
+            "LIMIT 1"
+        ).fetchone()
+        if row is None:
+            return []
+        rows = conn.execute(
+            """
+            SELECT * FROM intel_reads WHERE id IN (
+                SELECT MAX(id) FROM intel_reads WHERE cycle_ts = ?
+                GROUP BY product_id, timeframe
+            )
+            ORDER BY product_id, timeframe
+            """,
+            (str(row["cycle_ts"]),),
+        ).fetchall()
+    return [dict(r) for r in rows]
+
+
+def read_history(*, limit: int = 200, offset: int = 0) -> list[dict[str, Any]]:
+    init_db()
+    with _connect() as conn:
+        rows = conn.execute(
+            "SELECT * FROM intel_reads ORDER BY created_at DESC, id DESC "
+            "LIMIT ? OFFSET ?",
+            (limit, offset),
         ).fetchall()
     return [dict(r) for r in rows]
 

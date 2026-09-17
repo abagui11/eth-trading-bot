@@ -181,6 +181,16 @@
             </tbody>
           </table>
         </div>
+        {% if brain.stance_policy_epoch %}
+        <p class="sub" style="margin-top:10px">
+          Since {{ brain.stance_policy_epoch }} these pills publish the
+          <strong>deterministic</strong> trend score. The LLM writes the rationale
+          but no longer overrides the score: measured on 523 recorded overrides it
+          was worse by 19&ndash;128 bps at 24h, in both regime halves. This posture
+          is a trend read and has <strong>not</strong> been shown to predict its own
+          horizon &mdash; 48&ndash;51% correct, indistinguishable from a coin flip.
+        </p>
+        {% endif %}
         {% if brain.medium.summary %}
         <p class="sub" style="margin-top:10px" id="brain-medium">{{ brain.medium.summary }}</p>
         {% endif %}
@@ -194,6 +204,75 @@
           {% endfor %}
         </div>
       </section>
+
+      {% if brain.conditional_reads %}
+      <section class="card" id="brain-conditional">
+        <h2>Conditional read · in evaluation</h2>
+        <p class="sub" style="margin-bottom:10px">
+          The posture above is a scalar, which is not what an ICT read is. This
+          is the replacement being tested: a bias that exists only <em>while</em>
+          a named order block holds, with the draw on liquidity it points at and
+          the price that kills it. Every level here was found by the detectors,
+          not written by the model &mdash; it selects among them, so it cannot
+          cite a level that does not exist. <strong>Unscored and consumed by
+          nothing.</strong> It earns its way onto this page by beating the scalar
+          above, or it gets deleted.
+        </p>
+        <div class="table-scroll">
+          <table class="stance-table">
+            <thead>
+              <tr>
+                <th></th><th>Bias</th><th>While this holds</th>
+                <th>Drawing to</th><th>Invalid below/above</th><th>Location</th>
+              </tr>
+            </thead>
+            <tbody>
+              {% for r in brain.conditional_reads %}
+              <tr>
+                <td>{{ r.product_id|replace('-USD','') }} {{ r.timeframe }}</td>
+                <td>
+                  <span class="stance-pill stance-{{ r.bias or 'none' }}"
+                        {% if r.rationale %}title="{{ r.rationale }}"{% endif %}>
+                    {{ r.bias or 'no call' }}
+                  </span>
+                </td>
+                <td>
+                  {% if r.repelling_kind %}
+                    {{ r.repelling_kind|replace('_',' ') }}
+                    {{ "%.2f"|format(r.repelling_lo) }}&ndash;{{ "%.2f"|format(r.repelling_hi) }}
+                    <span class="bias-src">{{ r.repelling_state }}</span>
+                  {% else %}&mdash;{% endif %}
+                </td>
+                <td>
+                  {% if r.attracting_kind %}
+                    {{ r.attracting_kind|replace('_',' ') }}
+                    {{ "%.2f"|format(r.attracting_lo) }}
+                  {% else %}&mdash;{% endif %}
+                </td>
+                <td>
+                  {% if r.invalidation_price %}
+                    {{ "%.2f"|format(r.invalidation_price) }}
+                    {% if r.stale_invalidation %}
+                    <span class="badge badge-bad" title="Price was already through this level when the read was published">stale</span>
+                    {% endif %}
+                  {% else %}&mdash;{% endif %}
+                </td>
+                <td><span class="bias-src">{{ r.location or '—' }}</span></td>
+              </tr>
+              {% endfor %}
+            </tbody>
+          </table>
+        </div>
+        <p class="sub" style="margin-top:10px">
+          &ldquo;no call&rdquo; is a result, not a gap: no order block is currently
+          holding, or no draw on liquidity was identified. Invalidation is an M5
+          close through the level &mdash; our convention, chosen because it is
+          measurable on the candle grid; ICT teaches array invalidation by example
+          rather than by rule, so the wick-through alternative is recorded too and
+          will be swept.
+        </p>
+      </section>
+      {% endif %}
 
       {% if brain.structure_charts %}
       <section class="card" id="brain-structure">

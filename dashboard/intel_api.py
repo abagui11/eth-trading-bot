@@ -48,6 +48,14 @@ router = APIRouter(prefix="/api/v1", dependencies=[Depends(_service_auth)])
 
 
 def _stance_entry(row: dict) -> dict:
+    """Wire shape for service consumers.
+
+    The keys above `det_stance` are the frozen contract (INTEL_BOARD_PLAN
+    Phase 0.2): the mill resolves idea *direction* from `stance`, so its
+    meaning must not change under a consumer. The counterfactual fields are
+    additive and advisory — consumers migrate to them explicitly, one at a
+    time, each with its own before/after measurement.
+    """
     return {
         "cycle_ts": row.get("cycle_ts"),
         "product_id": row.get("product_id"),
@@ -57,6 +65,10 @@ def _stance_entry(row: dict) -> dict:
         "rationale": row.get("rationale"),
         "source": row.get("source"),
         "created_at": row.get("created_at"),
+        "det_stance": row.get("det_stance"),
+        "llm_stance": row.get("llm_stance"),
+        "override_kind": row.get("override_kind"),
+        "policy_epoch": getattr(bot_config, "STANCE_POLICY_EPOCH", None),
     }
 
 
@@ -99,6 +111,30 @@ async def intelligence_latest() -> dict:
         }
         if thesis
         else None,
+    }
+
+
+@router.get("/intelligence/reads")
+async def intelligence_reads(limit: int = 0, offset: int = 0) -> dict:
+    """Phase 2 conditional reads — **experimental, do not gate on this**.
+
+    Written every cycle and scored nightly; it has not yet cleared the bar in
+    `deploy/INTEL_BOARD_PLAN.md` Phase 2, so no consumer should resolve a
+    direction from it. `bias: null` is a normal, expected value meaning no PD
+    array is holding or no draw on liquidity was identified — it is not an
+    error and must not be treated as "neutral".
+    """
+    rows = (
+        intel_store.read_history(limit=min(max(limit, 1), 500),
+                                 offset=max(offset, 0))
+        if limit
+        else intel_store.latest_reads()
+    )
+    return {
+        "status": "experimental",
+        "consume": False,
+        "invalidation_convention": "m5_close_through",
+        "reads": rows,
     }
 
 

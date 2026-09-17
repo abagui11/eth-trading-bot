@@ -111,6 +111,12 @@ def get_brain_payload() -> dict[str, Any]:
             "available": status["available"],
             "last_error": status["last_error"],
         }
+    # Phase 2 shadow reads, surfaced for the "in evaluation" panel. Carries no
+    # claim: the template must label these experimental and unscored.
+    try:
+        conditional_reads = intel_store.latest_reads()
+    except Exception:
+        conditional_reads = []
     funding_ok = any(f["available"] for f in funding.values()) if funding else False
     structure_charts = _structure_board(stances)
     zmoves = intel_store.recent_zmove_events(limit=12)
@@ -130,6 +136,8 @@ def get_brain_payload() -> dict[str, Any]:
         "spots": spots.get("spots") or {},
         "spot_as_of": spots.get("as_of"),
         "stances": stances,
+        "conditional_reads": conditional_reads,
+        "stance_policy_epoch": getattr(bot_config, "STANCE_POLICY_EPOCH", None),
         "cycle_ts": stances[0]["cycle_ts"] if stances else None,
         "medium": {
             "summary": medium.get("summary"),

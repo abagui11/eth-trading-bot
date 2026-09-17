@@ -472,6 +472,61 @@ RELATIVE_STRENGTH_ENABLED = True
 # --- Republic Intelligence layer ---------------------------------------------
 # Hourly BTC/ETH stance batch (H4/H1/M15) persisted + served on /api/v1.
 INTELLIGENCE_ENABLED = True
+
+# Phase 0 of deploy/INTEL_BOARD_PLAN.md. Every stance row records all three
+# stances — det_stance (mechanical score), llm_stance (what the model wanted)
+# and stance (what was published) — so the counterfactual ledger keeps
+# accumulating no matter how the Phase 1 flags below are set. That is what
+# lets Phase 0 and Phase 1 run at the same time rather than in sequence.
+STANCE_LOG_COUNTERFACTUAL = True
+
+# Phase 1. Publish the deterministic score and demote the LLM to narrative
+# (rationale, medium summary, BTC->ETH note), discarding its overrides.
+#
+# The evidence: on the 523 recorded calls where the LLM departed from the
+# deterministic score pasted into its own prompt, it was worse by 19-128 bps
+# at 24h with the day-clustered CI excluding zero in 15 of 18 cells, in *both*
+# regime halves — so not a trending-tape artifact. All three override kinds
+# measured negative (muted n=310, invented n=205, flipped n=8), so there is no
+# subset we have evidence is worth keeping. See
+# trade_ideas/analysis/EVA proof of concept/VISION_ACCURACY.md.
+#
+# This does NOT make the board accurate. The deterministic score is momentum;
+# own-horizon accuracy should stay near a coin flip. It removes a measured
+# cost. Accuracy is what Phase 2's conditional read exists to attempt.
+#
+# Blast radius: ~9% of H1 rows change (LLM/deterministic agreement on H1 is
+# 91%), and H1 is the row the mill resolves idea *direction* from and the
+# Kalshi gate is 82% concordant with. Baselines to judge against:
+# trade_ideas/analysis/mill_baseline.json.
+STANCE_PUBLISH_DETERMINISTIC = True
+
+# Weaker alternative, kept for the case where the board's overrides are later
+# shown to carry value on some subset: let an override stand if it cites a
+# price. Redundant while the flag above is on (that one reverts everything),
+# and it adds an untested dependency on the model complying with a new prompt
+# rule, which is why it is not the shipped choice.
+STANCE_OVERRIDE_REQUIRE_EVIDENCE = False
+
+# Policy epoch, same role as EVA_EXPERIMENT_EPOCH: the moment the published
+# stance stopped being the LLM's. Any analysis of the board must segment on
+# this, because rows either side of it were produced by different policies.
+# Reverting means setting STANCE_PUBLISH_DETERMINISTIC=False and stamping a
+# new epoch — never silently, or the book becomes unreadable.
+STANCE_POLICY_EPOCH = "2026-09-17T16:30:00Z"
+
+# Phase 2: the conditional ICT read (intelligence/conditional.py).
+# A SHADOW artifact — written to `intel_reads` every cycle and consumed by
+# nobody. The scalar board keeps running untouched as the control, so this
+# carries no risk to the mill or the Kalshi gate and needs no migration.
+# Costs one extra fast-model call per cycle. Detection is done by the existing
+# detectors; the model only selects among candidates by index, so it cannot
+# emit a price no detector found.
+INTEL_CONDITIONAL_READS_ENABLED = True
+# H4 and H1 only. M15 measured worst on every horizon in the accuracy study
+# (<= null everywhere, negative at 2-4h) and 92% identical to the sign of the
+# trailing 4h return, so it would add cost and noise without a hypothesis.
+INTEL_CONDITIONAL_TIMEFRAMES: tuple[str, ...] = ("H4", "H1")
 # When True, gate high-quality (abstention-first ICT) trade cards to the
 # internal allowlist (config.INTERNAL_TELEGRAM_IDS). False = HQ cards go to
 # all public subscribers with Accept/Reject and a "High Quality" label.

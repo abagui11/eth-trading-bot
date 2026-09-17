@@ -4,6 +4,14 @@ Every hour (wall-clock) we compute deterministic features on H4/H1/M15 for
 BTC-USD then ETH-USD, ask Claude (fast model) to synthesize stances with the
 macro + funding context, and persist the batch. If the LLM call fails the
 deterministic stances are persisted instead so the artifact always exists.
+
+The deterministic score is pasted into the model's own prompt as
+``programmatic_stance``, so every published row has a counterfactual: what
+would have been published had the model kept it. Phase 0 of
+``deploy/INTEL_BOARD_PLAN.md`` records that counterfactual on every row
+(``STANCE_LOG_COUNTERFACTUAL``) without changing what is published; the two
+Phase 1 flags then decide whether a departure is allowed to stand. See
+``trade_ideas/analysis/EVA proof of concept/VISION_ACCURACY.md`` for why.
 """
 
 from __future__ import annotations
@@ -269,6 +277,23 @@ on each of H4, H1, M15...],
 "btc_eth_note":"1-2 sentences on how BTC posture maps to ETH"}
 """
 
+# Appended only when a Phase 1 flag is on, so Phase 0 leaves the prompt — and
+# therefore the model's behaviour — byte-identical.
+_OVERRIDE_EVIDENCE_RULE = """
+=== Departing from programmatic_stance ===
+Measured over 523 recorded departures, this desk's overrides of the
+programmatic stance have lost money, and the most expensive pattern was
+muting a directional score to neutral. Therefore:
+- Default to the programmatic_stance for that product/timeframe.
+- To depart from it, add an "override_reason" field to that stance entry
+  naming the specific level that justifies the departure, with its price
+  (e.g. "H4 order block 63,433-64,188 holding, price in discount").
+- An override with no cited price is discarded and the programmatic stance is
+  published instead. Do not invent a price to satisfy this rule — keeping the
+  programmatic stance is the correct answer when you have no level.
+- rationale stays a normal 1-3 sentence read either way.
+"""
+
 
 def _extract_json(text: str) -> dict:
     """Pull the first JSON object out of a model reply.
@@ -304,6 +329,9 @@ def _fallback_stances(
                     "product_id": product_id,
                     "timeframe": tf,
                     "stance": f["stance"],
+                    # This row *is* the deterministic score, so it is its own
+                    # counterfactual and can never read as an override.
+                    "det_stance": f["stance"],
                     "confidence": min(abs(f["score"]) / 3.0, 1.0),
                     "rationale": (
                         f"Programmatic: score={f['score']} range_pos={f['range_pos']} "
@@ -311,6 +339,87 @@ def _fallback_stances(
                     ),
                 }
             )
+    return stances
+
+
+_PRICE_RE = re.compile(r"\d[\d,]*\.?\d*")
+
+
+def _cites_price(text: str | None) -> bool:
+    """A cited level needs a number big enough to be a BTC/ETH price.
+
+    Guards against "order block holding" and against a bare "0.618" fib
+    passing as a level citation.
+    """
+    for match in _PRICE_RE.findall(text or ""):
+        try:
+            value = float(match.replace(",", ""))
+        except ValueError:
+            continue
+        if value >= 100:
+            return True
+    return False
+
+
+def apply_override_policy(
+    stances: list[dict[str, Any]],
+    features: dict[str, dict[str, dict[str, Any]]],
+) -> list[dict[str, Any]]:
+    """Attach each row's counterfactual, then enforce the Phase 1 flags.
+
+    With both flags off this only annotates: the published stance is exactly
+    what the model returned, and `det_stance` / `override_kind` become the
+    standing record the plan's Phase 0 is there to accumulate.
+    """
+    publish_det = getattr(bot_config, "STANCE_PUBLISH_DETERMINISTIC", False)
+    require_evidence = getattr(
+        bot_config, "STANCE_OVERRIDE_REQUIRE_EVIDENCE", False
+    )
+
+    for entry in stances:
+        product_id = str(entry.get("product_id"))
+        tf = str(entry.get("timeframe"))
+        cell = (features.get(product_id) or {}).get(tf) or {}
+        det = cell.get("stance")
+        if not det:
+            continue
+        entry["det_stance"] = det
+        if entry.get("stance") == det:
+            continue
+
+        attempted = entry["stance"]
+        entry["llm_stance"] = attempted
+        reason = str(entry.get("override_reason") or "").strip()
+        if publish_det:
+            discard = "policy: deterministic score published"
+        elif require_evidence and not _cites_price(reason):
+            discard = "no cited price"
+        else:
+            continue  # the override stands
+
+        # `llm_stance` keeps the attempt structurally; the text records why it
+        # was discarded, which the column cannot say.
+        entry["stance"] = det
+        # The confidence has to move with the stance. Leaving the model's
+        # number on a reverted row publishes its confidence in a *different*
+        # call, and downstream gates read that number as conviction in the
+        # stance beside it (the Kalshi eva_wick bot thresholds on exactly this
+        # field). Same formula the deterministic fallback uses.
+        score = cell.get("score")
+        if score is not None:
+            entry["confidence"] = min(abs(float(score)) / 3.0, 1.0)
+        entry["override_reason"] = (
+            f"[reverted:{attempted}] {discard}"
+            + (f" | model said: {reason}" if reason else "")
+        )
+        logger.info(
+            "Stance override reverted for %s %s: %s -> %s (%s)",
+            product_id,
+            tf,
+            attempted,
+            det,
+            discard,
+        )
     return stances
 
 
@@ -344,6 +453,9 @@ def _validate_llm_stances(payload: dict) -> list[dict[str, Any]]:
                 if conf is not None
                 else None,
                 "rationale": str(item.get("rationale") or "").strip(),
+                # Optional; only requested when a Phase 1 flag is on.
+                "override_reason": str(item.get("override_reason") or "").strip()
+                or None,
             }
         )
     missing = [
@@ -367,6 +479,10 @@ def run_stance_cycle(cycle_ts: str | None = None) -> dict[str, Any]:
     funding_block = _funding_context_block()
 
     content_parts = [_STANCE_PROMPT, _features_block(features)]
+    if getattr(bot_config, "STANCE_PUBLISH_DETERMINISTIC", False) or getattr(
+        bot_config, "STANCE_OVERRIDE_REQUIRE_EVIDENCE", False
+    ):
+        content_parts.append(_OVERRIDE_EVIDENCE_RULE)
     if funding_block:
         content_parts.append(funding_block)
     if macro_block:
@@ -395,7 +511,22 @@ def run_stance_cycle(cycle_ts: str | None = None) -> dict[str, Any]:
         stances = _fallback_stances(features)
         source = "programmatic"
 
+    if getattr(bot_config, "STANCE_LOG_COUNTERFACTUAL", True):
+        stances = apply_override_policy(stances, features)
+
     store.insert_stances(cycle_ts, stances, source=source)
+
+    # Phase 2 shadow read, on the same bars and the same cycle so the two
+    # artifacts see one tape. Wrapped because an experiment must never cost
+    # the board its cycle.
+    if getattr(bot_config, "INTEL_CONDITIONAL_READS_ENABLED", False):
+        try:
+            from intelligence import conditional
+
+            conditional.run_conditional_cycle(cycle_ts, bars_by_product)
+        except Exception:
+            logger.exception("Conditional read cycle failed for %s", cycle_ts)
+
     render_structure_board(bars_by_product, stances)
     funding_note = funding_block or None
     if not medium_summary:
@@ -414,6 +545,16 @@ def run_stance_cycle(cycle_ts: str | None = None) -> dict[str, Any]:
         medium_summary,
         btc_eth_note=btc_eth_note or None,
         funding_note=funding_note,
+    )
+    overrides = sum(
+        1
+        for s in stances
+        if s.get("det_stance") and s["det_stance"] != s["stance"]
+    )
+    logger.info(
+        "Stance cycle %s: %s override(s) of the deterministic score survived",
+        cycle_ts,
+        overrides,
     )
     logger.info(
         "Stance cycle %s stored (%s entries, source=%s)",
