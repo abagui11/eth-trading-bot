@@ -309,6 +309,50 @@ that bar.
    Any Phase 2 success inside a single regime is provisional by the pack's
    own rules; the promotion bar requires surviving a second.
 
+## 3a. Consumer counterfactuals — shadow-wired everywhere (2026-09-17)
+
+Staging one consumer at a time was the wrong call: each consumer keeps its own
+book, so attribution was never the blocker. The blockers were that the read
+emits `null` by design and no consumer has null semantics, and that we do not
+yet know it is better. Both are solved by recording rather than acting, and
+that pattern generalises — so **every** consumer now logs what it *would*
+have done, in parallel, at zero risk.
+
+| Consumer | Records | Where |
+|---|---|---|
+| HQ | H4 read's bias beside the suggestion's action | `intel_read_counterfactuals` (hub) |
+| Mill | read's direction beside the direction it minted on | `ideas.meta_json.cond_read` |
+| `eva_wick` | what `lean` / side would have been, incl. abstentions | `kalshi_decisions.setup_tags` + log |
+
+Three stores because three hosts; analysis joins them. Each site is wrapped
+and fail-soft, and none of them can reach a direction: the property pinned by
+`test_direction_is_never_changed_by_the_read` and
+`test_conditional_block_does_not_affect_get_stances`.
+
+**`null` is an abstention, not a neutral — everywhere.** The mill's existing
+fallback turns `neutral` into a direction via local `structure_bias`; mapping
+a withheld bias to neutral would let it invent the call the read declined to
+make. Recorded as `abstain` with `agreed = None`, because there is nothing to
+agree or disagree with.
+
+**HQ is recorded but deliberately not informed.** The read is not in the
+proposal prompt. The 52-trade placebo result is measured on the current
+prompt, so feeding it in would forfeit the one validated comparison HQ has,
+in exchange for the slowest test surface we own (~1 trade/day against the
+mill's 240 closed trades in five weeks).
+
+### Barrier-implied baseline
+
+`read_scorer.barrier_implied_hit_prob` nets the geometry off the accuracy.
+"Target before invalidation" is not interpretable alone — a draw 0.5% away
+against an invalidation 2% away wins that race ~80% of the time by geometry,
+exactly as a 0.3R target beats a 1R stop. For a driftless walk between two
+absorbing barriers the chance of reaching the target first, *given* one was
+reached, is the opposite barrier's share of the distance (gambler's ruin).
+`skill_over_geometry = conditional_accuracy - mean(implied)` is the number to
+read; the raw rate is not. Conditioning on "one barrier was reached" is why
+it needs no horizon term and why it is averaged over decided reads only.
+
 ## 3b. Reverting (one flag, plus a stamp)
 
 The whole point of the epoch marker is that this is cheap to undo:

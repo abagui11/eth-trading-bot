@@ -92,10 +92,24 @@ async def intelligence_latest() -> dict:
         pid: intel_store.latest_funding_regime(pid)
         for pid in bot_config.FUNDING_PRODUCTS
     }
+    # Additive: shipped on /latest so a consumer building its conditional-read
+    # counterfactual needs no second round trip. `consume: false` is on the
+    # dedicated route and repeated here in the block's own status field —
+    # nothing should gate on these yet.
+    try:
+        conditional = intel_store.latest_reads()
+    except Exception:
+        conditional = []
     return {
         "enabled": bot_config.INTELLIGENCE_ENABLED,
         "cycle_ts": stances[0]["cycle_ts"] if stances else None,
         "stances": stances,
+        "conditional_reads": {
+            "status": "experimental",
+            "consume": False,
+            "invalidation_convention": "m5_close_through",
+            "reads": conditional,
+        },
         "medium": {
             "summary": (medium or {}).get("summary"),
             "btc_eth_note": (medium or {}).get("btc_eth_note"),

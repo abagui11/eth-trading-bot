@@ -372,5 +372,100 @@ class TestReadScorer(unittest.TestCase):
         )
 
 
+class TestBarrierImpliedBaseline(unittest.TestCase):
+    """Raw 'target before invalidation' is geometry until this is netted off."""
+
+    def _read(self, target: float, inval: float, spot: float = 100.0) -> dict:
+        return {"spot": spot, "attracting_lo": target, "attracting_hi": target,
+                "invalidation_price": inval}
+
+    def test_symmetric_barriers_are_a_coin_flip(self) -> None:
+        from intelligence import read_scorer
+
+        p = read_scorer.barrier_implied_hit_prob(self._read(110.0, 90.0))
+        self.assertAlmostEqual(p, 0.5, places=6)
+
+    def test_near_target_far_stop_is_mostly_free(self) -> None:
+        """The exact trap: 65% accuracy here would be zero skill."""
+        from intelligence import read_scorer
+
+        p = read_scorer.barrier_implied_hit_prob(self._read(101.0, 96.0))
+        self.assertAlmostEqual(p, 4.0 / 5.0, places=6)
+
+    def test_far_target_near_stop_is_mostly_hopeless(self) -> None:
+        from intelligence import read_scorer
+
+        p = read_scorer.barrier_implied_hit_prob(self._read(110.0, 99.0))
+        self.assertAlmostEqual(p, 1.0 / 11.0, places=6)
+
+    def test_missing_anchors_give_no_baseline(self) -> None:
+        from intelligence import read_scorer
+
+        self.assertIsNone(read_scorer.barrier_implied_hit_prob(
+            {"spot": 100.0, "invalidation_price": None,
+             "attracting_lo": None, "attracting_hi": None}))
+
+    def test_skill_is_accuracy_minus_geometry(self) -> None:
+        from intelligence import read_scorer
+
+        # Four decided reads, all hits, but geometry alone implied 80%.
+        resolved = [{
+            "id": i, "product_id": "BTC-USD", "timeframe": "H4",
+            "bias": "bullish", "outcome": "resolved_target",
+            "mfe_pct": 1.0, "mae_pct": -0.2, "implied_prob": 0.8,
+            "created_at": "2026-09-17T12:00:00Z",
+        } for i in range(4)]
+        summary = read_scorer.summarize(
+            resolved, [(None, {"stale_invalidation": 0})] * 4
+        )
+        self.assertEqual(summary["conditional_accuracy"], 1.0)
+        self.assertAlmostEqual(summary["barrier_implied_accuracy"], 0.8)
+        self.assertAlmostEqual(summary["skill_over_geometry"], 0.2)
+
+    def test_skill_is_none_without_a_baseline(self) -> None:
+        from intelligence import read_scorer
+
+        resolved = [{
+            "id": 1, "product_id": "BTC-USD", "timeframe": "H4",
+            "bias": "bullish", "outcome": "resolved_target",
+            "mfe_pct": 1.0, "mae_pct": -0.2, "implied_prob": None,
+            "created_at": "2026-09-17T12:00:00Z",
+        }]
+        summary = read_scorer.summarize(
+            resolved, [(None, {"stale_invalidation": 0})]
+        )
+        self.assertIsNone(summary["skill_over_geometry"])
+
+
+class TestCounterfactualStore(TempDbTestCase):
+    def test_agreement_is_derived_not_passed(self) -> None:
+        store.insert_read_counterfactual(
+            "hq", product_id="BTC-USD", timeframe="H4",
+            actual="bullish", counterfactual="bullish", ref="c1")
+        store.insert_read_counterfactual(
+            "hq", product_id="ETH-USD", timeframe="H4",
+            actual="bullish", counterfactual="bearish", ref="c2")
+        rows = {r["ref"]: r for r in store.read_counterfactuals()}
+        self.assertEqual(rows["c1"]["agreed"], 1)
+        self.assertEqual(rows["c2"]["agreed"], 0)
+
+    def test_abstention_is_not_a_disagreement(self) -> None:
+        """A withheld bias has nothing to disagree with."""
+        store.insert_read_counterfactual(
+            "hq", product_id="BTC-USD", actual="bullish", counterfactual=None)
+        store.insert_read_counterfactual(
+            "hq", product_id="BTC-USD", actual=None, counterfactual="bullish")
+        for row in store.read_counterfactuals():
+            self.assertIsNone(row["agreed"])
+
+    def test_filtered_by_consumer(self) -> None:
+        store.insert_read_counterfactual(
+            "hq", product_id="BTC-USD", actual="bullish", counterfactual="bullish")
+        store.insert_read_counterfactual(
+            "mill", product_id="BTC-USD", actual="bearish", counterfactual="bearish")
+        self.assertEqual(len(store.read_counterfactuals(consumer="hq")), 1)
+        self.assertEqual(len(store.read_counterfactuals()), 2)
+
+
 if __name__ == "__main__":
     unittest.main()

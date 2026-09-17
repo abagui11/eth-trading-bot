@@ -53,6 +53,37 @@ def _parse_ts(value: str | None) -> datetime | None:
         return None
 
 
+def barrier_implied_hit_prob(read: dict[str, Any]) -> float | None:
+    """Chance of printing the target before invalidation with no skill.
+
+    "Target before invalidation" is uninterpretable on its own: a draw 0.5%
+    away against an invalidation 2% away wins that race most of the time by
+    geometry alone, exactly as a 0.3R target beats a 1R stop most of the time.
+    For a driftless walk between two absorbing barriers, the probability of
+    reaching the target first, *given* that one of them was reached, is the
+    opposite barrier's share of the total distance (gambler's ruin). Actual
+    accuracy minus the mean of this is the read's skill; the raw rate is not.
+
+    Conditioning on "one barrier was reached" is why this is compared against
+    decided reads only, and why the formula needs no horizon term.
+    """
+    spot = read.get("spot")
+    inval = read.get("invalidation_price")
+    band = _band(read.get("attracting_lo"), read.get("attracting_hi"))
+    if not spot or not inval or not band:
+        return None
+    spot, inval = float(spot), float(inval)
+    if spot <= 0:
+        return None
+    target = (band[0] + band[1]) / 2
+    d_target = abs(target - spot)
+    d_inval = abs(spot - inval)
+    total = d_target + d_inval
+    if total <= 0:
+        return None
+    return d_inval / total
+
+
 def _band(lo: Any, hi: Any) -> tuple[float, float] | None:
     try:
         lo_f, hi_f = float(lo), float(hi)
@@ -165,7 +196,13 @@ def score_window(
             b for b in candles.get(product_id) or []
             if start < _bar_epoch(b) <= end
         ]
-        resolved.append(resolve_read(read, bars) | {"created_at": read["created_at"]})
+        resolved.append(
+            resolve_read(read, bars)
+            | {
+                "created_at": read["created_at"],
+                "implied_prob": barrier_implied_hit_prob(read),
+            }
+        )
     return summarize(resolved, eligible)
 
 
@@ -193,6 +230,15 @@ def summarize(
         ]
         return sum(spans) / len(spans) if spans else None
 
+    # Skill = accuracy minus the geometry it was handed. Averaged over the
+    # same decided reads the accuracy is computed on, or the two are not
+    # comparable.
+    implied = [
+        r["implied_prob"] for r in decided if r.get("implied_prob") is not None
+    ]
+    implied_mean = sum(implied) / len(implied) if implied else None
+    accuracy = (len(hits) / len(decided)) if decided else None
+
     out: dict[str, Any] = {
         "n_eligible": len(resolved),
         "n_days": len(days),
@@ -200,7 +246,14 @@ def summarize(
         "n_directional": len(directional),
         "n_decided": len(decided),
         "n_unresolved": len(directional) - len(decided),
-        "conditional_accuracy": (len(hits) / len(decided)) if decided else None,
+        "conditional_accuracy": accuracy,
+        "barrier_implied_accuracy": implied_mean,
+        "skill_over_geometry": (
+            accuracy - implied_mean
+            if accuracy is not None and implied_mean is not None
+            else None
+        ),
+        "n_with_implied": len(implied),
         "n_null_bias": len(null_reads),
         "null_bias_rate": len(null_reads) / len(resolved) if resolved else None,
         "stale_invalidation_rate": (
@@ -215,12 +268,23 @@ def summarize(
     }
     for tf in sorted({r["timeframe"] for r in resolved if r["timeframe"]}):
         tf_decided = [r for r in decided if r["timeframe"] == tf]
+        tf_implied = [
+            r["implied_prob"] for r in tf_decided
+            if r.get("implied_prob") is not None
+        ]
+        tf_acc = (
+            sum(1 for r in tf_decided if r["outcome"] == "resolved_target")
+            / len(tf_decided)
+        ) if tf_decided else None
+        tf_imp = sum(tf_implied) / len(tf_implied) if tf_implied else None
         out["by_timeframe"][tf] = {
             "n_decided": len(tf_decided),
-            "accuracy": (
-                sum(1 for r in tf_decided if r["outcome"] == "resolved_target")
-                / len(tf_decided)
-            ) if tf_decided else None,
+            "accuracy": tf_acc,
+            "barrier_implied_accuracy": tf_imp,
+            "skill_over_geometry": (
+                tf_acc - tf_imp
+                if tf_acc is not None and tf_imp is not None else None
+            ),
         }
     # The honest-uncertainty note travels with the numbers, so a small sample
     # cannot be quoted as a result by someone reading only the JSON.

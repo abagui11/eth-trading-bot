@@ -60,6 +60,26 @@ CREATE TABLE IF NOT EXISTS intel_reads (
 CREATE INDEX IF NOT EXISTS idx_intel_reads_cycle ON intel_reads(cycle_ts);
 CREATE INDEX IF NOT EXISTS idx_intel_reads_product ON intel_reads(product_id, timeframe);
 
+-- Per-consumer counterfactual: what each consumer DID, next to what it would
+-- have done on the conditional read. Written by hub-side consumers only; the
+-- mill and the Kalshi bot record theirs in their own books (different hosts),
+-- and analysis joins the three.
+CREATE TABLE IF NOT EXISTS intel_read_counterfactuals (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    consumer TEXT NOT NULL,
+    ref TEXT,
+    product_id TEXT NOT NULL,
+    timeframe TEXT,
+    actual TEXT,
+    counterfactual TEXT,
+    agreed INTEGER,
+    note TEXT,
+    created_at TEXT NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_intel_read_cf_consumer
+    ON intel_read_counterfactuals(consumer, created_at);
+
 CREATE TABLE IF NOT EXISTS intel_medium (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     cycle_ts TEXT NOT NULL,
@@ -343,6 +363,59 @@ def read_history(*, limit: int = 200, offset: int = 0) -> list[dict[str, Any]]:
             "LIMIT ? OFFSET ?",
             (limit, offset),
         ).fetchall()
+    return [dict(r) for r in rows]
+
+
+def insert_read_counterfactual(
+    consumer: str,
+    *,
+    product_id: str,
+    actual: str | None,
+    counterfactual: str | None,
+    ref: str | None = None,
+    timeframe: str | None = None,
+    note: str | None = None,
+) -> None:
+    """Record one consumer decision beside its conditional-read counterfactual.
+
+    `agreed` is derived, not passed: a caller computing it would eventually
+    disagree with the column it wrote. None on either side means there is
+    nothing to compare — "the desk declined to call" is not a disagreement.
+    """
+    init_db()
+    agreed = (
+        None if actual is None or counterfactual is None
+        else int(actual == counterfactual)
+    )
+    with _connect() as conn:
+        conn.execute(
+            """
+            INSERT INTO intel_read_counterfactuals
+                (consumer, ref, product_id, timeframe, actual, counterfactual,
+                 agreed, note, created_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (consumer, ref, product_id, timeframe, actual, counterfactual,
+             agreed, note, _now_iso()),
+        )
+        conn.commit()
+
+
+def read_counterfactuals(
+    *, consumer: str | None = None, limit: int = 500
+) -> list[dict[str, Any]]:
+    init_db()
+    with _connect() as conn:
+        if consumer:
+            rows = conn.execute(
+                "SELECT * FROM intel_read_counterfactuals WHERE consumer = ? "
+                "ORDER BY created_at DESC LIMIT ?", (consumer, limit)
+            ).fetchall()
+        else:
+            rows = conn.execute(
+                "SELECT * FROM intel_read_counterfactuals "
+                "ORDER BY created_at DESC LIMIT ?", (limit,)
+            ).fetchall()
     return [dict(r) for r in rows]
 
 

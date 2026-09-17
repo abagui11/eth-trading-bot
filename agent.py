@@ -59,6 +59,45 @@ def select_decisions(suggestions: list[Suggestion]) -> list[Suggestion]:
     return selected
 
 
+_HQ_SIDE = {"spot_buy": "bullish", "spot_sell": "bearish", "deriv_buy": "bullish",
+            "deriv_sell": "bearish"}
+
+
+def _record_read_counterfactual(suggestion: Suggestion, cycle_id: str) -> None:
+    """Log what the H4 conditional read said beside what HQ actually did.
+
+    Fail-soft and side-effect free: an experiment's bookkeeping must never
+    cost a cycle. The read in force is the previous cycle's, because the
+    stance job runs *after* the trade cycle — which is also the honest
+    counterfactual, since that is what was on the board when HQ decided.
+    """
+    if not getattr(bot_config, "INTEL_CONDITIONAL_READS_ENABLED", False):
+        return
+    try:
+        from intelligence import store as intel_store
+
+        reads = {
+            (r.get("product_id"), r.get("timeframe")): r
+            for r in intel_store.latest_reads()
+        }
+        read = reads.get((suggestion.product_id, "H4"))
+        actual = _HQ_SIDE.get(str(suggestion.action or "").lower())
+        intel_store.insert_read_counterfactual(
+            "hq",
+            ref=cycle_id,
+            product_id=suggestion.product_id,
+            timeframe="H4",
+            actual=actual,
+            counterfactual=(read or {}).get("bias"),
+            note=(
+                f"hq_action={suggestion.action}"
+                + (f" read_state={read.get('repelling_state')}" if read else " no_read")
+            ),
+        )
+    except Exception:
+        logger.exception("Read counterfactual failed for %s", cycle_id)
+
+
 def run_cycle() -> list[tuple[Suggestion, list[str]]] | None:
     """Run one dual-asset cycle and return persisted product decisions."""
     cycle_id = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
@@ -193,6 +232,11 @@ def run_cycle() -> list[tuple[Suggestion, list[str]]] | None:
                 macro_json=macro_snap,
             )
             ledger.require_cycle_recorded(product_cycle_id)
+            # Conditional-read counterfactual. Recorded only — the read is NOT
+            # in the proposal prompt, because the 52-trade placebo baseline is
+            # measured on the current prompt and changing it would forfeit the
+            # one validated comparison HQ has.
+            _record_read_counterfactual(suggestion, product_cycle_id)
             # House/agent book only — user books open on Accept.
             paper.update(
                 suggestion,
