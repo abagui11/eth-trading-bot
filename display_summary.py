@@ -315,11 +315,11 @@ def build_card_body(
     stop = float(suggestion.stop_loss)
     tp1 = float(suggestion.take_profits[0]) if suggestion.take_profits else None
 
-    # HQ hourly (abstention-first ICT) cards carry the High Quality label;
+    # HQ hourly (abstention-first ICT) cards carry the ICT label;
     # watchdog programmatic fires do not.
     title = friendly_title(suggestion)
     if not is_watchdog_suggestion(suggestion):
-        title = f"High Quality · {title}"
+        title = f"ICT · {title}"
 
     # The banner already names the entry and says what happens to it, so the
     # old lead would only repeat the price under a vaguer verb.
@@ -359,17 +359,28 @@ def build_card_body(
 
             if pool.is_approved(int(telegram_id)):
                 prosp = pool.prospective_accept(
-                    int(telegram_id), entry=entry, stop_loss=stop
+                    int(telegram_id), entry=entry, stop_loss=stop,
+                    strategy="ict",
                 )
                 lines.append("")
                 if prosp.get("ok"):
                     risk_pct = float(prosp["risk_pct"]) * 100
+                    base = float(
+                        prosp.get("base_usd") or prosp.get("available_usd") or 0
+                    )
                     lines.append(
                         f"Your Accept ≈ ${float(prosp['risk_usd']):,.2f} at risk "
-                        f"({risk_pct:.1f}% of ${float(prosp['available_usd']):,.0f} available)"
+                        f"({risk_pct:.1f}% of your ${base:,.0f} "
+                        "ICT Trades allocation)"
                     )
                     lines.append(
                         f"≈ ${float(prosp['notional_usd']):,.0f} position size at this stop"
+                    )
+                elif prosp.get("reason") == "no_allocation":
+                    lines.append(
+                        "You haven't allocated to ICT Trades yet — /subscribe "
+                        "to deploy capital, then Accept puts money on cards "
+                        "like this."
                     )
                 elif prosp.get("reason") == "below_min_equity":
                     lines.append(
@@ -384,8 +395,8 @@ def build_card_body(
                 else:
                     lines.append(
                         "Fund with /deposit to join this trade with live size "
-                        f"(about {bot_config.POOL_RISK_PCT * 100:.1f}% of available "
-                        "cash at risk per Accept)."
+                        f"(about {bot_config.POOL_RISK_PCT * 100:.1f}% of your "
+                        "strategy allocation at risk per Accept)."
                     )
             else:
                 lines.append("")

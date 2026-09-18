@@ -152,7 +152,7 @@ def format_pending_notice(
         product_id=str(row["product_id"]),
     )
     product = bot_config.product_label(suggestion.product_id)
-    title = f"High Quality · {display_summary.friendly_title(suggestion)}"
+    title = f"ICT · {display_summary.friendly_title(suggestion)}"
     entry = float(row["entry"])
     side = display_summary.side_label(suggestion.action)
     headline = _PENDING_HEADLINES.get(outcome, "This order is no longer resting.")
@@ -563,7 +563,9 @@ async def broadcast_to_subscribers(
     recipients = (
         access.internal_recipient_ids()
         if internal_only
-        else access.broadcast_recipient_ids()
+        # HQ (ICT lane) cards go to that strategy's subscribers; with the
+        # pool off this falls back to the full broadcast list.
+        else access.strategy_recipient_ids("ict")
     )
     sent = set()
 

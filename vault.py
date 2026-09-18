@@ -557,7 +557,7 @@ def _card(row: dict[str, Any], *, my_decision: str | None = None) -> dict[str, A
         "cycle_id": data.get("cycle_id"),
         "product_id": data.get("product_id"),
         "direction": data.get("side"),
-        "title": data.get("title") or f"High Quality · {data.get('product_id')}",
+        "title": data.get("title") or f"ICT · {data.get('product_id')}",
         "blurb": data.get("blurb") or "",
         "entry": data.get("entry"),
         "stop_loss": data.get("stop_loss"),

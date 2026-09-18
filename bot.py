@@ -19,6 +19,7 @@ from telegram.ext import (
 
 import access
 import bot_config
+import brain_report
 import chart_view
 import chat
 import config
@@ -28,6 +29,7 @@ import notify
 import paper
 import pool
 import research
+import strategy_catalog
 import telegram_ui
 import trade_ideas_bridge
 import user_books
@@ -45,6 +47,15 @@ PAYWALL_MESSAGE = (
 _CB_IDEA_PREFIX = "idea:"
 # Personal idea-portfolio closes from /me (uportfolio:close:<user_paper_id>).
 _CB_UPORTFOLIO_PREFIX = "uportfolio:"
+# Kalshi lane cards relayed through this bot (kalshi:accept:<key>:<token>).
+# Cards only for now — capital does not route to Kalshi yet, so Accept
+# acknowledges instead of reserving.
+_CB_KALSHI_PREFIX = "kalshi:"
+# Deep-link payload from the website deploy buttons:
+# t.me/<bot>?start=subscribe_<strategy>.
+_START_SUBSCRIBE_PREFIX = "subscribe_"
+# pool_meta key holding a gated user's intended strategy until they're admitted.
+_PENDING_SUB_META = "pending_sub:{telegram_id}"
 
 # Kept for any external imports; live copy lives in telegram_ui.
 WELCOME_MESSAGE = telegram_ui.WELCOME_MESSAGE
@@ -200,9 +211,13 @@ def _pool_intent_reply(result: dict, *, risk_label: str = "risk") -> str:
     if result.get("ok"):
         risk = float(result["risk_usd"])
         pct = float(bot_config.POOL_RISK_PCT) * 100
+        base = (
+            "your allocation to this strategy"
+            if result.get("strategy") else "your available cash"
+        )
         return (
             f"You're in if it fills.\n\n"
-            f"Reserved: ${risk:,.2f} at risk ({pct:.1f}% of your available cash). "
+            f"Reserved: ${risk:,.2f} at risk ({pct:.1f}% of {base}). "
             "That is the most this trade can cost you if stopped out — not your "
             "full balance. Same fill price as the house; exits are automatic.\n\n"
             "I'll DM you either way — when it fills, or when it's pulled and "
@@ -227,16 +242,32 @@ def _pool_intent_reply(result: dict, *, risk_label: str = "risk") -> str:
         )
     if reason in ("not_funded", "no_available_cash"):
         return "No available cash for this one — /portfolio shows what's reserved."
+    if reason == "no_allocation":
+        return (
+            "You haven't allocated capital to this strategy yet — /subscribe "
+            "to deploy, then Accept the next card."
+        )
     return f"Could not join ({reason})."
 
 
-def _pool_hq_accept(offer_id: str, user_id: int) -> str:
-    """A funded tester's Accept on an HQ card → pool intent (sync, executor)."""
+def _deploy_prompt_reply(strategy_key: str, user_id: int) -> tuple[str, object]:
+    """(text, keyboard) asking the tester to allocate before accepting."""
+    p = pool.portfolio(user_id)
+    if not p.get("ok"):
+        p = {"cash_usd": 0.0, "available_usd": 0.0}
+    return (
+        strategy_catalog.deploy_prompt(strategy_key, p),
+        telegram_ui.alloc_keyboard(strategy_key),
+    )
+
+
+def _pool_hq_accept(offer_id: str, user_id: int) -> tuple[str, object | None]:
+    """A funded tester's Accept on an ICT card → pool intent (sync, executor)."""
     import live_pending
 
     offer = user_books.get_offer(offer_id)
     if offer is None:
-        return "Could not find that trade offer."
+        return "Could not find that trade offer.", None
     product_id = str(offer.get("product_id") or "")
     waiting = live_pending.get_pending(product_id)
     row = next(
@@ -247,8 +278,13 @@ def _pool_hq_accept(offer_id: str, user_id: int) -> str:
             "This order has already gone on or been pulled — your Accept came "
             "after the window, so you're not in this trade. The next card is "
             "never far."
-        )
-    return _pool_intent_reply(pool.record_intent(str(offer_id), user_id))
+        ), None
+    result = pool.record_intent(
+        str(offer_id), user_id, strategy=strategy_catalog.ICT
+    )
+    if result.get("reason") == "no_allocation":
+        return _deploy_prompt_reply(strategy_catalog.ICT, user_id)
+    return _pool_intent_reply(result), None
 
 
 DEMO_REF_PREFIX = "demo_"
@@ -296,7 +332,7 @@ def _pool_demo_accept(token: str, user_id: int) -> str:
     )
 
 
-def _pool_mill_accept(idea_id: int, user_id: int) -> str:
+def _pool_mill_accept(idea_id: int, user_id: int) -> tuple[str, object | None]:
     """A funded tester's Accept on a mill card (sync, executor).
 
     Order matters: the intent is recorded **before** the fill is attempted, so
@@ -314,23 +350,25 @@ def _pool_mill_accept(idea_id: int, user_id: int) -> str:
         return (
             "This idea has already filled or expired — your Accept came after "
             "the window, so you're not in this one."
-        )
+        ), None
 
-    recorded = pool.record_intent(ref, user_id)
+    recorded = pool.record_intent(ref, user_id, strategy=strategy_catalog.MILL)
+    if recorded.get("reason") == "no_allocation":
+        return _deploy_prompt_reply(strategy_catalog.MILL, user_id)
     if not recorded.get("ok"):
-        return _pool_intent_reply(recorded)
+        return _pool_intent_reply(recorded), None
 
     if not trade_ideas_bridge.may_fill(user_id):
-        return _pool_intent_reply(recorded)
+        return _pool_intent_reply(recorded), None
 
     try:
         verdict = trade_ideas_bridge.request_manual_fill(idea_id, user_id)
     except Exception:
         logger.exception("pool-triggered mill fill failed for idea %s", idea_id)
-        return _pool_intent_reply(recorded)
+        return _pool_intent_reply(recorded), None
 
     if verdict.get("executed"):
-        return _pool_fill_reply(recorded, verdict, user_id)
+        return _pool_fill_reply(recorded, verdict, user_id), None
 
     # Refused, and we know why now.
     released = pool.release_intents(ref, status="missed")
@@ -342,7 +380,7 @@ def _pool_mill_accept(idea_id: int, user_id: int) -> str:
     return (
         f"Not filled — nothing was risked and your ${back:,.2f} is free "
         f"again.\n\n{why}\n\nI'll send the next card when one sets up."
-    )
+    ), None
 
 
 def _pool_fill_reply(recorded: dict, verdict: dict, user_id: int) -> str:
@@ -501,14 +539,35 @@ async def _handle_research(update: Update, context: ContextTypes.DEFAULT_TYPE, t
         await _reply(update, report.detail_text[:4096])
 
 
+def _start_payload_strategy(context: ContextTypes.DEFAULT_TYPE) -> str | None:
+    """Strategy key carried by a website deploy deep link, if any."""
+    args = context.args or []
+    payload = str(args[0]).strip().lower() if args else ""
+    if payload.startswith(_START_SUBSCRIBE_PREFIX):
+        key = payload[len(_START_SUBSCRIBE_PREFIX):]
+        if strategy_catalog.is_valid(key):
+            return key
+    return None
+
+
 async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     user = update.effective_user
     if user is None or update.message is None:
         return
 
     access.register_user(user.id, _username(update))
+    sub_key = _start_payload_strategy(context)
 
     if not access.is_allowed(user.id):
+        # Remember which strategy the deploy button promised; the admin's
+        # Admit applies it so the user lands already subscribed.
+        if sub_key is not None and bot_config.POOL_ENABLED:
+            try:
+                pool.set_meta(
+                    _PENDING_SUB_META.format(telegram_id=user.id), sub_key
+                )
+            except Exception:
+                logger.exception("pending-sub meta write failed for %s", user.id)
         await _handle_gated_user(update, context)
         return
 
@@ -524,6 +583,15 @@ async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
             markdown=True,
             reply_markup=telegram_ui.pool_account_keyboard(),
         )
+        if sub_key is not None:
+            loop = asyncio.get_running_loop()
+            try:
+                text, keyboard = await loop.run_in_executor(
+                    None, _subscribe_and_prompt, user.id, sub_key
+                )
+                await update.message.reply_text(text, reply_markup=keyboard)
+            except Exception:
+                logger.exception("deep-link subscribe failed for %s", user.id)
         return
 
     spots = research.get_spot_prices()
@@ -584,6 +652,119 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
 
     data = query.data or ""
     chat_id = query.message.chat_id if query.message else user_id
+
+    # --- Strategy subscriptions (/subscribe flow) --------------------------
+    if data.startswith(telegram_ui.CB_SUB_PREFIX):
+        parts = data.split(":")
+        action = parts[1] if len(parts) > 1 else ""
+        key = parts[2] if len(parts) > 2 else ""
+        if not strategy_catalog.is_valid(key):
+            return
+        if not (bot_config.POOL_ENABLED and pool.is_approved(user_id)):
+            try:
+                await context.bot.send_message(
+                    user_id,
+                    "Strategy subscriptions are for live pool accounts.",
+                )
+            except Exception:
+                logger.debug("sub gate DM failed", exc_info=True)
+            return
+        loop = asyncio.get_running_loop()
+        strat = strategy_catalog.STRATEGIES[key]
+        reply_markup = None
+        if action == "choose":
+            try:
+                reply, reply_markup = await loop.run_in_executor(
+                    None, _subscribe_and_prompt, user_id, key
+                )
+            except Exception:
+                logger.exception("subscribe choose failed for %s", key)
+                reply = "Could not subscribe — try again."
+        elif action == "alloc" and len(parts) > 3:
+            try:
+                pct = max(0, min(100, int(parts[3])))
+            except ValueError:
+                return
+
+            def _alloc() -> str:
+                p = pool.portfolio(user_id)
+                if not p.get("ok"):
+                    return "Fund your account first — /deposit."
+                amount = round(
+                    float(p.get("available_usd") or 0) * pct / 100.0, 2
+                )
+                if amount <= 0:
+                    return (
+                        "No available cash to allocate right now — /deposit "
+                        "to top up, or free a reserve first."
+                    )
+                result = pool.set_allocation(user_id, key, amount)
+                if not result.get("ok"):
+                    return f"Could not allocate ({result.get('reason')})."
+                pool.subscribe_strategy(user_id, key)
+                risk = amount * float(bot_config.POOL_RISK_PCT)
+                text = (
+                    f"Allocated ${amount:,.2f} to {strat.label} "
+                    f"({pct}% of your available cash).\n\n"
+                    f"Each Accept on its cards now risks about ${risk:,.2f} "
+                    f"({bot_config.POOL_RISK_PCT * 100:.1f}% of the "
+                    "allocation) at the stop. /allocate "
+                    f"{key} <amount> changes it any time."
+                )
+                if not strat.executable:
+                    text += (
+                        "\n\nThis lane publishes idea cards only for now — "
+                        "the allocation activates once Kalshi execution ships."
+                    )
+                return text
+
+            try:
+                reply = await loop.run_in_executor(None, _alloc)
+            except Exception:
+                logger.exception("subscribe alloc failed for %s", key)
+                reply = "Could not allocate — try again."
+        elif action == "skip":
+            reply = (
+                f"No allocation set for {strat.label} — you'll still get its "
+                "trade ideas here. When you're ready to put money on one, "
+                f"/allocate {key} <amount> or tap Accept and I'll walk you "
+                "through it."
+            )
+        else:
+            return
+        try:
+            await context.bot.send_message(
+                user_id, reply, reply_markup=reply_markup
+            )
+        except Exception:
+            logger.exception("subscribe reply DM failed for %s", user_id)
+        return
+
+    # --- Kalshi lane cards (relayed; cards only, no execution yet) ---------
+    if data.startswith(_CB_KALSHI_PREFIX):
+        parts = data.split(":")
+        action = parts[1] if len(parts) > 1 else ""
+        key = parts[2] if len(parts) > 2 else ""
+        label = (
+            strategy_catalog.STRATEGIES[key].label
+            if strategy_catalog.is_valid(key) else "this Kalshi lane"
+        )
+        if action == "accept":
+            reply = (
+                f"Noted — you're tracking this {label} idea.\n\n"
+                "Capital deployment to Kalshi is coming soon, so Accept "
+                "doesn't place an order on this lane yet. The card settles "
+                "on its own within the 15-minute window."
+            )
+        elif action == "reject":
+            reply = "Noted — you're staying out of this one."
+        else:
+            return
+        try:
+            await context.bot.send_message(user_id, reply)
+        except Exception:
+            logger.exception("kalshi reply DM failed for %s", user_id)
+        return
 
     # --- Tester pool: admin Admit/Deny, deposit decisions, Account buttons ---
     if data.startswith(telegram_ui.CB_POOL_DEMO_PREFIX):
@@ -647,6 +828,22 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
                 )
             except Exception:
                 logger.exception("Welcome DM failed for %s", target_id)
+            # A deploy deep link brought them here: land them subscribed to
+            # the strategy the website button promised.
+            pending_key = _PENDING_SUB_META.format(telegram_id=target_id)
+            try:
+                pending_sub = pool.get_meta(pending_key)
+                if pending_sub and strategy_catalog.is_valid(pending_sub):
+                    loop = asyncio.get_running_loop()
+                    text, keyboard = await loop.run_in_executor(
+                        None, _subscribe_and_prompt, target_id, pending_sub
+                    )
+                    await context.bot.send_message(
+                        target_id, text, reply_markup=keyboard
+                    )
+                pool.del_meta(pending_key)
+            except Exception:
+                logger.exception("pending-sub apply failed for %s", target_id)
             await context.bot.send_message(
                 chat_id, f"Admitted {target_id}. They got the welcome + invite."
             )
@@ -977,6 +1174,7 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
             and not trade_ideas_bridge.is_fill_operator(user_id)
         ):
             loop = asyncio.get_running_loop()
+            reply_markup = None
             if not pool.is_funded(user_id):
                 reply = (
                     "Your account has no funds yet, so this Accept was not "
@@ -984,7 +1182,7 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
                 )
             elif decision == "accept" and status in ("recorded", "duplicate"):
                 try:
-                    reply = await loop.run_in_executor(
+                    reply, reply_markup = await loop.run_in_executor(
                         None, _pool_mill_accept, idea_id, user_id
                     )
                 except Exception:
@@ -997,7 +1195,9 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
                     status, decision, idea_id
                 )
             try:
-                await context.bot.send_message(user_id, reply)
+                await context.bot.send_message(
+                    user_id, reply, reply_markup=reply_markup
+                )
             except Exception:
                 logger.exception("Pool mill reply DM failed for %s", user_id)
             return
@@ -1150,6 +1350,7 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
         # Pool testers: Accept joins the real shared order. DM only — the
         # demo path below would post their reply into the group topic.
         if bot_config.POOL_ENABLED and pool.is_approved(user_id):
+            reply_markup = None
             if not pool.is_funded(user_id):
                 reply = (
                     "Your account has no funds yet, so this Accept was not "
@@ -1158,14 +1359,16 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
             else:
                 loop = asyncio.get_running_loop()
                 try:
-                    reply = await loop.run_in_executor(
+                    reply, reply_markup = await loop.run_in_executor(
                         None, _pool_hq_accept, offer_id, user_id
                     )
                 except Exception:
                     logger.exception("pool HQ accept failed for offer %s", offer_id)
                     reply = "Could not record your Accept — try again."
             try:
-                await context.bot.send_message(user_id, reply)
+                await context.bot.send_message(
+                    user_id, reply, reply_markup=reply_markup
+                )
             except Exception:
                 logger.exception("Pool HQ reply DM failed for %s", user_id)
             return
@@ -1316,17 +1519,25 @@ async def cmd_help(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 
     if bot_config.POOL_ENABLED and pool.is_approved(user.id):
         await update.message.reply_text(
-            "Commands:\n"
+            "Portfolio commands:\n"
             "/portfolio — your cash, positions, and P&L\n"
-            "/deposit — fund your account (sizes stay small while we prove the strategy)\n"
-            "/withdraw — take money out, back to your registered wallet "
-            "(/withdraw all for everything)\n"
             "/wallet — the address you fund from and are paid back to\n"
+            "/deposit — fund your account (sizes stay small while we prove the strategies)\n"
+            "/withdraw — take money out, back to your registered wallet "
+            "(/withdraw all for everything)\n\n"
+            "Eva commands:\n"
+            "/brain — Eva's current read: marked charts, the ICT view with "
+            "order blocks and breakers, the four-year cycle, and the biggest news\n"
+            "/research — deeper market studies (funding, volume, dominance, macro)\n"
+            "Or just talk to her — ask anything in plain English.\n\n"
+            "Strategy commands:\n"
+            "/subscribe — pick which strategies' trade ideas you receive\n"
+            "/allocate — set capital per strategy; Accept sizes from it\n\n"
             "/start — welcome + how risk works\n"
             "/help — this message\n\n"
-            "Trade cards arrive here as private messages. Accept joins about "
-            f"{bot_config.POOL_RISK_PCT * 100:.1f}% of your available cash at risk "
-            "on that trade — not your full balance.",
+            "Trade cards arrive here as private messages. Accept risks about "
+            f"{bot_config.POOL_RISK_PCT * 100:.1f}% of your allocation to that "
+            "strategy — not your full balance.",
             reply_markup=telegram_ui.pool_account_keyboard(),
         )
         return
@@ -1343,6 +1554,190 @@ async def cmd_help(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         + research_router.build_catalog(),
         reply_markup=telegram_ui.main_keyboard(),
     )
+
+
+def _subscribe_and_prompt(user_id: int, key: str) -> tuple[str, object]:
+    """Subscribe (idempotent) and build the allocation question (sync)."""
+    strat = strategy_catalog.STRATEGIES[key]
+    newly = pool.subscribe_strategy(user_id, key)
+    p = pool.portfolio(user_id)
+    if not p.get("ok"):
+        p = {"cash_usd": 0.0, "available_usd": 0.0}
+    header = (
+        f"Subscribed to {strat.label} — its trade ideas now arrive here."
+        if newly else f"You're already subscribed to {strat.label}."
+    )
+    alloc = pool.get_allocation(user_id, key)
+    text = header + "\n\n" + strategy_catalog.allocation_prompt(
+        key, p, current_alloc=alloc
+    )
+    return text[:4096], telegram_ui.alloc_keyboard(key)
+
+
+def _subscribe_picker_text(user_id: int) -> str:
+    subs = set(pool.strategy_subscriptions(user_id))
+    allocs = pool.allocations(user_id)
+    lines = [
+        "Pick a strategy to subscribe to — you'll get its trade ideas here, "
+        "and you can allocate capital to it now or later.",
+        "",
+    ]
+    for key in strategy_catalog.ORDER:
+        strat = strategy_catalog.STRATEGIES[key]
+        mark = "✓ " if key in subs else ""
+        line = f"{mark}{strat.label} — {strat.pitch}"
+        amount = allocs.get(key) or 0
+        if amount > 0:
+            line += f" (allocated ${amount:,.2f})"
+        lines.append(line)
+        lines.append("")
+    lines.append(
+        "You only receive ideas from strategies you subscribe to, and Accept "
+        "only sizes from capital you've allocated to that strategy."
+    )
+    return "\n".join(lines)[:4096]
+
+
+async def cmd_subscribe(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Pick strategies to receive ideas from; optionally allocate capital."""
+    user = update.effective_user
+    if user is None or update.message is None:
+        return
+    access.register_user(user.id, _username(update))
+    if not access.is_allowed(user.id):
+        await _handle_gated_user(update, context)
+        return
+    if not (bot_config.POOL_ENABLED and pool.is_approved(user.id)):
+        await _reply(update, "Strategy subscriptions are for live pool accounts.")
+        return
+
+    loop = asyncio.get_running_loop()
+    args = [a.strip().lower() for a in (context.args or [])]
+    if args and strategy_catalog.is_valid(args[0]):
+        text, keyboard = await loop.run_in_executor(
+            None, _subscribe_and_prompt, user.id, args[0]
+        )
+        await update.message.reply_text(text, reply_markup=keyboard)
+        return
+
+    text = await loop.run_in_executor(None, _subscribe_picker_text, user.id)
+    await update.message.reply_text(
+        text, reply_markup=telegram_ui.subscribe_keyboard()
+    )
+
+
+async def cmd_allocate(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """/allocate <strategy> <amount|all> — set the Accept sizing base."""
+    user = update.effective_user
+    if user is None or update.message is None:
+        return
+    access.register_user(user.id, _username(update))
+    if not access.is_allowed(user.id):
+        await _handle_gated_user(update, context)
+        return
+    if not (bot_config.POOL_ENABLED and pool.is_approved(user.id)):
+        await _reply(update, "Allocations are for live pool accounts.")
+        return
+
+    keys = ", ".join(strategy_catalog.ORDER)
+    args = [a.strip() for a in (context.args or []) if a.strip()]
+    if len(args) != 2 or not strategy_catalog.is_valid(args[0].lower()):
+        await _reply(
+            update,
+            "Usage: /allocate <strategy> <amount>\n"
+            f"Strategies: {keys}\n"
+            "Example: /allocate ict 250 — or /allocate ict all",
+        )
+        return
+    key = args[0].lower()
+
+    loop = asyncio.get_running_loop()
+
+    def _apply() -> str:
+        p = pool.portfolio(user.id)
+        if not p.get("ok"):
+            return "Fund your account first — /deposit."
+        if args[1].lower() == "all":
+            amount = float(p.get("available_usd") or 0)
+        else:
+            try:
+                amount = float(args[1].replace("$", "").replace(",", ""))
+            except ValueError:
+                return "Amount must be a number, e.g. /allocate ict 250."
+        result = pool.set_allocation(user.id, key, amount)
+        if not result.get("ok"):
+            reason = result.get("reason")
+            if reason == "exceeds_cash":
+                return (
+                    f"That's more than your cash "
+                    f"(${float(result.get('cash_usd') or 0):,.2f}). "
+                    "Allocate up to your balance."
+                )
+            if reason == "not_funded":
+                return "Fund your account first — /deposit."
+            return f"Could not allocate ({reason})."
+        pool.subscribe_strategy(user.id, key)
+        strat = strategy_catalog.STRATEGIES[key]
+        risk = amount * float(bot_config.POOL_RISK_PCT)
+        lines = [
+            f"Allocated ${amount:,.2f} to {strat.label}.",
+            "",
+            f"Each Accept on its cards now risks about ${risk:,.2f} "
+            f"({bot_config.POOL_RISK_PCT * 100:.1f}% of the allocation) at "
+            "the stop.",
+        ]
+        if not strat.executable:
+            lines.append(
+                "This lane publishes idea cards only for now — the allocation "
+                "activates once Kalshi execution ships."
+            )
+        return "\n".join(lines)
+
+    try:
+        text = await loop.run_in_executor(None, _apply)
+    except Exception:
+        logger.exception("allocate failed")
+        text = "Could not allocate — try again."
+    await _reply(update, text)
+
+
+async def cmd_brain(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Eva's consolidated read: charts, ICT view, cycle, news."""
+    user = update.effective_user
+    if user is None or update.message is None:
+        return
+    access.register_user(user.id, _username(update))
+    if not access.is_allowed(user.id):
+        await _handle_gated_user(update, context)
+        return
+
+    await update.message.chat.send_action("typing")
+    loop = asyncio.get_running_loop()
+    try:
+        report = await loop.run_in_executor(None, brain_report.build_report)
+    except Exception:
+        logger.exception("Brain handler failed")
+        await _reply(update, "Sorry, I could not assemble the read right now.")
+        return
+
+    view = report.get("view")
+    chat_id = (
+        update.effective_chat.id if update.effective_chat
+        else update.message.chat_id
+    )
+    if view is not None:
+        try:
+            for i, chart_path in enumerate(view.chart_paths):
+                caption = (
+                    view.caption if i == 0
+                    else f"Chart {i + 1}/{len(view.chart_paths)}"
+                )
+                await notify.send_photo_with_caption(
+                    context.bot, chat_id, chart_path, caption
+                )
+        except Exception:
+            logger.exception("Brain chart send failed")
+    await _reply(update, report["text"])
 
 
 async def cmd_status(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -2534,6 +2929,13 @@ async def cmd_macro(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 
 
 def build_application() -> Application:
+    # One-time: existing approved testers keep receiving the streams they were
+    # already getting before per-strategy subscriptions shipped.
+    if bot_config.POOL_ENABLED:
+        try:
+            pool.seed_default_subscriptions()
+        except Exception:
+            logger.exception("strategy subscription seed failed")
     app = (
         Application.builder()
         .token(config.TELEGRAM_BOT_TOKEN)
@@ -2559,6 +2961,9 @@ def build_application() -> Application:
     app.add_handler(CommandHandler("research", cmd_research))
     app.add_handler(CommandHandler("macro", cmd_macro))
     app.add_handler(CommandHandler("watchdog", cmd_watchdog))
+    app.add_handler(CommandHandler("brain", cmd_brain))
+    app.add_handler(CommandHandler("subscribe", cmd_subscribe))
+    app.add_handler(CommandHandler("allocate", cmd_allocate))
     app.add_handler(CallbackQueryHandler(on_callback))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, on_text))
     return app

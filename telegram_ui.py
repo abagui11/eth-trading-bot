@@ -245,28 +245,79 @@ DENIED_MESSAGE = "Access is invite-only right now, and we can't add you today."
 
 POOL_WELCOME_MESSAGE = (
     "Welcome to Eva — you're in.\n\n"
-    "This is an early tester pool. We are still solidifying the strategy, so "
+    "This is an early tester pool. We are still solidifying the strategies, so "
     "position sizes are kept deliberately small on purpose — not because your "
     "deposit is ignored, but so each Accept risks only a small slice of your "
-    "cash while the book is proven.\n\n"
+    "cash while the books are proven.\n\n"
     "How risk works:\n"
-    "• When you Accept a High Quality or mill trade card, only about "
-    f"{bot_config.POOL_RISK_PCT * 100:.1f}% of your *available* cash is put "
-    "at risk on that trade (same rule as the house clip).\n"
-    "• Example: $1,000 available → roughly $7 at the stop if that trade is "
+    "• When you Accept an ICT or Trade Mill card, only about "
+    f"{bot_config.POOL_RISK_PCT * 100:.1f}% of your allocation to that "
+    "strategy is put at risk on that trade (same rule as the house clip).\n"
+    "• Example: $1,000 allocated → roughly $7 at the stop if that trade is "
     "stopped out. Most of your balance stays out of that trade.\n"
     "• You fill at the same price as the house; exits (stop, targets, trail) "
     "are automatic and your share is credited as each one fills.\n\n"
-    "Commands:\n"
+    "*Portfolio commands*\n"
     "• /portfolio — cash, positions, P&L\n"
     "• /wallet — register the address you fund from; withdrawals return there\n"
     "• /deposit — how to fund; your balance updates automatically once the "
     "transfer settles\n"
-    "• /withdraw — take money out, back to your registered wallet\n\n"
+    "• /withdraw — take money out, back to your registered wallet "
+    "(/withdraw all empties the account)\n\n"
+    "*Eva commands*\n"
+    "• /brain — Eva's current read: marked charts on every timeframe, the "
+    "ICT view with order blocks and breakers, the four-year cycle, and the "
+    "biggest news right now\n"
+    "• /research — deeper market studies (funding, volume, dominance, macro)\n"
+    "• Or just talk to her — ask anything in plain English\n\n"
+    "*Strategy commands*\n"
+    "• /subscribe — pick the strategies whose trade ideas you want, and "
+    "optionally allocate capital to them\n"
+    "• /allocate — set how much a strategy can size your Accepts from\n\n"
     "Trade cards arrive here as private messages with *your* size on them. "
     "Anything about your money stays in this chat.\n\n"
     "Trading futures involves substantial risk of loss. Not financial advice."
 )
+
+
+# /subscribe flow. sub:choose:<key> picks a strategy; sub:alloc:<key>:<pct>
+# allocates that percent of available cash; sub:skip:<key> subscribes without
+# capital. Keys are strategy_catalog wire keys.
+CB_SUB_PREFIX = "sub:"
+
+# Percent-of-available presets on the allocation prompt.
+SUB_ALLOC_PRESETS = (25, 50, 100)
+
+
+def subscribe_keyboard() -> InlineKeyboardMarkup:
+    import strategy_catalog
+
+    rows = [
+        [InlineKeyboardButton(
+            strategy_catalog.STRATEGIES[key].label,
+            callback_data=f"{CB_SUB_PREFIX}choose:{key}",
+        )]
+        for key in strategy_catalog.ORDER
+    ]
+    return InlineKeyboardMarkup(rows)
+
+
+def alloc_keyboard(strategy_key: str) -> InlineKeyboardMarkup:
+    presets = [
+        InlineKeyboardButton(
+            f"{pct}% of available",
+            callback_data=f"{CB_SUB_PREFIX}alloc:{strategy_key}:{pct}",
+        )
+        for pct in SUB_ALLOC_PRESETS
+    ]
+    return InlineKeyboardMarkup(
+        [
+            presets,
+            [InlineKeyboardButton(
+                "Not now", callback_data=f"{CB_SUB_PREFIX}skip:{strategy_key}"
+            )],
+        ]
+    )
 
 
 def pool_admin_access_keyboard(telegram_id: int) -> InlineKeyboardMarkup:

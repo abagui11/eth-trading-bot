@@ -105,6 +105,29 @@ def broadcast_recipient_ids() -> list[int]:
     return _drop_truncated_id_typos(set(load_allowed_ids()))
 
 
+def strategy_recipient_ids(strategy: str) -> list[int]:
+    """Broadcast recipients for one strategy's idea stream.
+
+    With the pool on, approved testers only receive streams they subscribed
+    to (/subscribe); allowlisted internal ids keep receiving everything so
+    ops never lose sight of a lane. Without the pool, subscriptions do not
+    exist and the full broadcast list is returned unchanged.
+    """
+    import bot_config
+
+    recipients = broadcast_recipient_ids()
+    if not bot_config.POOL_ENABLED:
+        return recipients
+    try:
+        import pool
+
+        subscribed = pool.strategy_subscriber_ids(strategy)
+    except Exception:
+        return recipients
+    always = set(load_allowed_ids())
+    return [r for r in recipients if r in subscribed or r in always]
+
+
 def internal_recipient_ids() -> list[int]:
     """Internal ops allowlist for gated HQ trade cards.
 

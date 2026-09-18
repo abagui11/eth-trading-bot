@@ -22,16 +22,16 @@ def _suggestion(rationale: str = "Clean bullish structure holds.") -> Suggestion
     )
 
 
-def test_card_body_has_high_quality_label():
+def test_card_body_has_ict_label():
     body = display_summary.build_card_body(_suggestion())
-    assert body.startswith("High Quality · ETH Spot Buy")
+    assert body.startswith("ICT · ETH Spot Buy")
 
 
 def test_card_body_watchdog_has_no_label():
     suggestion = _suggestion(rationale="[Watchdog — m5_ob_fib_long]\n\nSetup.")
     body = display_summary.build_card_body(suggestion)
     assert body.startswith("ETH Spot Buy")
-    assert "High Quality" not in body
+    assert "ICT ·" not in body
 
 
 def test_format_hq_tweet_label_levels_and_length():
@@ -39,7 +39,7 @@ def test_format_hq_tweet_label_levels_and_length():
         _suggestion(), summary="Bullish structure aligns with M5 fib. " * 20
     )
     assert text is not None
-    assert text.startswith("High Quality · ETH Spot Buy")
+    assert text.startswith("ICT · ETH Spot Buy")
     assert "Entry 2,000.00" in text
     assert "SL    1,900.00" in text
     assert "TP1   2,200.00" in text

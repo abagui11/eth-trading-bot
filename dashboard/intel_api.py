@@ -237,16 +237,22 @@ async def ideas_hq(limit: int = 25) -> list:
 
 
 @router.get("/subscribers")
-async def subscribers() -> dict:
-    """Broadcast recipients for the public volume lane (trade_ideas mill).
+async def subscribers(strategy: str | None = None) -> dict:
+    """Broadcast recipients for external idea lanes (mill, kalshi relays).
 
-    The mill sends its cards through this bot's token, so it needs the same
-    recipient list the agent uses — resolved here so paywall/allowlist logic
-    lives in exactly one place.
+    Those services send their cards through this bot's token, so they need the
+    same recipient list the agent uses — resolved here so paywall/allowlist
+    logic lives in exactly one place. ``strategy`` narrows the list to that
+    lane's subscribers (strategy_catalog keys); omitted, it stays the full
+    broadcast list for backward compatibility.
     """
-    recipients = access.broadcast_recipient_ids()
+    if strategy:
+        recipients = access.strategy_recipient_ids(strategy)
+    else:
+        recipients = access.broadcast_recipient_ids()
     return {
         "paywall_enabled": config.PAYWALL_ENABLED,
+        "strategy": strategy,
         "count": len(recipients),
         "recipients": recipients,
     }

@@ -509,12 +509,16 @@ class PoolMillAcceptTests(unittest.TestCase):
         access.init_db()
         pool.approve_user(UID, admin_id=ADMIN)
         pool.credit(UID, 1000.0, admin_id=ADMIN, ref="fund")
+        # Accepts size from the tester's allocation to the mill strategy now;
+        # $1,000 allocated keeps the historical $7 (0.7%) figures intact.
+        pool.subscribe_strategy(UID, "mill")
+        pool.set_allocation(UID, "mill", 1000.0)
 
     def _accept(self, verdict: dict):
         with patch.object(trade_ideas_bridge, "idea_pool_open", return_value=True), \
                 patch.object(trade_ideas_bridge, "request_manual_fill",
                              return_value=verdict) as fill:
-            reply = bot._pool_mill_accept(1025, UID)
+            reply, _markup = bot._pool_mill_accept(1025, UID)
         return reply, fill
 
     def test_an_accept_fills_there_and_then(self) -> None:
@@ -567,9 +571,22 @@ class PoolMillAcceptTests(unittest.TestCase):
         with patch.object(trade_ideas_bridge, "idea_pool_open", return_value=True), \
                 patch.object(trade_ideas_bridge, "request_manual_fill",
                              side_effect=RuntimeError("coinbase 503")):
-            reply = bot._pool_mill_accept(1025, UID)
+            reply, _markup = bot._pool_mill_accept(1025, UID)
         self.assertIn("You're in if it fills", reply)
         self.assertEqual(len(pool.pending_intents("mill_1025")), 1)
+
+    def test_an_unallocated_accept_prompts_to_deploy(self) -> None:
+        """No allocation to the strategy → no reserve, and the reply walks the
+        tester through deploying capital instead of quietly refusing."""
+        pool.set_allocation(UID, "mill", 0.0)
+        with patch.object(trade_ideas_bridge, "idea_pool_open", return_value=True), \
+                patch.object(trade_ideas_bridge, "request_manual_fill") as fill:
+            reply, markup = bot._pool_mill_accept(1025, UID)
+        fill.assert_not_called()
+        self.assertIn("haven't deployed capital", reply)
+        self.assertIsNotNone(markup)
+        self.assertEqual(pool.pending_intents("mill_1025"), [])
+        self.assertEqual(float(pool.get_account(UID)["reserved_usd"]), 0.0)
 
     def test_an_unfunded_tester_cannot_trigger_a_house_fill(self) -> None:
         """The flag deploys house money, so it must require a real stake."""

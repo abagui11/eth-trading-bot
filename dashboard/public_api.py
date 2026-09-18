@@ -46,6 +46,15 @@ _TRADE_ACTIONS = ("spot_buy", "spot_sell", "deriv_buy", "deriv_sell")
 # Kalshi multi-bot comparison epoch — mirrors kalshi_bridge.experiment_epoch.
 _KALSHI_EPOCH_DAY = "2026-09-08"
 
+# Per-strategy "current rules" epochs for the two site cards. Each lane is
+# charted from the day its present ruleset/sizing went live; earlier periods
+# are disclosed in copy, never blended into the chart.
+_KALSHI_STRATEGIES = {
+    # site key -> (bot_id, epoch the current rules went live)
+    "reversal": ("eva_streak", "2026-09-14"),
+    "wick": ("eva_wick", "2026-09-17"),
+}
+
 _EMAIL_RE = re.compile(r"^[^@\s]+@[^@\s]+\.[^@\s]+$")
 
 # ---------------------------------------------------------------------------
@@ -217,6 +226,54 @@ def _day(ts: Any) -> str:
     return str(ts or "")[:10]
 
 
+def _parse_ts(ts: Any) -> datetime | None:
+    if not ts:
+        return None
+    try:
+        return datetime.fromisoformat(str(ts).replace("Z", "+00:00"))
+    except ValueError:
+        return None
+
+
+def _median(values: list[float]) -> float | None:
+    if not values:
+        return None
+    vals = sorted(values)
+    n = len(vals)
+    mid = n // 2
+    return vals[mid] if n % 2 else (vals[mid - 1] + vals[mid]) / 2
+
+
+def _pct_series(series: list[list[Any]], base: float | None) -> list[list[Any]]:
+    """Dollar equity series -> percent-return series (0 baseline).
+
+    The site shows every book in relative terms; no nominal sleeve size
+    reaches a card.
+    """
+    if not base:
+        return []
+    return [[d, round((v / base - 1) * 100, 3)] for d, v in series]
+
+
+def _hq_median_hold(closed: list[dict[str, Any]]) -> float | None:
+    holds = []
+    for r in closed:
+        o, c = _parse_ts(r["opened_at"]), _parse_ts(r["closed_at"])
+        if o and c:
+            holds.append((c - o).total_seconds() / 3600)
+    med = _median(holds)
+    return round(med, 1) if med is not None else None
+
+
+def _hq_trades_per_week(closed: list[dict[str, Any]]) -> float | None:
+    if not closed:
+        return None
+    first = min(_day(r["opened_at"]) for r in closed)
+    last = max(_day(r["closed_at"]) for r in closed)
+    span_days = max((date.fromisoformat(last) - date.fromisoformat(first)).days, 1)
+    return round(len(closed) / (span_days / 7), 1)
+
+
 def _hq_and_abstention(conn: sqlite3.Connection) -> dict[str, Any]:
     sleeve = float(bot_config.LIVE_HQ_EQUITY_USD)
     closed = [dict(r) for r in conn.execute(
@@ -277,9 +334,15 @@ def _hq_and_abstention(conn: sqlite3.Connection) -> dict[str, Any]:
                     round(len(wins) / len(pnls) * 100, 1) if pnls else None
                 ),
                 "pnl_usd": round(sum(pnls), 2),
+                "pnl_pct": (
+                    round(sum(pnls) / sleeve * 100, 2) if sleeve else None
+                ),
+                "trades_per_week": _hq_trades_per_week(closed),
+                "median_hold_hours": _hq_median_hold(closed),
                 "sleeve_usd": sleeve,
                 "since": first_open,
                 "series": series,
+                "series_pct": _pct_series(series, sleeve),
             },
             "paper": {
                 "n_closed": int(pos["n"] or 0) if pos else 0,
@@ -408,6 +471,7 @@ def _yield_section() -> dict[str, Any]:
             if first and last and first[1] else None
         ),
         "series": series,
+        "series_pct": _pct_series(series, first[1]) if first else [],
     }
 
 
@@ -422,6 +486,34 @@ def _mill_stats(rows: list[dict[str, Any]]) -> dict[str, Any]:
         ),
         "since": min((_day(r["opened_at"]) for r in rows), default=None),
         "until": max((_day(r["opened_at"]) for r in rows), default=None),
+    }
+
+
+def _mill_live_section(conn: sqlite3.Connection) -> dict[str, Any] | None:
+    """The mill's live lane, as percent return on its sleeve since go-live."""
+    sleeve = float(getattr(bot_config, "LIVE_MILL_SLEEVE_USD", 0) or 0)
+    rows = [dict(r) for r in conn.execute(
+        "SELECT COALESCE(realized_pnl_usd, pnl_usd, 0) AS pnl, closed_at"
+        " FROM live_trades WHERE source='mill' AND status='closed'"
+        " ORDER BY closed_at")]
+    if not rows or not sleeve:
+        return None
+    by_day: dict[str, float] = defaultdict(float)
+    for r in rows:
+        by_day[_day(r["closed_at"])] += float(r["pnl"] or 0)
+    series: list[list[Any]] = []
+    cum = 0.0
+    for day in sorted(by_day):
+        cum += by_day[day]
+        series.append([day, round(sleeve + cum, 2)])
+    total = round(sum(float(r["pnl"] or 0) for r in rows), 2)
+    return {
+        "n_closed": len(rows),
+        "pnl_usd": total,
+        "pnl_pct": round(total / sleeve * 100, 2),
+        "sleeve_usd": sleeve,
+        "since": _day(rows[0]["closed_at"]),
+        "series_pct": _pct_series(series, sleeve),
     }
 
 
@@ -483,6 +575,10 @@ def _kalshi_section() -> dict[str, Any] | None:
         pos = [dict(r) for r in conn.execute(
             "SELECT bot_id, pnl_usd, closed_at FROM paper_positions"
             " WHERE status != 'open'")]
+        banks = {
+            str(r["bot_id"]): float(r["starting_usd"])
+            for r in conn.execute("SELECT bot_id, starting_usd FROM paper_state")
+        }
     except sqlite3.Error:
         logger.exception("public_api: kalshi read failed")
         return None
@@ -510,6 +606,38 @@ def _kalshi_section() -> dict[str, Any] | None:
     for d in sorted(epoch_daily):
         cum += epoch_daily[d]
         series.append([d, round(cum, 2)])
+    strategies: dict[str, dict[str, Any]] = {}
+    for key, (bot_id, epoch) in _KALSHI_STRATEGIES.items():
+        bank = banks.get(bot_id)
+        rows = [p for p in pos
+                if str(p["bot_id"]) == bot_id and _day(p["closed_at"]) >= epoch]
+        daily: dict[str, float] = defaultdict(float)
+        wins = 0
+        for p in rows:
+            pnl = float(p["pnl_usd"] or 0)
+            daily[_day(p["closed_at"])] += pnl
+            if pnl > 0:
+                wins += 1
+        cum_series: list[list[Any]] = []
+        run = 0.0
+        for d in sorted(daily):
+            run += daily[d]
+            cum_series.append([d, round(run, 2)])
+        pnl_total = round(sum(float(p["pnl_usd"] or 0) for p in rows), 2)
+        strategies[key] = {
+            "bot_id": bot_id,
+            "epoch": epoch,
+            "n_closed": len(rows),
+            "win_rate_pct": round(wins / len(rows) * 100, 1) if rows else None,
+            "pnl_usd": pnl_total,
+            "bank_usd": bank,
+            "pnl_pct": round(pnl_total / bank * 100, 2) if bank else None,
+            "series_pct": (
+                [[d, round(v / bank * 100, 3)] for d, v in cum_series]
+                if bank else []
+            ),
+        }
+
     return {
         "bots": {k: by_bot[k] for k in sorted(by_bot)},
         "epoch": _KALSHI_EPOCH_DAY,
@@ -519,6 +647,7 @@ def _kalshi_section() -> dict[str, Any] | None:
         ),
         "since": min((_day(p["closed_at"]) for p in pos), default=None),
         "epoch_series": series,
+        "strategies": strategies,
     }
 
 
@@ -526,12 +655,17 @@ def build_strategies_payload() -> dict[str, Any]:
     payload: dict[str, Any] = {
         "as_of": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
     }
+    mill_live: dict[str, Any] | None = None
     conn = _ro_connect(Path(config.LEDGER_DB))
     if conn is not None:
         try:
             payload.update(_hq_and_abstention(conn))
         except sqlite3.Error:
             logger.exception("public_api: ledger read failed")
+        try:
+            mill_live = _mill_live_section(conn)
+        except sqlite3.Error:
+            logger.exception("public_api: mill live read failed")
         try:
             payload["intelligence"] = _intelligence_section(conn)
         except Exception:  # noqa: BLE001 — a missing brain must not blank the books
@@ -544,6 +678,8 @@ def build_strategies_payload() -> dict[str, Any]:
         logger.exception("public_api: yield read failed")
     mill = _mill_section()
     if mill is not None:
+        if mill_live is not None:
+            mill["live"] = mill_live
         payload["mill"] = mill
     kalshi = _kalshi_section()
     if kalshi is not None:

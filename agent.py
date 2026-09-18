@@ -292,7 +292,7 @@ def run_cycle() -> list[tuple[Suggestion, list[str]]] | None:
                     card_summary = None
                 hq_title = display_summary.friendly_title(suggestion)
                 if not display_summary.is_watchdog_suggestion(suggestion):
-                    hq_title = f"High Quality · {hq_title}"
+                    hq_title = f"ICT · {hq_title}"
                 import live_pending
 
                 # Eva's entry is a pullback into an M5 block, so the market is

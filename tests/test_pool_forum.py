@@ -62,7 +62,7 @@ class ForumTargetTests(unittest.TestCase):
         with patch.object(config, "POOL_FORUM_CHAT_ID", -100123), patch.object(
             config, "POOL_FORUM_TRADES_THREAD_ID", 7
         ), patch.object(bot_config, "POOL_ENABLED", True), patch.object(
-            access, "broadcast_recipient_ids", return_value=[1001, 1002]
+            access, "strategy_recipient_ids", return_value=[1001, 1002]
         ), patch.object(
             notify, "send_suggestion_to_chat", side_effect=fake_send
         ), patch.object(config, "TELEGRAM_ADMIN_CHAT_ID", None), patch.object(

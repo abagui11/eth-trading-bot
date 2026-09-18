@@ -256,6 +256,26 @@ CREATE TABLE IF NOT EXISTS pool_meta (
     key TEXT PRIMARY KEY,
     value TEXT NOT NULL
 );
+
+-- Strategy subscriptions: which idea streams this tester receives. Keys are
+-- strategy_catalog wire keys (ict / mill / kalshi_reversal / kalshi_wick).
+CREATE TABLE IF NOT EXISTS pool_strategy_subs (
+    telegram_id INTEGER NOT NULL,
+    strategy TEXT NOT NULL,
+    created_at TEXT NOT NULL,
+    PRIMARY KEY (telegram_id, strategy)
+);
+
+-- Per-strategy capital allocations. Subscribing costs nothing; an Accept on
+-- a strategy's card sizes its risk from this figure, so a zero/absent row is
+-- what makes Accept ask the tester to deploy first.
+CREATE TABLE IF NOT EXISTS pool_strategy_allocs (
+    telegram_id INTEGER NOT NULL,
+    strategy TEXT NOT NULL,
+    amount_usd REAL NOT NULL DEFAULT 0,
+    updated_at TEXT NOT NULL,
+    PRIMARY KEY (telegram_id, strategy)
+);
 """
 
 _FROZEN_KEY = "intents_frozen"
@@ -354,6 +374,11 @@ def set_meta(key: str, value: str) -> None:
             "ON CONFLICT(key) DO UPDATE SET value = excluded.value",
             (key, value),
         )
+
+
+def del_meta(key: str) -> None:
+    with _connect() as conn:
+        conn.execute("DELETE FROM pool_meta WHERE key = ?", (key,))
 
 
 # ---------------------------------------------------------------------------
@@ -470,6 +495,129 @@ def is_admin(telegram_id: int) -> bool:
 
 
 # ---------------------------------------------------------------------------
+# Strategy subscriptions and allocations
+# ---------------------------------------------------------------------------
+
+_SUBS_SEEDED_KEY = "strategy_subs_seeded"
+# Streams that existed before /subscribe shipped. Existing testers were
+# receiving both, so the one-time seed keeps their world unchanged.
+_LEGACY_STRATEGIES = ("ict", "mill")
+
+
+def subscribe_strategy(telegram_id: int, strategy: str) -> bool:
+    """Subscribe a tester to a strategy's idea stream. True if newly added."""
+    with _connect() as conn:
+        cur = conn.execute(
+            "INSERT OR IGNORE INTO pool_strategy_subs "
+            "(telegram_id, strategy, created_at) VALUES (?, ?, ?)",
+            (int(telegram_id), str(strategy), _now()),
+        )
+    return cur.rowcount > 0
+
+
+def unsubscribe_strategy(telegram_id: int, strategy: str) -> bool:
+    with _connect() as conn:
+        cur = conn.execute(
+            "DELETE FROM pool_strategy_subs WHERE telegram_id = ? AND strategy = ?",
+            (int(telegram_id), str(strategy)),
+        )
+    return cur.rowcount > 0
+
+
+def strategy_subscriptions(telegram_id: int) -> list[str]:
+    with _connect() as conn:
+        rows = conn.execute(
+            "SELECT strategy FROM pool_strategy_subs WHERE telegram_id = ? "
+            "ORDER BY created_at ASC",
+            (int(telegram_id),),
+        ).fetchall()
+    return [str(r["strategy"]) for r in rows]
+
+
+def strategy_subscriber_ids(strategy: str) -> set[int]:
+    with _connect() as conn:
+        rows = conn.execute(
+            "SELECT telegram_id FROM pool_strategy_subs WHERE strategy = ?",
+            (str(strategy),),
+        ).fetchall()
+    return {int(r["telegram_id"]) for r in rows}
+
+
+def set_allocation(telegram_id: int, strategy: str, amount_usd: float) -> dict[str, Any]:
+    """Set a tester's capital allocation to one strategy.
+
+    The allocation is a sizing base, not a reservation — nothing moves in the
+    cash journal until an Accept reserves risk against it. It is capped at the
+    account's cash so a tester cannot allocate money they do not hold.
+    """
+    amount = round(float(amount_usd), 2)
+    if amount < 0:
+        return {"ok": False, "reason": "invalid_amount"}
+    account = get_account(telegram_id)
+    if account is None or float(account["cash_usd"]) <= 0:
+        return {"ok": False, "reason": "not_funded"}
+    cash = float(account["cash_usd"])
+    if amount > cash:
+        return {"ok": False, "reason": "exceeds_cash", "cash_usd": cash}
+    with _connect() as conn:
+        conn.execute(
+            "INSERT INTO pool_strategy_allocs "
+            "(telegram_id, strategy, amount_usd, updated_at) VALUES (?, ?, ?, ?) "
+            "ON CONFLICT(telegram_id, strategy) DO UPDATE SET "
+            "amount_usd = excluded.amount_usd, updated_at = excluded.updated_at",
+            (int(telegram_id), str(strategy), amount, _now()),
+        )
+    logger.info("pool: allocation %s -> %s $%.2f", telegram_id, strategy, amount)
+    return {"ok": True, "amount_usd": amount, "cash_usd": cash}
+
+
+def get_allocation(telegram_id: int, strategy: str) -> float:
+    with _connect() as conn:
+        row = conn.execute(
+            "SELECT amount_usd FROM pool_strategy_allocs "
+            "WHERE telegram_id = ? AND strategy = ?",
+            (int(telegram_id), str(strategy)),
+        ).fetchone()
+    return float(row["amount_usd"]) if row else 0.0
+
+
+def allocations(telegram_id: int) -> dict[str, float]:
+    with _connect() as conn:
+        rows = conn.execute(
+            "SELECT strategy, amount_usd FROM pool_strategy_allocs "
+            "WHERE telegram_id = ?",
+            (int(telegram_id),),
+        ).fetchall()
+    return {str(r["strategy"]): float(r["amount_usd"]) for r in rows}
+
+
+def seed_default_subscriptions() -> int:
+    """One-time migration: existing approved testers keep receiving the two
+    streams they were already getting (ICT + mill). Runs at startup; the meta
+    flag makes it a no-op forever after."""
+    if get_meta(_SUBS_SEEDED_KEY):
+        return 0
+    seeded = 0
+    with _connect() as conn:
+        approved = conn.execute(
+            "SELECT telegram_id FROM approved_users WHERE status = 'approved'"
+        ).fetchall()
+        now = _now()
+        for row in approved:
+            for strategy in _LEGACY_STRATEGIES:
+                cur = conn.execute(
+                    "INSERT OR IGNORE INTO pool_strategy_subs "
+                    "(telegram_id, strategy, created_at) VALUES (?, ?, ?)",
+                    (int(row["telegram_id"]), strategy, now),
+                )
+                seeded += cur.rowcount
+    set_meta(_SUBS_SEEDED_KEY, _now())
+    if seeded:
+        logger.info("pool: seeded %d default strategy subscriptions", seeded)
+    return seeded
+
+
+# ---------------------------------------------------------------------------
 # Accounts and the event journal — the ONLY cash/reserve writers
 # ---------------------------------------------------------------------------
 
@@ -491,11 +639,14 @@ def prospective_accept(
     *,
     entry: float,
     stop_loss: float,
+    strategy: str | None = None,
 ) -> dict[str, Any]:
     """What Accept would reserve right now — card copy only, no journal write.
 
-    Risk = ``POOL_RISK_PCT`` × available cash. Position size is the notional
-    that risks exactly that many dollars at this stop
+    Risk = ``POOL_RISK_PCT`` × the sizing base: the tester's allocation to
+    ``strategy`` when given (capped by available cash; absent allocation
+    refuses with ``no_allocation``), otherwise available cash. Position size
+    is the notional that risks exactly that many dollars at this stop
     (``risk × entry / |entry − stop|``). Real share at fill can be smaller if
     they dilute into a house clip that did not grow an extra contract.
     """
@@ -514,8 +665,16 @@ def prospective_accept(
         }
     if available <= 0:
         return {"ok": False, "reason": "no_available_cash", "cash_usd": cash}
+    if strategy is not None:
+        alloc = get_allocation(telegram_id, strategy)
+        if alloc <= 0:
+            return {"ok": False, "reason": "no_allocation", "strategy": strategy,
+                    "cash_usd": cash}
+        base = min(alloc, available)
+    else:
+        base = available
     risk_pct = float(bot_config.POOL_RISK_PCT)
-    risk = round(available * risk_pct, 2)
+    risk = round(base * risk_pct, 2)
     risk_per_unit = abs(float(entry) - float(stop_loss))
     notional = (
         round(risk * float(entry) / risk_per_unit, 2) if risk_per_unit > 0 else 0.0
@@ -524,6 +683,8 @@ def prospective_accept(
         "ok": True,
         "cash_usd": cash,
         "available_usd": round(available, 2),
+        "base_usd": round(base, 2),
+        "strategy": strategy,
         "risk_usd": risk,
         "risk_pct": risk_pct,
         "notional_usd": notional,
@@ -1870,17 +2031,23 @@ def _intent_event_ref(ref: str, attempt: int) -> str:
     return f"intent:{ref}" if int(attempt) <= 1 else f"intent:{ref}#{int(attempt)}"
 
 
-def record_intent(ref: str, telegram_id: int) -> dict[str, Any]:
+def record_intent(
+    ref: str, telegram_id: int, *, strategy: str | None = None
+) -> dict[str, Any]:
     """A funded tester's Accept: reserve their risk budget against this ref.
 
-    The budget is POOL_RISK_PCT of *available* cash (cash minus everything
-    already reserved), and the read and the reserve happen in one transaction
-    so concurrent Accepts cannot each size against the same dollars. They used
-    to: the balance was read on one connection and reserved on another, so two
-    cards accepted together both computed their budget from the pre-reserve
-    figure. The overlap was small because the budget is a fraction of a
-    fraction, which is exactly why it would never have shown up in a balance
-    anyone eyeballed.
+    Sizing base: with ``strategy`` given, the budget is POOL_RISK_PCT of the
+    tester's *allocation* to that strategy (capped by available cash), and a
+    zero/absent allocation refuses with ``no_allocation`` so the caller can
+    prompt them to deploy. Without a strategy (legacy demo cards), the budget
+    stays POOL_RISK_PCT of *available* cash.
+
+    The read and the reserve happen in one transaction so concurrent Accepts
+    cannot each size against the same dollars. They used to: the balance was
+    read on one connection and reserved on another, so two cards accepted
+    together both computed their budget from the pre-reserve figure. The
+    overlap was small because the budget is a fraction of a fraction, which is
+    exactly why it would never have shown up in a balance anyone eyeballed.
     """
     frozen = intents_frozen()
     if frozen:
@@ -1900,8 +2067,22 @@ def record_intent(ref: str, telegram_id: int) -> dict[str, Any]:
         if cash < float(bot_config.POOL_MIN_EQUITY_USD):
             return {"ok": False, "reason": "below_min_equity",
                     "minimum_usd": float(bot_config.POOL_MIN_EQUITY_USD)}
-        risk = round(float(account["available"]) * float(bot_config.POOL_RISK_PCT), 2)
-        if risk <= 0:
+        available = float(account["available"])
+        if strategy is not None:
+            alloc_row = conn.execute(
+                "SELECT amount_usd FROM pool_strategy_allocs "
+                "WHERE telegram_id = ? AND strategy = ?",
+                (telegram_id, strategy),
+            ).fetchone()
+            alloc = float(alloc_row["amount_usd"]) if alloc_row else 0.0
+            if alloc <= 0:
+                return {"ok": False, "reason": "no_allocation",
+                        "strategy": strategy}
+            base = min(alloc, available)
+        else:
+            base = available
+        risk = round(base * float(bot_config.POOL_RISK_PCT), 2)
+        if risk <= 0 or available <= 0:
             return {"ok": False, "reason": "no_available_cash"}
 
         attempt = 1
@@ -1948,7 +2129,7 @@ def record_intent(ref: str, telegram_id: int) -> dict[str, Any]:
                 f"attempt {attempt}"
             )
     logger.info("pool: intent %s user %s risk $%.2f", ref, telegram_id, risk)
-    return {"ok": True, "risk_usd": risk}
+    return {"ok": True, "risk_usd": risk, "strategy": strategy}
 
 
 def pending_intents(ref: str) -> list[dict[str, Any]]:

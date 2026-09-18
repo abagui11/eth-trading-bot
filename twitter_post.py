@@ -237,7 +237,7 @@ def format_hq_tweet(
     if suggestion.entry is None or suggestion.stop_loss is None:
         return None
 
-    title = f"High Quality · {display_summary.friendly_title(suggestion)}"
+    title = f"ICT · {display_summary.friendly_title(suggestion)}"
     lines = [title, ""]
     lines.append(f"Entry {float(suggestion.entry):,.2f}")
     lines.append(f"SL    {float(suggestion.stop_loss):,.2f}")
