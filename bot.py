@@ -1272,7 +1272,8 @@ async def cmd_help(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
             "Commands:\n"
             "/portfolio — your cash, positions, and P&L\n"
             "/deposit — fund your account (sizes stay small while we prove the strategy)\n"
-            "/withdraw — take money out, back to your registered wallet\n"
+            "/withdraw — take money out, back to your registered wallet "
+            "(/withdraw all for everything)\n"
             "/wallet — the address you fund from and are paid back to\n"
             "/start — welcome + how risk works\n"
             "/help — this message\n\n"
@@ -1853,16 +1854,45 @@ async def cmd_withdraw(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
             "Funds go back to the wallet you registered, and nowhere else "
             "(/wallet to check).",
             "",
-            f"`/withdraw 100`  or  `/withdraw {maximum:.2f}` for the maximum",
+            f"`/withdraw 100`  or  `/withdraw all` for the maximum "
+            f"(${maximum:,.2f})",
         ]
         await _reply(update, "\n".join(lines), markdown=True)
         return
 
-    try:
-        amount = round(float(str(args[0]).lstrip("$").replace(",", "")), 2)
-    except ValueError:
-        await _reply(update, "Usage: /withdraw 100")
-        return
+    token = str(args[0]).strip().lower()
+    withdraw_all = token in ("all", "max", "everything")
+    if withdraw_all:
+        # `maximum` already nets out the fee reserve and every cap, so it is
+        # the largest request that can actually clear. Asking for the raw
+        # balance instead would bounce off the fee at the exact moment
+        # someone is trying to take everything out.
+        minimum = float(bot_config.POOL_MIN_WITHDRAWAL_USD)
+        if maximum < minimum:
+            if reserved > 0:
+                await _reply(
+                    update,
+                    f"Only ${available:,.2f} is free right now — "
+                    f"${reserved:,.2f} is committed to open trades and comes "
+                    "back when they close. After the network fee that's "
+                    f"below the ${minimum:,.0f} minimum, so nothing can go "
+                    "out yet. Try /withdraw all again once a trade closes.",
+                )
+            else:
+                await _reply(
+                    update,
+                    f"You have ${available:,.2f} available, and the minimum "
+                    f"withdrawal is ${minimum:,.0f} — the network fee is "
+                    "flat, so smaller amounts lose too much to it.",
+                )
+            return
+        amount = maximum
+    else:
+        try:
+            amount = round(float(token.lstrip("$").replace(",", "")), 2)
+        except ValueError:
+            await _reply(update, "Usage: /withdraw 100  or  /withdraw all")
+            return
 
     result = pool.request_withdrawal(user.id, amount)
     if not result.get("ok"):
@@ -1878,10 +1908,33 @@ async def cmd_withdraw(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         if auto else
         "It's queued for a final check before sending."
     )
+    all_note = ""
+    if withdraw_all:
+        # "/withdraw all" that quietly leaves money behind looks like the bot
+        # keeping it. Name every dollar that stayed, and why.
+        held_back = []
+        if reserved > 0:
+            held_back.append(
+                f"${reserved:,.2f} is working in open trades — it frees up "
+                "for withdrawal when they close."
+            )
+        leftover = round(available - float(result["debited_usd"]), 2)
+        if leftover > 0.01:
+            held_back.append(
+                f"${leftover:,.2f} stays in your balance because of the "
+                "withdrawal limits — /withdraw all again picks it up (or "
+                "tomorrow, if today's cap is what stopped it)."
+            )
+        if held_back:
+            all_note = (
+                "That's the most that can go out right now. "
+                + " ".join(held_back) + "\n\n"
+            )
     await _reply(
         update,
         f"Withdrawal #{wid} {'approved' if auto else 'queued'}: *${amount:,.2f}*\n"
         f"To: `{result['address']}`\n\n"
+        f"{all_note}"
         f"${float(result['debited_usd']):,.2f} is held from your balance "
         "(the extra covers the network fee; anything unused comes back).\n\n"
         f"{timing}\n\n"

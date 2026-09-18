@@ -1442,11 +1442,23 @@ def max_withdrawal_usd(telegram_id: int) -> float:
     top of the send: quoting the raw balance would produce a "withdraw max"
     that the balance cannot actually cover, failing at the exact moment
     someone is trying to take their money out.
+
+    The daily caps are folded in for the same reason. `request_withdrawal`
+    checks them against ``amount + reserve``, so a quoted maximum that ignored
+    what already went out today would be refused by the very next line of the
+    request path — and "/withdraw all" leans on this number being honest.
     """
     available = withdrawable_usd(telegram_id)
     reserve = float(bot_config.POOL_WITHDRAWAL_FEE_RESERVE_USD)
-    return round(max(min(available - reserve,
-                         float(bot_config.POOL_MAX_WITHDRAWAL_USD)), 0.0), 2)
+    ceiling = min(
+        available - reserve,
+        float(bot_config.POOL_MAX_WITHDRAWAL_USD),
+        float(bot_config.POOL_MAX_USER_DAILY_WITHDRAWAL_USD)
+        - withdrawn_since(telegram_id) - reserve,
+        float(bot_config.POOL_MAX_GLOBAL_DAILY_WITHDRAWAL_USD)
+        - withdrawn_since(None) - reserve,
+    )
+    return round(max(ceiling, 0.0), 2)
 
 
 def withdrawn_since(telegram_id: int | None, hours: float = 24.0) -> float:

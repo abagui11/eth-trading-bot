@@ -456,6 +456,17 @@ class WithdrawalTests(PoolTestCase):
         quoted = pool.max_withdrawal_usd(ALICE)
         self.assertTrue(pool.request_withdrawal(ALICE, quoted)["ok"])
 
+    def test_the_quoted_max_still_clears_after_an_earlier_withdrawal(self) -> None:
+        """The daily caps count what already went out, so the quote must too —
+        otherwise "/withdraw all" asks for a number the very next check
+        refuses."""
+        self._patch(bot_config, "POOL_MAX_USER_DAILY_WITHDRAWAL_USD", 600.0)
+        self.assertTrue(pool.request_withdrawal(ALICE, 300.0)["ok"])
+        quoted = pool.max_withdrawal_usd(ALICE)
+        # $600 cap, $303 already out today, $3 reserve on the next send.
+        self.assertAlmostEqual(quoted, 294.0, places=2)
+        self.assertTrue(pool.request_withdrawal(ALICE, quoted)["ok"])
+
     def test_the_max_leaves_room_for_the_fee(self) -> None:
         """Quoting the raw balance would fail at the moment someone tries to
         take their money out, because the fee rides on top of the send."""

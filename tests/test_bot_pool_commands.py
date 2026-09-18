@@ -137,6 +137,70 @@ class PoolCommandTests(unittest.TestCase):
         self.assertEqual(context.bot.send_message.await_args.args[0], ADMIN)
         self.assertIsNone(context.bot.send_message.await_args.kwargs["reply_markup"])
 
+    # -- /withdraw all -------------------------------------------------------
+
+    def test_withdraw_all_takes_the_fee_aware_maximum(self) -> None:
+        """The request is available minus the fee reserve, so it clears: asking
+        for the raw $1,000 would be refused with the fee riding on top."""
+        self._fund_for_withdrawal()
+        with patch.object(bot_config, "POOL_AUTO_APPROVE_WITHDRAWALS", True):
+            update, _ = self._run(bot.cmd_withdraw, ["all"])
+
+        pending = pool.pending_withdrawals("approved")
+        self.assertEqual(len(pending), 1)
+        # $1,000 available, $3 fee reserve: they are sent $997 and the full
+        # $1,000 is held (unused reserve comes back after the real fee).
+        self.assertAlmostEqual(float(pending[0]["amount_usd"]), 997.0, places=2)
+        self.assertAlmostEqual(float(pending[0]["debited_usd"]), 1000.0, places=2)
+        self.assertIn("997.00", self._texts(update))
+
+    def test_withdraw_all_with_open_trades_names_what_stayed_behind(self) -> None:
+        """Money committed to a trade cannot leave, and '/withdraw all' that
+        silently keeps part of the balance looks like theft — the reply must
+        say how much stayed and why, and still send the free part."""
+        self._fund_for_withdrawal()
+        with patch.object(bot_config, "POOL_RISK_PCT", 0.2), \
+                patch.object(bot_config, "POOL_MIN_EQUITY_USD", 500.0):
+            self.assertTrue(pool.record_intent("mill_1", UID)["ok"])
+
+        with patch.object(bot_config, "POOL_AUTO_APPROVE_WITHDRAWALS", True):
+            update, _ = self._run(bot.cmd_withdraw, ["all"])
+
+        # $200 reserved for the trade, $800 free, $3 fee reserve → $797 sent.
+        pending = pool.pending_withdrawals("approved")
+        self.assertEqual(len(pending), 1)
+        self.assertAlmostEqual(float(pending[0]["amount_usd"]), 797.0, places=2)
+        text = self._texts(update)
+        self.assertIn("200.00", text)
+        self.assertIn("open trades", text)
+
+    def test_withdraw_all_with_everything_in_trades_sends_nothing(self) -> None:
+        """When the free part is under the minimum, nothing goes out — and the
+        reply says the money is in trades, not that it is gone."""
+        self._fund_for_withdrawal()
+        with patch.object(bot_config, "POOL_RISK_PCT", 0.97), \
+                patch.object(bot_config, "POOL_MIN_EQUITY_USD", 500.0):
+            self.assertTrue(pool.record_intent("mill_1", UID)["ok"])
+
+        with patch.object(bot_config, "POOL_AUTO_APPROVE_WITHDRAWALS", True):
+            update, _ = self._run(bot.cmd_withdraw, ["all"])
+
+        self.assertEqual(pool.pending_withdrawals("approved"), [])
+        self.assertEqual(pool.pending_withdrawals("requested"), [])
+        text = self._texts(update)
+        self.assertIn("open trades", text)
+        self.assertIn("970.00", text)  # names the committed amount
+
+    def test_withdraw_all_with_an_empty_account_sends_nothing(self) -> None:
+        pool.approve_user(UID, admin_id=ADMIN)
+        pool.register_wallet(UID, WALLET)
+        pool.mark_wallet_verified(WALLET)
+
+        update, _ = self._run(bot.cmd_withdraw, ["all"])
+        self.assertEqual(pool.pending_withdrawals("approved"), [])
+        self.assertEqual(pool.pending_withdrawals("requested"), [])
+        self.assertIn("minimum", self._texts(update).lower())
+
     def test_a_markdown_failure_still_delivers_the_text(self) -> None:
         """Telegram refuses a whole message it cannot parse. On this path that
         would be silence after a debit, so it must fall back to plain text."""

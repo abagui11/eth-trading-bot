@@ -339,7 +339,19 @@ confirm in the Coinbase UI before anyone sends to it.
 
 `/withdraw 100` debits the tester immediately and — with
 `POOL_AUTO_APPROVE_WITHDRAWALS` on, which is the default — **sends without
-waiting for you**. `watchdog._payout_sweep` picks it up on the next 60s pass,
+waiting for you**.
+
+**`/withdraw all`** (also `max`, `everything`) asks for `max_withdrawal_usd`,
+which is available cash less the fee reserve and less whatever the daily caps
+have already used up. It is one ordinary withdrawal, subject to every check
+below — the word only spares the tester doing that arithmetic in their head,
+and getting it wrong in the direction that refuses. Two things it must never
+do, both pinned by tests: send less than the balance without saying so, and
+quote a maximum the request path then refuses. So when part of the balance is
+reserved against open trades, or a cap clips the amount, the reply names the
+dollars that stayed and why. If the free part is under the $50 minimum nothing
+is queued at all, and the reply says the money is in trades rather than
+leaving them to wonder. `watchdog._payout_sweep` picks it up on the next 60s pass,
 one payout at a time, and the tester has it about a minute later. You still
 get the notification, but it carries no buttons: `decide_withdrawal` only acts
 on a `requested` row, so an Approve button on an already-approved payout would
