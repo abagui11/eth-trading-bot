@@ -65,6 +65,8 @@ _BOT_BLURBS = {
 
 # Bots always shown in the comparison, even before their first trade.
 _EXPERIMENT_BOTS = ("eva_streak", "eva_wick", "eva_arb")
+# Retired books stay in the ledger for analysis but off the dashboard.
+_RETIRED_BOTS = ("eva_wick_fade_v1",)
 
 # Multi-bot experiment flip: eva_streak went live (mid entry), eva_wick moved
 # to paper with the double-down rule. Comparison starts here.
@@ -261,6 +263,8 @@ def performance_payload(limit: int = 15) -> dict[str, Any] | None:
         wins = int(a["wins"] or 0) if a else 0
         losses = int(a["losses"] or 0) if a else 0
         n_open = sum(1 for p in open_list if p["bot_id"] == bot_id)
+        if bot_id in _RETIRED_BOTS:
+            continue
         # Idle leftover books (old control/lottery rows) stay off the tab.
         if closed == 0 and n_open == 0 and bot_id not in _EXPERIMENT_BOTS:
             continue

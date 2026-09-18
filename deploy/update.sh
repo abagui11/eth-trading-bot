@@ -26,7 +26,10 @@ fi
 # Must run from APP_DIR so `import audit` resolves. live_ledger is included so
 # its column migrations land before eth-agent restarts — the operator Accept
 # path writes live_trades in-process, ahead of the dashboard's own init_db.
-sudo -u "$APP_USER" bash -c "cd '$APP_DIR' && '$PY' -c \"import audit, ledger, paper, live_ledger; audit.init_db(); ledger.init_db(); paper.init_db(); live_ledger.init_db()\""
+# intelligence.store likewise: without it the stance counterfactual columns and
+# intel_reads only appear on the first stance job, so a deploy-time read of
+# either (or `_check_stance_policy.py`) reports a migration that has not run.
+sudo -u "$APP_USER" bash -c "cd '$APP_DIR' && '$PY' -c \"import audit, ledger, paper, live_ledger; from intelligence import store as intel_store; audit.init_db(); ledger.init_db(); paper.init_db(); live_ledger.init_db(); intel_store.init_db()\""
 
 systemctl restart eth-agent
 systemctl restart eth-dashboard
