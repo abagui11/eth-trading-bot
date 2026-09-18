@@ -681,6 +681,74 @@ class LiveCardTests(unittest.TestCase):
         self.assertTrue(real["live_idea"])
         self.assertFalse(real["mirror"])
 
+    def test_a_number_beside_real_names_the_idea_not_a_trade(self) -> None:
+        """There is nothing to mirror on the live path — the card is the idea."""
+        for args in (["real", "57"], ["57", "real"]):
+            opts = demo_card.parse_args(args, default_id=1)
+            self.assertEqual(opts["idea_id"], 57, args)
+            self.assertIsNone(opts["trade_id"], args)
+            self.assertFalse(opts["mirror"], args)
+
+    def test_a_named_idea_is_asked_for_rather_than_forced(self) -> None:
+        """Aiming at an idea still runs it through the fill gate."""
+        with patch.object(trade_ideas_bridge, "preview_fill",
+                          return_value={"would_fill": False,
+                                        "skip_reason": "chased"}), \
+                patch.object(trade_ideas_bridge, "_idea_row",
+                             return_value={"id": 57, "product_id": "BTC-USD",
+                                           "direction": "long"}), \
+                patch.object(bot_config, "POOL_ENABLED", True), \
+                patch.object(pool, "is_approved", return_value=True):
+            result = demo_card.send(UID, live_idea=True, idea_id=57)
+
+        self.assertEqual(result["reason"], "idea_not_fillable")
+        self.assertIn("chasing", result["considered"][0]["why"])
+
+    def test_a_refusal_says_which_ideas_were_looked_at_and_why(self) -> None:
+        """"Nothing right now" cannot distinguish a moved market from a dead
+        mill, and that is the question someone about to record is asking."""
+        rows = [
+            {"id": 30, "product_id": "BTC-USD", "direction": "long",
+             "status": "open", "would_fill": False,
+             "preview": {"skip_reason": "chased"}},
+            {"id": 29, "product_id": "ETH-USD", "direction": "short",
+             "status": "expired", "would_fill": False,
+             "preview": {"skip_reason": "expired"}},
+        ]
+        with patch.object(trade_ideas_bridge, "fillable_ideas", return_value=rows), \
+                patch.object(bot_config, "POOL_ENABLED", True), \
+                patch.object(pool, "is_approved", return_value=True):
+            result = demo_card.send(UID, live_idea=True)
+
+        self.assertEqual(result["reason"], "nothing_fillable")
+        whys = [r["why"] for r in result["considered"]]
+        self.assertTrue(all(whys), "every refusal needs a reason in words")
+        self.assertIn("chasing", whys[0])
+
+    def test_the_scan_names_the_idea_a_live_card_can_come_from(self) -> None:
+        rows = [
+            {"id": 30, "product_id": "BTC-USD", "direction": "long",
+             "status": "open", "would_fill": False,
+             "preview": {"skip_reason": "chased"}},
+            {"id": 29, "product_id": "ETH-USD", "direction": "short",
+             "status": "open", "would_fill": True, "preview": {}},
+        ]
+        with patch.object(trade_ideas_bridge, "fillable_ideas", return_value=rows):
+            text = bot._format_idea_scan(demo_card.scan_ideas(UID), UID)
+
+        self.assertIn("1 of the last 2", text)
+        self.assertIn("/democard real 29", text)
+
+    def test_the_scan_is_honest_when_there_is_nothing_to_show(self) -> None:
+        rows = [{"id": 30, "product_id": "BTC-USD", "direction": "long",
+                 "status": "expired", "would_fill": False,
+                 "preview": {"skip_reason": "expired"}}]
+        with patch.object(trade_ideas_bridge, "fillable_ideas", return_value=rows):
+            text = bot._format_idea_scan(demo_card.scan_ideas(UID), UID)
+
+        self.assertIn("Nothing to send live yet", text)
+        self.assertNotIn("/democard real 30", text)
+
 
 class LegacyPaperBookTests(unittest.TestCase):
     """The demo paper book is off for live accounts.

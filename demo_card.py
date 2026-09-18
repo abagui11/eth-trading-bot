@@ -80,10 +80,15 @@ EVERYONE = ("all", "everyone", "broadcast")
 # position", and quietly changing that into "spend money" is not a thing to do
 # with a word someone has already been using.
 REAL = ("real", "fillable", "forreal")
+# Report what is fillable without sending anything. The answer decides whether
+# a live card can be shown at all, and before this it needed an SSH session
+# (`deploy/_show_fillable.py`) -- which is the one thing the command exists to
+# avoid having in the shot.
+SCAN = ("scan", "check", "what")
 
 
 def parse_args(args: list[str], *, default_id: int) -> dict[str, Any]:
-    """Read `/democard [id|all] [live|mill|hq] [product] [side] [#trade]` in any order.
+    """Read `/democard [id|all] [live|mill|hq|real|scan] [product] [side] [#]` in any order.
 
     Order-insensitive on purpose: this gets typed mid-recording, and having to
     remember positions is exactly when it gets typed wrong. Telegram ids are
@@ -92,12 +97,14 @@ def parse_args(args: list[str], *, default_id: int) -> dict[str, Any]:
     out: dict[str, Any] = {
         "telegram_id": default_id, "product": "BTC-USD", "side": "buy",
         "mirror": False, "source": None, "trade_id": None, "everyone": False,
-        "live_idea": False,
+        "live_idea": False, "idea_id": None, "scan": False,
     }
     for raw in args:
         token = str(raw).strip().lower().lstrip("-#")
         if token in EVERYONE:
             out["everyone"] = True
+        elif token in SCAN:
+            out["scan"] = True
         elif token in REAL:
             out["live_idea"] = True
         elif token in MIRRORS:
@@ -113,6 +120,15 @@ def parse_args(args: list[str], *, default_id: int) -> dict[str, Any]:
             else:
                 out["trade_id"] = int(token)
                 out["mirror"] = True
+
+    # A short number means "that mill idea" once `real` is in play, because on
+    # that path there is nothing to mirror -- the card *is* the idea. Resolved
+    # after the loop so `real 85` and `85 real` read the same, which is the
+    # whole point of parsing this order-insensitively.
+    if out["live_idea"] and out["trade_id"] is not None:
+        out["idea_id"] = out["trade_id"]
+        out["trade_id"] = None
+        out["mirror"] = False
     return out
 
 
@@ -252,21 +268,62 @@ def build_from_trade(trade: dict[str, Any]) -> Suggestion:
     )
 
 
-def pick_fillable_idea(user_id: int, *, limit: int = 30) -> dict[str, Any] | None:
-    """The newest mill idea that would fill for this user right now.
+def _verdict_line(row: dict[str, Any]) -> dict[str, Any]:
+    """One idea's fill verdict, in words rather than skip codes."""
+    import trade_ideas_bridge as bridge
+
+    preview = row.get("preview") or {}
+    fills = bool(row.get("would_fill"))
+    return {
+        "id": int(row["id"]),
+        "product_id": row.get("product_id"),
+        "direction": row.get("direction"),
+        "status": row.get("status"),
+        "would_fill": fills,
+        "skip_reason": preview.get("skip_reason"),
+        "why": "" if fills else bridge.explain_skip(preview.get("skip_reason")),
+        "born_rr": preview.get("born_rr"),
+    }
+
+
+def find_live_idea(
+    user_id: int, *, idea_id: int | None = None, limit: int = 30
+) -> tuple[dict[str, Any] | None, list[dict[str, Any]]]:
+    """The mill idea to send live, plus the verdict on everything considered.
 
     A demo card cannot fill — its ref matches no executor — so asking for a
     genuine fill means sending a *real* card instead. This picks one that is
     not already refusable, which is a strong no and a weak yes: the final
     exposure, contract-floor and dedupe checks only run when an order is
     actually sent.
+
+    The verdicts come back either way. When nothing is fillable the caller can
+    then say *which* ideas were looked at and why each was refused, instead of
+    a bare "nothing right now" that leaves someone about to record wondering
+    whether the mill is broken or the market simply moved.
     """
     import trade_ideas_bridge as bridge
 
-    for row in bridge.fillable_ideas(user_id, limit=limit):
-        if row.get("would_fill"):
-            return row
-    return None
+    if idea_id is not None:
+        verdict = bridge.preview_fill(int(idea_id), user_id)
+        row = dict(bridge._idea_row(int(idea_id)) or {"id": int(idea_id)})
+        row.update({"preview": verdict, "would_fill": bool(verdict.get("would_fill"))})
+        considered = [_verdict_line(row)]
+        return (row if row["would_fill"] else None), considered
+
+    rows = bridge.fillable_ideas(user_id, limit=limit)
+    picked = next((r for r in rows if r.get("would_fill")), None)
+    return picked, [_verdict_line(r) for r in rows]
+
+
+def pick_fillable_idea(user_id: int, *, limit: int = 30) -> dict[str, Any] | None:
+    """The newest mill idea that would fill for this user right now."""
+    return find_live_idea(user_id, limit=limit)[0]
+
+
+def scan_ideas(user_id: int, *, limit: int = 10) -> list[dict[str, Any]]:
+    """Fill verdicts for the newest mill ideas — a pre-flight, sends nothing."""
+    return find_live_idea(user_id, limit=limit)[1]
 
 
 def build_from_idea(idea: dict[str, Any]) -> Suggestion:
@@ -296,13 +353,17 @@ def send(telegram_id: int, *, product: str = "BTC-USD",
          side: str = "buy", mirror: bool = False,
          source: str | None = None,
          trade_id: int | None = None,
-         live_idea: bool = False) -> dict[str, Any]:
+         live_idea: bool = False,
+         idea_id: int | None = None) -> dict[str, Any]:
     """Build and DM one card. Returns what happened; never raises.
 
     `live_idea` sends a **real** mill card rather than a demo one: real levels,
     the real Accept callback, and therefore a real trade if it is tapped. The
     banner says so. A card that spends money must never be labelled a demo —
-    that is the one combination worse than either on its own.
+    that is the one combination worse than either on its own. `idea_id` aims
+    that at one specific mill idea instead of the newest fillable one; it is
+    still put through the same gate, so naming an idea asks for it rather than
+    forces it.
     """
     import display_summary
     import notify
@@ -318,9 +379,15 @@ def send(telegram_id: int, *, product: str = "BTC-USD",
     trade = None
     idea = None
     if live_idea:
-        idea = pick_fillable_idea(telegram_id)
+        idea, considered = find_live_idea(telegram_id, idea_id=idea_id)
         if idea is None:
-            return {"ok": False, "reason": "nothing_fillable"}
+            return {
+                "ok": False,
+                "reason": ("idea_not_fillable" if idea_id is not None
+                           else "nothing_fillable"),
+                "idea_id": idea_id,
+                "considered": considered,
+            }
         suggestion = build_from_idea(idea)
         product = str(suggestion.product_id)
         side = "buy" if suggestion.action == "spot_buy" else "sell"

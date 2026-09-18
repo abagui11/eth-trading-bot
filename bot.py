@@ -30,6 +30,7 @@ import paper
 import pool
 import research
 import strategy_catalog
+import telegram_text
 import telegram_ui
 import trade_ideas_bridge
 import user_books
@@ -2004,8 +2005,44 @@ async def cmd_deposit(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
             logger.exception("Deposit admin ping failed for %s", admin_id)
 
 
+def _format_idea_scan(rows: list[dict], telegram_id: int) -> str:
+    """`/democard scan` — which mill ideas a live card could be sent from."""
+    if not rows:
+        return (
+            "No mill ideas to check — the ideas book is empty or unreachable."
+        )
+
+    fillable = [r for r in rows if r["would_fill"]]
+    lines = [
+        f"{len(fillable)} of the last {len(rows)} mill ideas would fill for "
+        f"{telegram_id} right now."
+    ]
+    for row in rows:
+        mark = "FILLS" if row["would_fill"] else "no"
+        tail = "" if row["would_fill"] else f" — {row['why']}"
+        lines.append(
+            f"  #{row['id']} {row.get('product_id')} {row.get('direction')} "
+            f"[{row.get('status')}] {mark}{tail}"
+        )
+    if fillable:
+        lines.append(
+            f"\n/democard real {fillable[0]['id']} sends that one as a LIVE "
+            "card — Accept on it places a real trade."
+        )
+    else:
+        lines.append(
+            "\nNothing to send live yet. Wait for the next mill cycle, or use "
+            "/democard live to mirror an open position as a demo."
+        )
+    return "\n".join(lines)[:4096]
+
+
 async def cmd_democard(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """`/democard [id] [btc|eth] [long|short]` — send one demo trade card.
+
+    `real` sends a live mill card instead, optionally aimed at one idea
+    (`real 57`), and `scan` reports what could be sent live without sending
+    anything.
 
     Admin only, and from Telegram rather than a server script so it can be
     fired mid-recording without an SSH session in the shot.
@@ -2023,8 +2060,18 @@ async def cmd_democard(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         "product": str(opts["product"]), "side": str(opts["side"]),
         "mirror": bool(opts["mirror"]), "source": opts["source"],
         "trade_id": opts["trade_id"], "live_idea": bool(opts["live_idea"]),
+        "idea_id": opts["idea_id"],
     }
     loop = asyncio.get_running_loop()
+
+    if opts["scan"]:
+        # Answers "can I show a real entry right now, and with which idea"
+        # before anyone is recording, which is when it stops being useful.
+        rows = await loop.run_in_executor(
+            None, lambda: demo_card.scan_ideas(int(opts["telegram_id"]))
+        )
+        await _reply(update, _format_idea_scan(rows, int(opts["telegram_id"])))
+        return
 
     if opts["everyone"]:
         batch = await loop.run_in_executor(
@@ -2076,11 +2123,22 @@ async def cmd_democard(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
                                 "refusable at the current mark. Try again "
                                 "after the next mill cycle, or drop 'real' "
                                 "for a demo card",
+            "idea_not_fillable": f"mill idea #{result.get('idea_id')} would "
+                                 "not fill for that account right now",
         }
-        await _reply(
-            update,
-            f"No card sent: {reasons.get(str(result.get('reason')), result.get('reason'))}",
-        )
+        lines = [
+            "No card sent: "
+            + str(reasons.get(str(result.get("reason")), result.get("reason")))
+        ]
+        # Which ideas were refused, and why, rather than only that they were:
+        # the difference between "wait for the next cycle" and "the mill has
+        # stopped" is the thing the answer has to settle.
+        for row in (result.get("considered") or [])[:4]:
+            lines.append(
+                f"  #{row['id']} {row.get('product_id')} "
+                f"{row.get('direction')} — {row['why']}"
+            )
+        await _reply(update, "\n".join(lines))
         return
 
     if result.get("live"):
@@ -2820,9 +2878,7 @@ async def on_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     except Exception:
         logger.exception("Chat monitor audit failed")
 
-    spot = research.get_spot_price()
-    pnl = paper.format_pnl_footer(spot)
-    await _reply(update, f"{reply}\n\n{pnl}"[:4096])
+    await _reply(update, telegram_text.to_plain_text(reply)[:4096])
 
 
 async def cmd_watchdog(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:

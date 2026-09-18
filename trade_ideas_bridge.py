@@ -565,6 +565,9 @@ _SKIP_PLAIN = {
     "bad_levels": "The idea's levels are inconsistent, so it was not placed.",
     "no_mark": "No live price was available to check it against.",
     "not_authorized": "Your account isn't set up to take live fills yet.",
+    "already_filled": "This one has already been taken.",
+    "unknown_idea": "There is no idea with that number.",
+    "unsized": "The idea has no entry or stop, so there is nothing to place.",
 }
 
 

@@ -5,8 +5,11 @@ exists for when you want it scripted, or want the diagnostics printed.
 
     python deploy/_send_demo_card.py <telegram_id>
     python deploy/_send_demo_card.py <telegram_id> --product ETH-USD --side sell
+    python deploy/_send_demo_card.py <telegram_id> --real [--idea-id 57]
 
-Accept is safe to press: see demo_card.py for why nothing can fill.
+Accept is safe to press: see demo_card.py for why nothing can fill. The one
+exception is `--real`, which sends an actual mill card whose Accept places an
+actual trade; `deploy/_show_fillable.py <telegram_id>` says whether one exists.
 """
 
 from __future__ import annotations
@@ -31,9 +34,16 @@ def main() -> int:
     ap.add_argument("--source", choices=("mill", "hq"),
                     help="with --live, which book to mirror from")
     ap.add_argument("--trade-id", type=int, help="mirror this trade specifically")
+    ap.add_argument("--real", action="store_true",
+                    help="send a REAL mill card — Accept places a real trade")
+    ap.add_argument("--idea-id", type=int,
+                    help="with --real, send this mill idea specifically")
     args = ap.parse_args()
     uid = args.telegram_id
-    mirror = args.live or args.source is not None or args.trade_id is not None
+    live_idea = args.real or args.idea_id is not None
+    mirror = not live_idea and (
+        args.live or args.source is not None or args.trade_id is not None
+    )
 
     account = pool.get_account(uid)
     cash = float(account["cash_usd"]) if account else 0.0
@@ -42,11 +52,18 @@ def main() -> int:
 
     result = demo_card.send(uid, product=args.product, side=args.side,
                             mirror=mirror, source=args.source,
-                            trade_id=args.trade_id)
+                            trade_id=args.trade_id, live_idea=live_idea,
+                            idea_id=args.idea_id)
     if not result.get("ok"):
         print(f"\nno card sent: {result.get('reason')}")
+        for row in result.get("considered") or []:
+            print(f"  #{row['id']} {row['product_id']} {row['direction']} "
+                  f"— {row['why']}")
         return 1
 
+    if result.get("live"):
+        print(f"LIVE card    : mill idea #{result['idea_id']} — Accept on "
+              f"this places a real trade")
     if result.get("mirrored_trade_id"):
         print(f"mirroring   : live {result['mirrored_source']} trade "
               f"#{result['mirrored_trade_id']}")
@@ -63,9 +80,12 @@ def main() -> int:
               "rather than quoting a size. Honest, but probably not the "
               "render you want to film.")
 
-    print(f"\nsent. demo ref: {result['ref']}")
-    print("Accept reserves their real budget, then the watchdog releases it "
-          "within ~60s with the real 'never fired' message.")
+    print(f"\nsent. ref: {result['ref']}")
+    if result.get("live"):
+        print("Accept on this one spends real money at the size above.")
+    else:
+        print("Accept reserves their real budget, then the watchdog releases "
+              "it within ~60s with the real 'never fired' message.")
     return 0
 
 

@@ -15,6 +15,7 @@ import config
 import ledger
 import paper
 import research
+import telegram_text
 
 logger = logging.getLogger(__name__)
 
@@ -53,6 +54,11 @@ direct users to /research (topic catalog). Examples:
 
 When an authoritative cycle snapshot is provided, spot, zones, SFPs, and key levels in your answer
 MUST match that snapshot. Do not invent prices or zones that contradict it.
+
+Replies are delivered as plain Telegram text, so markdown is not rendered. Write prose and
+short "- " bullet lists only: no #/## headings, no **bold** or *italic*, no `code`, no tables,
+no --- rules. Do not end the reply with a PnL or portfolio line — users get balances from
+/me and /performance.
 
 This is not financial advice.
 """
@@ -216,7 +222,7 @@ def _build_context(spot: float, user_message: str) -> tuple[str, str | None, dic
 
 
 def answer(user_message: str) -> str:
-    """Return Claude's reply about the latest suggestion (caller appends PnL footer)."""
+    """Return Claude's reply about the latest suggestion, as plain Telegram text."""
     guide = analyze.load_trading_guide()
     spot = research.get_spot_price()
 
@@ -265,4 +271,5 @@ def answer(user_message: str) -> str:
         if block.type == "text":
             reply += block.text
 
-    return reply.strip()[:3500] if reply.strip() else "I don't have an answer for that right now."
+    reply = telegram_text.to_plain_text(reply)
+    return reply[:3500] if reply else "I don't have an answer for that right now."

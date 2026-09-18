@@ -509,6 +509,8 @@ a real card would quote for that account.
 | `/democard 85` | mirrors live trade #85 specifically |
 | `/democard all live` | mirrors it **to every approved account** |
 | `/democard real` | **a real, fillable mill card — Accept places a real trade** |
+| `/democard real 57` | the same, aimed at mill idea #57 |
+| `/democard scan` | fill verdict on each recent idea; sends nothing |
 
 Telegram ids are long and trade ids are short, which is what keeps `85` and
 `8708390551` apart. Without `all` it goes to one account — yourself by default,
@@ -549,11 +551,21 @@ a card that spends money must never be labelled a demo, which is the one
 combination worse than either alone.
 
 It picks the newest idea that would fill *right now*, checked by running the
-real gates in dry-run mode (`deploy/_show_fillable.py <id>` shows the same
-scan). Treat that as a strong no and a weak yes: exposure, contract-floor and
-dedupe checks only run when an order is genuinely sent, so a card can still be
-refused after passing the preview. If nothing is fillable the command says so
-instead of sending a card that will bounce.
+real gates in dry-run mode. Treat that as a strong no and a weak yes: exposure,
+contract-floor and dedupe checks only run when an order is genuinely sent, so a
+card can still be refused after passing the preview. If nothing is fillable the
+command says so instead of sending a card that will bounce — and it names the
+ideas it looked at with a plain-language reason for each, because "nothing
+right now" cannot tell a market that has moved from a mill that has stopped,
+and that is the question being asked ten minutes before a recording.
+
+`/democard scan` asks that question without sending anything: the same verdicts
+as `deploy/_show_fillable.py <id>`, in Telegram, ending in the exact
+`/democard real <id>` to type next when there is one. A number beside `real`
+aims at that mill idea — `/democard real 57` — which still goes through the
+gate, so naming an idea asks for it rather than forces it. On that path the
+number is an idea id, not a live trade id, since there is nothing to mirror
+when the card *is* the idea.
 
 `real` is not a synonym for `live` — `/democard live` still means "mirror an
 open position", and that word is already in use.
