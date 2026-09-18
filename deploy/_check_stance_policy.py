@@ -89,6 +89,14 @@ def main() -> int:
                 if not total:
                     print("  (no rows)")
                     continue
+                # Rows written before the migration have no counterfactual, so
+                # they must not sit in the denominator: including them reads as
+                # a 0% override rate for the first ~60 rows after a deploy and
+                # would later mask a genuine 0%.
+                scored = conn.execute(
+                    f"SELECT COUNT(*) c FROM intel_stances WHERE {where} "
+                    "AND llm_stance IS NOT NULL", params
+                ).fetchone()["c"]
                 published_differs = conn.execute(
                     f"SELECT COUNT(*) c FROM intel_stances WHERE {where} "
                     "AND llm_stance IS NOT NULL AND stance != llm_stance", params
@@ -99,23 +107,34 @@ def main() -> int:
                         f"SELECT override_kind, COUNT(*) c FROM intel_stances "
                         f"WHERE {where} GROUP BY override_kind", params)
                 })
-                print(f"  rows={total:,}")
-                print(f"  published != model's stance: {published_differs:,} "
-                      f"({published_differs / total * 100:.1f}%)  "
-                      "<- what the policy is changing")
+                print(f"  rows={total:,}  (with a counterfactual: {scored:,})")
+                if scored:
+                    print(f"  published != model's stance: {published_differs:,} "
+                          f"({published_differs / scored * 100:.1f}% of scored)  "
+                          "<- what the policy is changing")
+                else:
+                    print("  no rows carry a counterfactual yet — nothing to "
+                          "compare until the migration has been live a cycle")
                 for kind, n in kinds.most_common():
                     print(f"    model attempted {kind:20s} {n:6,} "
-                          f"({n / total * 100:.1f}%)")
+                          f"({n / total * 100:.1f}% of rows)")
                 if label == "SINCE epoch":
-                    attempted = total - kinds.get("(kept)", 0)
-                    rate = attempted / total if total else 0
+                    attempted = sum(
+                        n for k, n in kinds.items() if k != "(kept)"
+                    )
+                    rate = attempted / scored if scored else 0
                     # ~10% attempted overrides is the recorded norm; 0% or
                     # >50% means the prompt or the parse broke, not that the
-                    # model changed its mind.
-                    if total >= 60 and not 0.01 <= rate <= 0.50:
+                    # model changed its mind. Needs 60 *scored* rows before it
+                    # can say anything — at ~10%, 6 rows expects 0.6 overrides.
+                    if scored >= 60 and not 0.01 <= rate <= 0.50:
                         problems.append(
-                            f"override attempt rate {rate:.0%} is outside the "
-                            "1-50% band seen historically")
+                            f"override attempt rate {rate:.0%} of {scored} "
+                            "scored rows is outside the 1-50% band seen "
+                            "historically")
+                    elif scored < 60:
+                        print(f"  (band check held: {scored} scored rows, "
+                              "needs 60)")
 
         print("\n=== Phase 2 shadow reads ===")
         if "intel_reads" not in {
@@ -145,6 +164,15 @@ def main() -> int:
                       f"({stale / total * 100:.1f}%)  <- target < 5%")
                 if stale / total > 0.05:
                     problems.append("stale-invalidation rate above 5%")
+                # A read that never emits a bias cannot be scored at all. The
+                # `holding` rule requires price inside the array, which may
+                # simply be too strict — that is a finding about the rule, not
+                # a fault, but it has to surface early or the window is wasted.
+                if total >= 40 and withheld == total:
+                    problems.append(
+                        f"bias withheld on ALL {total} reads — the holding rule "
+                        "is admitting nothing; loosen _array_state (retest "
+                        "within N x ATR) or the window yields no scorable calls")
 
     print("\n" + "=" * 64)
     if problems:
