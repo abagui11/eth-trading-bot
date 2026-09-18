@@ -1790,5 +1790,217 @@ class PortfolioTests(PoolTestCase):
         self.assertFalse(pool.portfolio(424242)["ok"])
 
 
+class UnsubscribeTests(PoolTestCase):
+    """Removing an account, so an id can onboard again from `/start`.
+
+    This is the only operation that deletes a tester's journal, which makes
+    its refusals the interesting part rather than its happy path: every one
+    of them is a way the deletion could take money from somebody. The one
+    that matters most is an open stake — the account owns a share of a live
+    position, and deleting it would hand that share to the other holders on
+    the next booked exit.
+    """
+
+    def setUp(self) -> None:
+        super().setUp()
+        self._patch(bot_config, "POOL_MIN_WITHDRAWAL_USD", 50.0)
+        self._patch(bot_config, "POOL_WITHDRAWAL_FEE_RESERVE_USD", 3.0)
+        self._patch(bot_config, "POOL_MAX_WITHDRAWAL_USD", 2500.0)
+        self._patch(bot_config, "POOL_MAX_USER_DAILY_WITHDRAWAL_USD", 2500.0)
+        self._patch(bot_config, "POOL_MAX_GLOBAL_DAILY_WITHDRAWAL_USD", 5000.0)
+        self._patch(bot_config, "POOL_PAYOUTS_ENABLED", True)
+        self._patch(bot_config, "POOL_AUTO_APPROVE_WITHDRAWALS", False)
+        pool.approve_user(ALICE, admin_id=ADMIN)
+        self.alice_wallet = self._wallet(ALICE)
+        pool.mark_wallet_verified(self.alice_wallet)
+
+    def _patch(self, target, attr, value) -> None:
+        p = patch.object(target, attr, value)
+        p.start()
+        self.addCleanup(p.stop)
+
+    def _remove(self, uid: int = ALICE, **kw):
+        return pool.unsubscribe_user(uid, admin_id=ADMIN, **kw)
+
+    # -- the happy path ----------------------------------------------------
+
+    def test_a_removed_id_is_a_first_contact_user_again(self) -> None:
+        """The whole point: onboarding is one-shot per id, so demoing it twice
+        needs the account genuinely gone rather than merely quiet."""
+        result = self._remove(confirm=True)
+        self.assertTrue(result["ok"], result)
+        self.assertEqual(result["action"], "removed")
+
+        self.assertIsNone(pool.get_account(ALICE))
+        self.assertIsNone(pool.get_wallet(ALICE))
+        self.assertFalse(pool.is_approved(ALICE))
+        # 'new' is what makes `/start` show "request sent for review" and ping
+        # an admin to Admit, rather than the welcome.
+        self.assertEqual(pool.request_access(ALICE, "alice"), "new")
+
+    def test_the_same_wallet_can_be_registered_again_afterwards(self) -> None:
+        """One account per address is enforced by a unique index, so a
+        leftover row would refuse the re-registration that the demo needs."""
+        self._remove(confirm=True)
+        pool.approve_user(ALICE, admin_id=ADMIN)
+        again = pool.register_wallet(ALICE, self.alice_wallet)
+        self.assertTrue(again["ok"], again)
+
+    def test_a_preview_changes_nothing(self) -> None:
+        pool.credit(ALICE, 10.0, admin_id=ADMIN, ref="seed")
+        preview = self._remove()
+        self.assertEqual(preview["action"], "preview")
+        self.assertIn("pool_accounts", preview["counts"])
+        # Still there — the card is a question, not the act.
+        self.assertIsNotNone(pool.get_account(ALICE))
+        self.assertTrue(pool.is_approved(ALICE))
+
+    def test_another_account_is_never_touched(self) -> None:
+        pool.approve_user(BOB, admin_id=ADMIN)
+        pool.credit(BOB, 500.0, admin_id=ADMIN, ref="seed-bob")
+        self._remove(confirm=True)
+        self.assertIsNotNone(pool.get_account(BOB))
+        self.assertEqual(float(pool.get_account(BOB)["cash_usd"]), 500.0)
+        self.assertTrue(pool.is_approved(BOB))
+
+    def test_an_id_with_no_history_is_said_plainly(self) -> None:
+        result = self._remove(424242)
+        self.assertFalse(result["ok"])
+        self.assertEqual(result["reason"], "nothing_to_remove")
+
+    # -- money -------------------------------------------------------------
+
+    def test_a_withdrawable_balance_is_refused(self) -> None:
+        """Money that can still be paid out must leave as a payout, to the
+        address they proved they control — not be written off."""
+        pool.credit(ALICE, 500.0, admin_id=ADMIN, ref="seed")
+        result = self._remove(confirm=True)
+        self.assertFalse(result["ok"])
+        self.assertEqual(result["reason"], "balance_withdrawable")
+        # Refused means refused: nothing deleted, nothing written off.
+        self.assertEqual(float(pool.get_account(ALICE)["cash_usd"]), 500.0)
+        self.assertTrue(pool.is_approved(ALICE))
+
+    def test_a_sub_minimum_residue_is_written_off_and_recorded(self) -> None:
+        """The unused fee reserve coming back from "take everything out" lands
+        below the minimum, so no withdrawal can ever move it. Refusing over it
+        would make the account undeletable; writing it off silently would be a
+        loss nobody could reconstruct. So it is written off *and* recorded."""
+        pool.credit(ALICE, 2.84, admin_id=ADMIN, ref="residue")
+        preview = self._remove()
+        self.assertAlmostEqual(preview["written_off_usd"], 2.84, places=2)
+
+        result = self._remove(confirm=True)
+        self.assertTrue(result["ok"], result)
+        self.assertAlmostEqual(result["written_off_usd"], 2.84, places=2)
+        self.assertIsNone(pool.get_account(ALICE))
+        self.assertEqual(pool.total_tester_cash(), 0.0)
+
+        records = pool.unsubscribe_records(ALICE)
+        self.assertEqual(len(records), 1)
+        self.assertAlmostEqual(records[0]["written_off_usd"], 2.84, places=2)
+        self.assertEqual(records[0]["by_admin"], ADMIN)
+        # The record outlives the rows it describes — that is what makes this
+        # an accounted write-off rather than a disappearance.
+        self.assertIn("pool_events", records[0]["rows_deleted"])
+
+    def test_an_empty_account_needs_no_write_off(self) -> None:
+        result = self._remove(confirm=True)
+        self.assertEqual(result["written_off_usd"], 0.0)
+
+    # -- the refusals that protect other people's money --------------------
+
+    def test_an_open_stake_is_refused(self) -> None:
+        """The account owns a share of a position that is still live. Deleting
+        it would leave that share owned by nobody, and the next exit would
+        split the trade between the remaining holders."""
+        pool.credit(ALICE, 1000.0, admin_id=ADMIN, ref="seed")
+        pool.record_intent("cycle-1", ALICE)
+        opened = pool.open_stakes(
+            7, "cycle-1", fill_qty=0.01, fill_price=100_000.0,
+            risk_per_unit=10.0, house_risk_usd=14.0,
+        )
+        self.assertTrue(opened, "fixture failed to open a stake")
+
+        result = self._remove(confirm=True)
+        self.assertFalse(result["ok"])
+        self.assertEqual(result["reason"], "open_stake")
+        self.assertIsNotNone(pool.get_account(ALICE))
+        self.assertTrue(pool.open_stakes_for(7))
+
+    def test_a_pending_accept_is_refused(self) -> None:
+        pool.credit(ALICE, 1000.0, admin_id=ADMIN, ref="seed")
+        pool.record_intent("cycle-2", ALICE)
+        result = self._remove(confirm=True)
+        self.assertFalse(result["ok"])
+        self.assertEqual(result["reason"], "pending_intent")
+        self.assertIsNotNone(pool.get_account(ALICE))
+
+    def test_a_withdrawal_in_flight_is_refused(self) -> None:
+        """That row is the only evidence a send may already have happened, and
+        Coinbase offers no way to ask."""
+        pool.credit(ALICE, 1000.0, admin_id=ADMIN, ref="seed")
+        req = pool.request_withdrawal(ALICE, 990.0)
+        self.assertTrue(req["ok"], req)
+        # Balance is now below the minimum, so only this guard can stop it.
+        self.assertLess(float(pool.get_account(ALICE)["cash_usd"]), 50.0)
+
+        result = self._remove(confirm=True)
+        self.assertFalse(result["ok"])
+        self.assertEqual(result["reason"], "withdrawal_in_flight")
+        self.assertIsNotNone(
+            pool.get_withdrawal(int(req["withdrawal_id"])),
+            "the payout row must survive a refused removal",
+        )
+
+    def test_a_settled_withdrawal_does_not_block_removal(self) -> None:
+        """Only an *open* payout is evidence of money in motion."""
+        pool.credit(ALICE, 1000.0, admin_id=ADMIN, ref="seed")
+        req = pool.request_withdrawal(ALICE, 990.0)
+        wid = int(req["withdrawal_id"])
+        pool.decide_withdrawal(wid, admin_id=ADMIN, approve=True)
+        with pool._connect() as conn:
+            conn.execute(
+                "UPDATE pool_withdrawals SET status = 'settled' WHERE id = ?",
+                (wid,),
+            )
+        self.assertTrue(self._remove(confirm=True)["ok"])
+
+    def test_a_pending_deposit_claim_is_refused(self) -> None:
+        """Money is on its way to this account and the sweep is about to
+        credit it."""
+        pool.request_deposit(ALICE, 1000.0, txid=txhash("a"))
+        result = self._remove(confirm=True)
+        self.assertFalse(result["ok"])
+        self.assertEqual(result["reason"], "deposit_pending")
+
+    # -- the chain-deposit record ------------------------------------------
+
+    def test_a_chain_deposit_is_detached_rather_than_deleted(self) -> None:
+        """Deleting it would make the sweep re-see a historical transfer as
+        money that arrived with nobody to own it, and page an admin about it.
+        Keeping the row as `baseline` preserves "already seen" while dropping
+        the link to the person."""
+        with pool._connect() as conn:
+            conn.execute(
+                "INSERT INTO pool_chain_deposits (cb_tx_id, txid, amount_usd, "
+                "status, telegram_id, first_seen_at) VALUES "
+                "(?, ?, ?, 'credited', ?, ?)",
+                ("cb-1", txhash("b"), 500.0, ALICE, "2026-09-16T00:00:00Z"),
+            )
+
+        self.assertTrue(self._remove(confirm=True)["ok"])
+
+        with pool._connect() as conn:
+            row = conn.execute(
+                "SELECT * FROM pool_chain_deposits WHERE cb_tx_id = 'cb-1'"
+            ).fetchone()
+        self.assertIsNotNone(row, "the transfer record must survive")
+        self.assertIsNone(row["telegram_id"])
+        self.assertEqual(row["status"], "baseline")
+        # 'baseline' is what makes the sweep skip it instead of alerting.
+        self.assertEqual(pool.unmatched_chain_deposits(), [])
+
+
 if __name__ == "__main__":
     unittest.main()

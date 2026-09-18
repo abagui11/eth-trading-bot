@@ -211,6 +211,90 @@ class PoolCommandTests(unittest.TestCase):
         self.assertEqual(pool.pending_withdrawals("requested"), [])
         self.assertIn("minimum", self._texts(update).lower())
 
+    # -- /unsubscribe --------------------------------------------------------
+
+    def _admin_update(self, args=None):
+        update, context = self._update(args)
+        update.effective_user.id = ADMIN
+        return update, context
+
+    def _tap_unsubscribe(self, choice: str, target: int = UID):
+        update = MagicMock()
+        query = update.callback_query
+        query.from_user.id = ADMIN
+        query.from_user.username = "admin"
+        query.data = f"{telegram_ui.CB_POOL_UNSUB_PREFIX}{choice}:{target}"
+        query.answer = AsyncMock()
+        # The card is tapped in the admin's own DM, so the reply goes there.
+        query.message.chat_id = ADMIN
+        context = MagicMock()
+        context.bot.send_message = AsyncMock()
+        with patch.object(access, "is_allowed", return_value=True):
+            asyncio.run(bot.on_callback(update, context))
+        return context
+
+    def test_unsubscribe_is_admin_only(self) -> None:
+        """It takes an arbitrary id, so a tester must not be able to delete
+        another tester's account."""
+        self._fund_for_withdrawal()
+        update, _ = self._run(bot.cmd_unsubscribe, [str(UID)])
+        self.assertIn("restricted to pool admins", self._texts(update))
+        self.assertIsNotNone(pool.get_account(UID))
+
+        # Nor by tapping the confirm button directly.
+        with patch.object(bot_config, "POOL_ADMIN_TELEGRAM_IDS", ()):
+            with patch.object(config, "POOL_ADMIN_TELEGRAM_IDS", []):
+                context = self._tap_unsubscribe("yes")
+        context.bot.send_message.assert_not_awaited()
+        self.assertIsNotNone(pool.get_account(UID))
+
+    def test_the_command_only_previews_and_the_button_deletes(self) -> None:
+        """A mistyped id deleting an account on the first Enter is not
+        something anything downstream can undo."""
+        pool.approve_user(UID, admin_id=ADMIN)
+        pool.register_wallet(UID, WALLET)
+
+        update, context = self._admin_update([str(UID)])
+        asyncio.run(bot.cmd_unsubscribe(update, context))
+
+        # Nothing gone yet, and the card offers the button that would do it.
+        self.assertIsNotNone(pool.get_account(UID))
+        self.assertTrue(pool.is_approved(UID))
+        text = self._texts(update)
+        self.assertIn("would delete", text)
+        self.assertIn("cannot be undone", text)
+        keyboard = update.message.reply_text.await_args.kwargs["reply_markup"]
+        data = [b.callback_data
+                for row in keyboard.inline_keyboard for b in row]
+        self.assertIn(f"{telegram_ui.CB_POOL_UNSUB_PREFIX}yes:{UID}", data)
+
+    def test_a_confirmed_removal_resets_onboarding_and_tells_them(self) -> None:
+        pool.approve_user(UID, admin_id=ADMIN)
+        pool.register_wallet(UID, WALLET)
+
+        context = self._tap_unsubscribe("yes")
+        self.assertIsNone(pool.get_account(UID))
+        self.assertFalse(pool.is_approved(UID))
+        self.assertEqual(pool.request_access(UID, "tester"), "new")
+
+        # The admin is told, and so is the person whose account it was.
+        targets = [c.args[0] for c in context.bot.send_message.await_args_list]
+        self.assertIn(ADMIN, targets)
+        self.assertIn(UID, targets)
+
+    def test_cancel_leaves_the_account_alone(self) -> None:
+        pool.approve_user(UID, admin_id=ADMIN)
+        context = self._tap_unsubscribe("no")
+        self.assertIsNotNone(pool.get_account(UID))
+        self.assertIn("untouched", str(context.bot.send_message.await_args.args[1]))
+
+    def test_a_funded_account_is_refused_with_the_reason(self) -> None:
+        self._fund_for_withdrawal()
+        context = self._tap_unsubscribe("yes")
+        self.assertIsNotNone(pool.get_account(UID))
+        reply = str(context.bot.send_message.await_args.args[1])
+        self.assertIn("/withdraw all", reply)
+
     def test_a_markdown_failure_still_delivers_the_text(self) -> None:
         """Telegram refuses a whole message it cannot parse. On this path that
         would be silence after a debit, so it must fall back to plain text."""

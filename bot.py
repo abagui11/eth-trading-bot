@@ -659,6 +659,53 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
             await context.bot.send_message(chat_id, f"Denied {target_id}.")
         return
 
+    if data.startswith(telegram_ui.CB_POOL_UNSUB_PREFIX):
+        if not pool.is_admin(user_id):
+            return
+        parts = data.split(":")
+        if len(parts) != 3 or parts[1] not in ("yes", "no"):
+            return
+        try:
+            target_id = int(parts[2])
+        except ValueError:
+            return
+        if parts[1] == "no":
+            await context.bot.send_message(
+                chat_id, f"Cancelled — {target_id} is untouched."
+            )
+            return
+
+        result = pool.unsubscribe_user(target_id, admin_id=user_id, confirm=True)
+        if not result.get("ok"):
+            # The guards are re-run by the confirming call, so a stake opened
+            # or a deposit landed between the card and the tap still stops it.
+            await context.bot.send_message(
+                chat_id, _unsubscribe_refusal(result, target_id)
+            )
+            return
+
+        written = float(result.get("written_off_usd") or 0.0)
+        deleted = sum((result.get("counts") or {}).values())
+        await context.bot.send_message(
+            chat_id,
+            f"Removed {target_id} — {deleted} rows deleted"
+            + (f", ${written:,.2f} written off" if written > 0 else "")
+            + f".\nTester cash across the pool: ${pool.total_tester_cash():,.2f}"
+            "\n\nTheir next message starts onboarding from scratch.",
+        )
+        try:
+            await context.bot.send_message(
+                target_id,
+                "Your Eva account has been closed and your details removed.\n\n"
+                "Nothing is being held for you here. If this wasn't expected, "
+                "reply and we'll sort it out.",
+            )
+        except Exception:
+            # They may have blocked the bot, which is a plausible reason to be
+            # removed in the first place. The removal already happened.
+            logger.info("Unsubscribe DM not delivered to %s", target_id)
+        return
+
     if data.startswith(telegram_ui.CB_POOL_WITHDRAW_PREFIX):
         if not pool.is_admin(user_id):
             return
@@ -2086,6 +2133,126 @@ async def cmd_assign(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
         logger.exception("Assign DM failed for %s", target)
 
 
+async def cmd_unsubscribe(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Admin: /unsubscribe <telegram_id> — remove an account entirely.
+
+    Two taps by design. The command only ever shows what would go, and the
+    button on that card is what deletes: the id is typed by hand, and a
+    mistyped one deleting an account on the first Enter is not a mistake
+    anything downstream can undo.
+    """
+    user = update.effective_user
+    if user is None or update.message is None:
+        return
+    if not pool.is_admin(user.id):
+        await _reply(update, "/unsubscribe is restricted to pool admins.")
+        return
+
+    args = context.args or []
+    if not args:
+        await _reply(
+            update,
+            "Usage: /unsubscribe <telegram_id>\n\n"
+            "Removes the account and every trace of its onboarding, so the "
+            "same id can go through /start as a brand-new user. Shows you "
+            "what would be deleted first.",
+        )
+        return
+    try:
+        target_id = int(str(args[0]).strip())
+    except ValueError:
+        await _reply(update, "Usage: /unsubscribe <telegram_id>")
+        return
+
+    result = pool.unsubscribe_user(target_id, admin_id=user.id)
+    if not result.get("ok"):
+        await _reply(update, _unsubscribe_refusal(result, target_id))
+        return
+
+    counts = result.get("counts") or {}
+    rows = "\n".join(f"   {n:>4}  {table}" for table, n in counts.items())
+    written = float(result.get("written_off_usd") or 0.0)
+    handle = result.get("username") or "no handle"
+    lines = [
+        f"*Remove {target_id}* ({handle})",
+        "",
+        "This would delete:",
+        rows or "   (nothing)",
+    ]
+    if int(result.get("chain_deposits") or 0):
+        lines.append(
+            f"   {int(result['chain_deposits']):>4}  pool_chain_deposits "
+            "(detached, not deleted)"
+        )
+    if written > 0:
+        lines += [
+            "",
+            f"⚠️ Writes off *${written:,.2f}* — below the "
+            f"${float(result['minimum_usd']):,.0f} withdrawal minimum, so no "
+            "payout can move it. It stays at the venue as house residual and "
+            "stops being owed to them.",
+        ]
+    lines += [
+        "",
+        "Afterwards /start shows them the 'request sent for review' message "
+        "and pings you to Admit, exactly like a new user.",
+        "",
+        "This cannot be undone.",
+    ]
+    await _reply(
+        update, "\n".join(lines), markdown=True,
+        reply_markup=telegram_ui.pool_admin_unsubscribe_keyboard(target_id),
+    )
+
+
+def _unsubscribe_refusal(result: dict, target_id: int) -> str:
+    """Say which guard stopped it, and what would clear that guard."""
+    reason = result.get("reason")
+    if reason == "nothing_to_remove":
+        return (f"{target_id} has no account, no access row and no history — "
+                "that id is already brand-new.")
+    if reason == "open_stake":
+        return (
+            f"{target_id} holds {int(result.get('open_stakes') or 0)} open "
+            "stake(s) in live trades.\n\n"
+            "Removing them now would leave a share of a real position owned "
+            "by nobody, and the next exit would split it between the other "
+            "holders — their money going to someone else. Wait for those "
+            "trades to close."
+        )
+    if reason == "pending_intent":
+        return (
+            f"{target_id} has {int(result.get('pending_intents') or 0)} "
+            "pending Accept(s) waiting on a fill. Those resolve within a "
+            "couple of minutes, either into a stake or a refund — try again "
+            "after that."
+        )
+    if reason == "withdrawal_in_flight":
+        return (
+            f"{target_id} has a withdrawal in flight. That row is the only "
+            "record that a send may already have happened, and Coinbase "
+            "cannot be asked, so it must not be deleted.\n\n"
+            "/payouts to watch it settle."
+        )
+    if reason == "deposit_pending":
+        return (f"{target_id} has a deposit claim still pending — money is on "
+                "its way to this account. Let it credit first.")
+    if reason == "balance_reserved":
+        return (f"{target_id} has ${float(result.get('reserved_usd') or 0):,.2f} "
+                "reserved with no open stake or intent to explain it. That is "
+                "a ledger inconsistency, not something to delete over.")
+    if reason == "balance_withdrawable":
+        return (
+            f"{target_id} still holds "
+            f"${float(result.get('cash_usd') or 0):,.2f}.\n\n"
+            "That is theirs and it can still be withdrawn, so it has to leave "
+            "as a payout to the address they proved they control — not be "
+            "written off. Have them run `/withdraw all`, or /debit it "
+            "deliberately if the money was never real."
+        )
+    return f"Couldn't remove {target_id} ({reason})."
+
+
 async def cmd_credit(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Admin escape hatch: /credit <telegram_id> <usd> [note]."""
     await _admin_cash_command(update, context, kind="credit")
@@ -2387,6 +2554,7 @@ def build_application() -> Application:
     app.add_handler(CommandHandler("payouts", cmd_payouts))
     app.add_handler(CommandHandler("credit", cmd_credit))
     app.add_handler(CommandHandler("debit", cmd_debit))
+    app.add_handler(CommandHandler("unsubscribe", cmd_unsubscribe))
     app.add_handler(CommandHandler("chart", cmd_chart))
     app.add_handler(CommandHandler("research", cmd_research))
     app.add_handler(CommandHandler("macro", cmd_macro))

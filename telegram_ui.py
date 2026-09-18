@@ -227,6 +227,7 @@ CB_POOL_USER_PREFIX = "pooluser:"      # pooluser:approve:<id> / pooluser:deny:<
 CB_POOL_DEPOSIT_PREFIX = "pooldep:"    # pooldep:credit:<req_id> / pooldep:deny:<req_id>
 CB_POOL_WALLET_PREFIX = "poolwal:"     # poolwal:approve:<row_id> / poolwal:reject:<row_id>
 CB_POOL_WITHDRAW_PREFIX = "poolwd:"    # poolwd:approve:<id> / poolwd:reject:<id>
+CB_POOL_UNSUB_PREFIX = "poolunsub:"    # poolunsub:yes:<id> / poolunsub:no:<id>
 CB_POOL_PORTFOLIO = "pool:portfolio"
 CB_POOL_DEPOSIT = "pool:deposit"
 # Demo card Accept. A separate prefix on purpose: it carries a ref no
@@ -292,6 +293,29 @@ def pool_admin_wallet_keyboard(request_id: int) -> InlineKeyboardMarkup:
                 ),
                 InlineKeyboardButton(
                     "Reject", callback_data=f"{CB_POOL_WALLET_PREFIX}reject:{request_id}"
+                ),
+            ]
+        ]
+    )
+
+
+def pool_admin_unsubscribe_keyboard(telegram_id: int) -> InlineKeyboardMarkup:
+    """Confirm/cancel for an account removal.
+
+    The target id rides in the callback data rather than in any per-chat
+    state, so the button cannot be made to delete a different account than
+    the card it is attached to describes.
+    """
+    return InlineKeyboardMarkup(
+        [
+            [
+                InlineKeyboardButton(
+                    "Remove account",
+                    callback_data=f"{CB_POOL_UNSUB_PREFIX}yes:{telegram_id}",
+                ),
+                InlineKeyboardButton(
+                    "Cancel",
+                    callback_data=f"{CB_POOL_UNSUB_PREFIX}no:{telegram_id}",
                 ),
             ]
         ]

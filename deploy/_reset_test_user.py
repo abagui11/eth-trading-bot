@@ -10,6 +10,11 @@ unrepeatable, which is a bad reason to get a worse recording.
 Refuses an account holding cash or an open stake unless --force, because
 "reset the demo account" and "delete a tester's balance" are one typo apart.
 Never touches any other id.
+
+`/unsubscribe <telegram_id>` in Telegram does the same job with the same
+guards and does not need a shell, so prefer it. This stays for the case where
+the bot is down, and for `--force`, which has no in-band equivalent on
+purpose.
 """
 
 from __future__ import annotations
@@ -26,19 +31,9 @@ import pool    # noqa: E402
 
 # Every table keyed by telegram_id that onboarding writes to. Ordered
 # child-first so nothing is orphaned midway if one statement fails.
-TABLES = (
-    "pool_withdrawals",
-    "pool_wallet_checks",
-    "pool_wallets",
-    "pool_deposit_requests",
-    "pool_stakes",
-    "pool_intents",
-    "pool_events",
-    "pool_chain_deposits",
-    "pool_accounts",
-    "approved_users",
-    "subscribers",
-)
+#
+# `pool_chain_deposits` is detached rather than deleted — see `reset`.
+TABLES = pool._UNSUBSCRIBE_TABLES
 
 
 def row_counts(uid: int) -> dict[str, int]:
@@ -62,11 +57,42 @@ def row_counts(uid: int) -> dict[str, int]:
     return counts
 
 
+def in_flight_payouts(uid: int) -> int:
+    """Payouts that may already exist at the venue.
+
+    Not covered by the cash guard: the money is debited at request time, so
+    an account with a send in progress can read as empty. Deleting the row
+    would destroy the only record that a payment might have happened, and
+    Coinbase offers no idempotency and no way to ask. `--force` does not
+    override this one.
+    """
+    conn = sqlite3.connect(config.LEDGER_DB)
+    try:
+        placeholders = ",".join("?" * len(pool._WITHDRAWALS_IN_FLIGHT))
+        row = conn.execute(
+            "SELECT COUNT(1) FROM pool_withdrawals WHERE telegram_id = ? "
+            f"AND status IN ({placeholders})",
+            (uid, *pool._WITHDRAWALS_IN_FLIGHT),
+        ).fetchone()
+    except sqlite3.OperationalError:
+        return 0
+    finally:
+        conn.close()
+    return int(row[0] or 0)
+
+
 def reset(uid: int, *, confirm: bool, force: bool) -> dict:
     """Decide and, if allowed, perform the reset. Returns what happened.
 
     Split out from the CLI so the refusal can be tested: it is the only thing
     standing between a demo reset and deleting a real tester's balance.
+
+    `pool_chain_deposits` rows are detached instead of deleted. The deposit
+    sweep re-inserts any transfer it cannot find, and past the first run a
+    re-inserted row lands as `unmatched` — so deleting the row makes a
+    historical deposit reappear as money that arrived with no owner and pages
+    an admin about it. `baseline` keeps the "already seen" fact that makes
+    crediting idempotent, without the link to the person.
     """
     account = pool.get_account(uid)
     cash = float(account["cash_usd"]) if account else 0.0
@@ -76,6 +102,11 @@ def reset(uid: int, *, confirm: bool, force: bool) -> dict:
     if not counts:
         return {"action": "nothing", "cash": cash, "reserved": reserved,
                 "counts": counts}
+    open_payouts = in_flight_payouts(uid)
+    if open_payouts:
+        return {"action": "refused_in_flight", "cash": cash,
+                "reserved": reserved, "counts": counts,
+                "in_flight": open_payouts}
     if (cash > 0.01 or reserved > 0.01) and not force:
         return {"action": "refused", "cash": cash, "reserved": reserved,
                 "counts": counts}
@@ -86,6 +117,12 @@ def reset(uid: int, *, confirm: bool, force: bool) -> dict:
     conn = sqlite3.connect(config.LEDGER_DB)
     try:
         with conn:
+            conn.execute(
+                "UPDATE pool_chain_deposits SET telegram_id = NULL, "
+                "deposit_request_id = NULL, status = 'baseline', note = ? "
+                "WHERE telegram_id = ?",
+                (f"detached when {uid} was reset", uid),
+            )
             for table in counts:
                 conn.execute(f"DELETE FROM {table} WHERE telegram_id = ?", (uid,))
     finally:
@@ -126,6 +163,11 @@ def main() -> int:
     for table, n in counts.items():
         print(f"  {n:>4}  {table}")
 
+    if result["action"] == "refused_in_flight":
+        print(f"\nREFUSED: {result['in_flight']} payout(s) still in flight. "
+              "That row is the only record a send may already have happened, "
+              "so it must not be deleted. Wait for it to settle (/payouts).")
+        return 1
     if result["action"] == "refused":
         held = result["cash"] + result["reserved"]
         print(f"\nREFUSED: this account still holds ${held:,.2f}. Withdraw it "

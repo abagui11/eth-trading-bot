@@ -2408,3 +2408,236 @@ def last_reconcile() -> dict[str, Any] | None:
         return json.loads(raw)
     except (TypeError, ValueError):
         return None
+
+
+# ---------------------------------------------------------------------------
+# Removing an account — /unsubscribe
+# ---------------------------------------------------------------------------
+
+# Everything keyed by telegram_id, ordered child-first so a statement that
+# fails part-way cannot leave a parent row pointing at deleted children.
+# `pool_chain_deposits` is deliberately absent: see `unsubscribe_user`.
+_UNSUBSCRIBE_TABLES = (
+    "pool_withdrawals",
+    "pool_wallet_checks",
+    "pool_wallets",
+    "pool_deposit_requests",
+    "pool_stakes",
+    "pool_intents",
+    "pool_events",
+    "pool_accounts",
+    "approved_users",
+    "subscribers",
+)
+
+# A payout that may already exist at the venue. Coinbase offers no idempotency
+# on sends, so this row is the only evidence that a payment might be in
+# flight — removing an account while one is open would destroy it.
+_WITHDRAWALS_IN_FLIGHT = (
+    "requested", "approved", "submitting", "submitted", "unknown",
+)
+
+_UNSUBSCRIBE_PREFIX = "unsubscribed:"
+
+
+def _table_count(conn: sqlite3.Connection, sql: str, params: tuple) -> int:
+    """COUNT for a table that may not exist on this build.
+
+    `subscribers` is created by `access.init_db`, not by this module's schema,
+    so a ledger that has only ever seen pool writes genuinely lacks it. An
+    absent table is nothing to delete, not a failure.
+    """
+    try:
+        row = conn.execute(sql, params).fetchone()
+    except sqlite3.OperationalError:
+        return 0
+    return int(row[0] or 0)
+
+
+def unsubscribe_user(
+    telegram_id: int, *, admin_id: int, confirm: bool = False
+) -> dict[str, Any]:
+    """Remove an account so the id can onboard again from `/start`.
+
+    The first-contact states are one-shot — an approved id sees the welcome
+    rather than "request sent for review", and a wallet cannot be registered
+    twice as a first registration — so demoing onboarding twice needs the
+    account genuinely gone rather than merely quiet.
+
+    Called with ``confirm=False`` it only reports what it *would* do, which is
+    what the admin card shows. Nothing is written until a second call.
+
+    The refusals are the point, and each one guards a specific way this could
+    take money from someone:
+
+    - **An open stake or a pending intent.** The account owns a pro-rata share
+      of a position that is still live at the venue. Deleting the stake would
+      leave that share belonging to nobody, and the next booked exit would
+      split the trade between the remaining holders — quietly handing one
+      tester's money to the others.
+    - **A withdrawal in flight.** The row is the only record that a send may
+      already have happened.
+    - **A pending deposit claim.** Money is on its way to this account; the
+      sweep is about to credit it.
+    - **A withdrawable balance.** Anything at or above the withdrawal minimum
+      must leave as a withdrawal, to the address they proved they control.
+
+    What is left after those is a residue *below* the minimum, which no
+    withdrawal can ever move — the unused fee reserve coming back from a
+    "take everything out" is exactly this. That is written off rather than
+    allowed to make the account undeletable, and the amount is recorded in
+    `pool_meta` under an `unsubscribed:` key. That record is the reason this
+    is not a silent loss: it outlives the rows it describes, so the dollars
+    that stopped being owed to somebody remain reconstructable afterwards.
+
+    `pool_chain_deposits` rows are **detached, not deleted**. The sweep
+    re-inserts any transfer it cannot find, and on a ledger past its first run
+    a re-inserted row lands as `unmatched` — so deleting the row would make a
+    historical deposit reappear as money that arrived with no owner, and page
+    an admin about it. Marking it `baseline` keeps the "already seen" fact
+    that makes crediting idempotent while dropping the link to the person.
+    """
+    minimum = float(bot_config.POOL_MIN_WITHDRAWAL_USD)
+
+    with _write_txn() as conn:
+        counts: dict[str, int] = {}
+        for table in _UNSUBSCRIBE_TABLES:
+            n = _table_count(
+                conn, f"SELECT COUNT(1) FROM {table} WHERE telegram_id = ?",
+                (telegram_id,),
+            )
+            if n:
+                counts[table] = n
+        chain_rows = _table_count(
+            conn,
+            "SELECT COUNT(1) FROM pool_chain_deposits WHERE telegram_id = ?",
+            (telegram_id,),
+        )
+
+        if not counts and not chain_rows:
+            return {"ok": False, "reason": "nothing_to_remove"}
+
+        account = conn.execute(
+            "SELECT * FROM pool_accounts WHERE telegram_id = ?", (telegram_id,)
+        ).fetchone()
+        cash = round(float(account["cash_usd"]), 2) if account else 0.0
+        reserved = round(float(account["reserved_usd"]), 2) if account else 0.0
+
+        base = {
+            "telegram_id": telegram_id,
+            "username": (account["username"] if account else None),
+            "cash_usd": cash,
+            "reserved_usd": reserved,
+            "counts": counts,
+            "chain_deposits": chain_rows,
+            "minimum_usd": minimum,
+        }
+
+        open_stakes = _table_count(
+            conn,
+            "SELECT COUNT(1) FROM pool_stakes WHERE telegram_id = ? AND "
+            "status = 'open'",
+            (telegram_id,),
+        )
+        if open_stakes:
+            return {"ok": False, "reason": "open_stake",
+                    "open_stakes": open_stakes, **base}
+
+        live_intents = _table_count(
+            conn,
+            "SELECT COUNT(1) FROM pool_intents WHERE telegram_id = ? AND "
+            "status = 'pending'",
+            (telegram_id,),
+        )
+        if live_intents:
+            return {"ok": False, "reason": "pending_intent",
+                    "pending_intents": live_intents, **base}
+
+        in_flight = _table_count(
+            conn,
+            "SELECT COUNT(1) FROM pool_withdrawals WHERE telegram_id = ? AND "
+            f"status IN ({','.join('?' * len(_WITHDRAWALS_IN_FLIGHT))})",
+            (telegram_id, *_WITHDRAWALS_IN_FLIGHT),
+        )
+        if in_flight:
+            return {"ok": False, "reason": "withdrawal_in_flight",
+                    "in_flight": in_flight, **base}
+
+        claims = _table_count(
+            conn,
+            "SELECT COUNT(1) FROM pool_deposit_requests WHERE telegram_id = ? "
+            "AND status = 'pending'",
+            (telegram_id,),
+        )
+        if claims:
+            return {"ok": False, "reason": "deposit_pending",
+                    "pending_deposits": claims, **base}
+
+        # Reserved cash with no open stake and no pending intent should be
+        # impossible. Refuse anyway rather than write off money the journal
+        # cannot explain.
+        if reserved > 0.01:
+            return {"ok": False, "reason": "balance_reserved", **base}
+        if cash >= minimum:
+            return {"ok": False, "reason": "balance_withdrawable", **base}
+
+        written_off = cash if cash > 0.01 else 0.0
+        if not confirm:
+            return {"ok": True, "action": "preview",
+                    "written_off_usd": written_off, **base}
+
+        record = {
+            "at": _now(),
+            "by_admin": int(admin_id),
+            "telegram_id": telegram_id,
+            "username": base["username"],
+            "deposited_usd": (round(float(account["deposited_usd"]), 2)
+                              if account else 0.0),
+            "written_off_usd": written_off,
+            "rows_deleted": counts,
+            "chain_deposits_detached": chain_rows,
+        }
+        conn.execute(
+            "INSERT INTO pool_meta (key, value) VALUES (?, ?) "
+            "ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+            (f"{_UNSUBSCRIBE_PREFIX}{telegram_id}:{_now()}",
+             json.dumps(record)),
+        )
+        conn.execute(
+            "UPDATE pool_chain_deposits SET telegram_id = NULL, "
+            "deposit_request_id = NULL, status = 'baseline', note = ? "
+            "WHERE telegram_id = ?",
+            (f"detached when {telegram_id} was unsubscribed", telegram_id),
+        )
+        for table in counts:
+            try:
+                conn.execute(
+                    f"DELETE FROM {table} WHERE telegram_id = ?", (telegram_id,)
+                )
+            except sqlite3.OperationalError:
+                continue
+
+    logger.warning(
+        "pool: unsubscribed %s by admin %s — %s rows, $%.2f written off",
+        telegram_id, admin_id, sum(counts.values()), written_off,
+    )
+    return {"ok": True, "action": "removed", "written_off_usd": written_off,
+            **base}
+
+
+def unsubscribe_records(telegram_id: int | None = None) -> list[dict[str, Any]]:
+    """Past removals, newest first. The audit trail that outlives the rows."""
+    with _connect() as conn:
+        rows = conn.execute(
+            "SELECT key, value FROM pool_meta WHERE key LIKE ? ORDER BY key DESC",
+            (f"{_UNSUBSCRIBE_PREFIX}%",),
+        ).fetchall()
+    out: list[dict[str, Any]] = []
+    for row in rows:
+        try:
+            record = json.loads(row["value"])
+        except (TypeError, ValueError):
+            continue
+        if telegram_id is None or int(record.get("telegram_id") or 0) == telegram_id:
+            out.append(record)
+    return out

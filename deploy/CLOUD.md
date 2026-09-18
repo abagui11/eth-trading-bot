@@ -295,6 +295,59 @@ getting cards yesterday. Trading is unaffected while every account is
 unfunded: `extra_contracts_for` returns 0, so house order size, levels and
 exits are identical to before the flip.
 
+#### Removing an account — `/unsubscribe`
+
+`/unsubscribe <telegram_id>` (admin-only) deletes an account and every trace
+of its onboarding, so the same id can go through `/start` as a brand-new user.
+That is what makes an onboarding demo repeatable: the first-contact states are
+one-shot, so an approved id sees the welcome instead of "request sent for
+review", and a wallet cannot be registered twice as a first registration.
+
+**It takes two taps.** The command only ever shows what would go — rows per
+table, the balance, and any write-off — and the **Remove account** button on
+that card is what deletes. The id is typed by hand and nothing downstream can
+undo a wrong one. The guards are re-run when the button is tapped, so a stake
+opened or a deposit that landed in between still stops it.
+
+It refuses, and each refusal is a way the deletion could take money from
+somebody:
+
+| Refusal | Why |
+|---|---|
+| open stake | the account owns a share of a *live* position; deleting it would hand that share to the other holders on the next booked exit |
+| pending Accept | resolves within a minute or two into a stake or a refund |
+| withdrawal in flight | the row is the only evidence a send may already have happened, and Coinbase cannot be asked |
+| pending deposit claim | money is on its way and the sweep is about to credit it |
+| withdrawable balance | at or above the $50 minimum it is still theirs, so it leaves as a payout to the address they proved they control — `/withdraw all`, or `/debit` if the money was never real |
+
+What is left after those is a residue **below** the minimum, which no
+withdrawal can move — the unused fee reserve coming back from a `/withdraw
+all` is exactly this. It is written off so the account is not undeletable, and
+the amount, the admin, and the row counts are recorded in `pool_meta` under an
+`unsubscribed:<id>:<timestamp>` key. That record outlives the rows it
+describes, which is what makes it an accounted write-off rather than a
+disappearance:
+
+```bash
+sqlite3 /opt/eth-trading-agent/ledger.db \
+  "SELECT key, value FROM pool_meta WHERE key LIKE 'unsubscribed:%';"
+```
+
+The removed person is DM'd that their account is closed and nothing is being
+held for them. Written off cash stays at the venue and becomes house residual,
+so `total_tester_cash` drops by that amount and the reconciler sees more
+headroom, not less — it cannot trip the shortfall freeze.
+
+`pool_chain_deposits` rows are **detached, not deleted** (`telegram_id` nulled,
+status `baseline`). The deposit sweep re-inserts any transfer it cannot find,
+and past the first run a re-inserted row lands as `unmatched` — so deleting
+the row would make a historical deposit resurface as money that arrived with
+nobody to own it, and page you about it at the next sweep.
+
+`deploy/_reset_test_user.py` does the same job from a shell, for when the bot
+is down, and is the only path with `--force` (which overrides the balance
+guard, but never the in-flight payout one).
+
 #### Adding a test account
 
 Use a **second Telegram account** (a spare number, or Telegram Desktop signed
