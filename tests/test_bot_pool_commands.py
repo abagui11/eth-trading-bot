@@ -50,10 +50,20 @@ class PoolCommandTests(unittest.TestCase):
             patch.object(config, "POOL_FORUM_CHAT_ID", None),
             patch.object(bot_config, "POOL_ENABLED", True),
             patch.object(bot_config, "POOL_ADMIN_TELEGRAM_IDS", (ADMIN,)),
+            # `admin_ids` merges the env list in so an operator can be added
+            # without a deploy, which means patching the code config alone
+            # leaves a real admin from a deployed `.env` in the recipients —
+            # every "was the admin carded" assertion then sees two DMs.
+            patch.object(config, "POOL_ADMIN_TELEGRAM_IDS", []),
             patch.object(bot_config, "POOL_MIN_DEPOSIT_USD", 500.0),
             patch.object(bot_config, "POOL_MIN_WITHDRAWAL_USD", 50.0),
             patch.object(bot_config, "POOL_MAX_WITHDRAWAL_USD", 2500.0),
             patch.object(bot_config, "POOL_WITHDRAWAL_FEE_RESERVE_USD", 3.0),
+            # The quoted maximum nets off the daily caps, so leaving these to
+            # whatever the host is configured for makes the withdraw-all
+            # arithmetic below depend on the machine it runs on.
+            patch.object(bot_config, "POOL_MAX_USER_DAILY_WITHDRAWAL_USD", 2500.0),
+            patch.object(bot_config, "POOL_MAX_GLOBAL_DAILY_WITHDRAWAL_USD", 5000.0),
         ]
         for p in self._patches:
             p.start()
