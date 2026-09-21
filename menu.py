@@ -195,10 +195,16 @@ def brain_menu() -> tuple[str, object]:
 
 
 def brain_section(section: str) -> tuple[str, list[str] | None]:
-    """Return (text, optional chart paths). Never attaches a Decision trade card."""
+    """Return (text, optional chart paths). Never attaches a Decision trade card.
+
+    ``text`` may be plain or HTML depending on section — use
+    :func:`format_brain_html` before sending with parse_mode=HTML.
+    """
     if section == "read":
-        # Synthesized ICT + cycle + news. Charts live under Charts.
-        return brain_report.synthesize_read(), None
+        return (
+            "Today's Read\n\n" + brain_report.synthesize_read(),
+            None,
+        )
     if section == "charts":
         paths = brain_report.vision_chart_paths()
         if not paths:
@@ -213,21 +219,29 @@ def brain_section(section: str) -> tuple[str, list[str] | None]:
     if section == "cycle":
         text = brain_report.cycle_text()
         chart = brain_report.cycle_chart_path()
-        caption = (
-            text
-            + "\n\n"
-            + "Headline pivots and progress are above; the chart is the "
-            "four-year cycle snapshot."
-        )
-        return caption, [chart] if chart else None
+        return text, [chart] if chart else None
     if section == "news":
-        return brain_report.news_text(), None
+        return brain_report.news_html(), None
     if section == "ask":
         return (
             "Ask Eva anything in plain English — just type your question here.",
             None,
         )
     return "Unknown section.", None
+
+
+def format_brain_html(section: str, text: str) -> str:
+    """Telegram HTML for a brain section."""
+    import html as html_mod
+
+    if section == "news":
+        # news_html() already returns escaped HTML with <a> links.
+        return text or ""
+    if section == "ict":
+        return f"<pre>{html_mod.escape(text or '')}</pre>"
+    # Today's Read / Cycle / Ask — preserve paragraphs, escape safely.
+    escaped = html_mod.escape(text or "")
+    return escaped
 
 
 def format_html_pre(text: str) -> str:

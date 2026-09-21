@@ -165,7 +165,13 @@
           {{ brain.todays_read.refresh_note }}
           This panel refreshes about every 30 minutes.
         </p>
-        <pre class="todays-read" id="brain-todays-read-body" style="white-space:pre-wrap;font-family:inherit;margin:0;line-height:1.45">{{ brain.todays_read.text }}</pre>
+        <div class="todays-read" id="brain-todays-read-body">
+          {% for para in brain.todays_read.paragraphs %}
+          <p>{{ para }}</p>
+          {% else %}
+          <p style="white-space:pre-wrap;margin:0;line-height:1.5">{{ brain.todays_read.text }}</p>
+          {% endfor %}
+        </div>
       </section>
       {% endif %}
 
@@ -217,18 +223,13 @@
         </div>
       </section>
 
-      {% if brain.conditional_reads %}
+      {% if brain.conditional_reads is defined %}
       <section class="card" id="brain-conditional">
-        <h2>Conditional read · in evaluation</h2>
+        <h2>ICT table · all timeframes</h2>
         <p class="sub" style="margin-bottom:10px">
-          The posture above is a scalar, which is not what an ICT read is. This
-          is the replacement being tested: a bias that exists only <em>while</em>
-          a named order block holds, with the draw on liquidity it points at and
-          the price that kills it. Every level here was found by the detectors,
-          not written by the model &mdash; it selects among them, so it cannot
-          cite a level that does not exist. <strong>Unscored and consumed by
-          nothing.</strong> It earns its way onto this page by beating the scalar
-          above, or it gets deleted. Refreshes with every cycle (about every
+          Bias only while a named order block / breaker holds, with the draw on
+          liquidity it points at and the price that kills it. Every level was
+          found by the detectors. Refreshes with every cycle (about every
           30 minutes).
         </p>
         <div class="table-scroll">
@@ -251,14 +252,18 @@
                 </td>
                 <td>
                   {% if r.repelling_kind %}
-                    {{ r.repelling_kind|replace('_',' ') }}
+                    {% set rk = r.repelling_kind|replace('_',' ') %}
+                    {{ rk }}
                     {{ "%.2f"|format(r.repelling_lo) }}&ndash;{{ "%.2f"|format(r.repelling_hi) }}
-                    <span class="bias-src">{{ r.repelling_state }}</span>
+                    {% if r.repelling_state %}
+                    <span class="bias-src">{{ r.repelling_state|upper }}</span>
+                    {% endif %}
                   {% else %}&mdash;{% endif %}
                 </td>
                 <td>
                   {% if r.attracting_kind %}
-                    {{ r.attracting_kind|replace('_',' ') }}
+                    {% set ak = r.attracting_kind|replace('_',' ') %}
+                    {{ ak }}
                     {{ "%.2f"|format(r.attracting_lo) }}
                   {% else %}&mdash;{% endif %}
                 </td>
@@ -270,19 +275,18 @@
                     {% endif %}
                   {% else %}&mdash;{% endif %}
                 </td>
-                <td><span class="bias-src">{{ r.location or '—' }}</span></td>
+                <td><span class="bias-src">{{ (r.location or '—')|upper }}</span></td>
               </tr>
+              {% else %}
+              <tr><td colspan="6" class="sub">No ICT rows this cycle.</td></tr>
               {% endfor %}
             </tbody>
           </table>
         </div>
         <p class="sub" style="margin-top:10px">
-          &ldquo;no call&rdquo; is a result, not a gap: no order block is currently
-          holding, or no draw on liquidity was identified. Invalidation is an M5
-          close through the level &mdash; our convention, chosen because it is
-          measurable on the candle grid; ICT teaches array invalidation by example
-          rather than by rule, so the wick-through alternative is recorded too and
-          will be swept.
+          &ldquo;no call&rdquo; is a result, not a gap: the array is named but no
+          directional bias is locked until price trades into it or a holding
+          state confirms. Invalidation is an M5 close through the level.
         </p>
       </section>
       {% endif %}
@@ -2101,8 +2105,16 @@
         if (cts) cts.textContent = brain.cycle_ts || '—';
 
         var todays = document.getElementById('brain-todays-read-body');
-        if (todays && brain.todays_read && brain.todays_read.text) {
-          todays.textContent = brain.todays_read.text;
+        if (todays && brain.todays_read) {
+          var paras = brain.todays_read.paragraphs;
+          if (paras && paras.length) {
+            todays.innerHTML = paras.map(function (p) {
+              return '<p>' + String(p).replace(/</g, '&lt;').replace(/>/g, '&gt;') + '</p>';
+            }).join('');
+          } else if (brain.todays_read.text) {
+            todays.innerHTML = '<p style="white-space:pre-wrap;margin:0;line-height:1.5">' +
+              String(brain.todays_read.text).replace(/</g, '&lt;').replace(/>/g, '&gt;') + '</p>';
+          }
         }
 
         function findStance(pid, tf) {

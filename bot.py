@@ -801,8 +801,9 @@ async def _handle_menu_callback(
                     except Exception:
                         logger.exception("brain chart send failed")
                 if len(text) > 1024:
+                    html = menu.format_brain_html(section, text)
                     await _send_chunked(
-                        bot, user_id, text,
+                        bot, user_id, html,
                         reply_markup=telegram_ui.brain_keyboard(),
                         parse_mode="HTML",
                     )
@@ -812,7 +813,7 @@ async def _handle_menu_callback(
                         reply_markup=telegram_ui.brain_keyboard(),
                     )
             else:
-                html = menu.format_html_pre(text)
+                html = menu.format_brain_html(section, text)
                 await _send_chunked(
                     bot, user_id, html,
                     reply_markup=telegram_ui.brain_keyboard(),
@@ -1950,7 +1951,7 @@ async def cmd_brain(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
             logger.exception("Brain chart send failed")
 
     text = str(report.get("text") or "")
-    html = menu.format_html_pre(text)
+    html = menu.format_brain_html("read", text)
     await _send_chunked(
         context.bot, chat_id, html,
         reply_markup=telegram_ui.brain_keyboard(),

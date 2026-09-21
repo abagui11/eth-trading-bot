@@ -136,12 +136,29 @@ def get_brain_payload() -> dict[str, Any]:
     try:
         import brain_report
 
+        text = brain_report.synthesize_read()
+        paragraphs = [p.strip() for p in text.split("\n\n") if p.strip()]
         todays_read = {
-            "text": brain_report.synthesize_read(),
+            "text": text,
+            "paragraphs": paragraphs,
             "refresh_note": brain_report.REFRESH_NOTE,
         }
     except Exception:
         todays_read = None
+
+    # Sort ICT rows BTC→ETH, H4→H1→M15 so the table matches Telegram.
+    _tf_rank = {"H4": 0, "H1": 1, "M15": 2, "M5": 3}
+
+    def _ict_sort_key(r: dict[str, Any]) -> tuple:
+        pid = str(r.get("product_id") or "")
+        tf = str(r.get("timeframe") or "").upper()
+        prod = 0 if pid.startswith("BTC") else (1 if pid.startswith("ETH") else 2)
+        return (prod, _tf_rank.get(tf, 9), tf)
+
+    try:
+        conditional_reads = sorted(conditional_reads, key=_ict_sort_key)
+    except Exception:
+        pass
 
     return {
         "spots": spots.get("spots") or {},
