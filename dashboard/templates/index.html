@@ -157,6 +157,18 @@
         </div>
       </section>
 
+      {% if brain.todays_read %}
+      <section class="card" id="brain-todays-read">
+        <h2>Today's Read</h2>
+        <p class="sub" style="margin-bottom:10px">
+          Synthesized from the ICT table, four-year cycle, and news / macro.
+          {{ brain.todays_read.refresh_note }}
+          This panel refreshes about every 30 minutes.
+        </p>
+        <pre class="todays-read" id="brain-todays-read-body" style="white-space:pre-wrap;font-family:inherit;margin:0;line-height:1.45">{{ brain.todays_read.text }}</pre>
+      </section>
+      {% endif %}
+
       <section class="card" id="brain-stances">
         <h2>Multi-horizon posture</h2>
         <p class="sub" style="margin-bottom:10px">H4 / H1 / M15 stances for BTC and ETH. Click a pill for the rationale.</p>
@@ -216,7 +228,8 @@
           not written by the model &mdash; it selects among them, so it cannot
           cite a level that does not exist. <strong>Unscored and consumed by
           nothing.</strong> It earns its way onto this page by beating the scalar
-          above, or it gets deleted.
+          above, or it gets deleted. Refreshes with every cycle (about every
+          30 minutes).
         </p>
         <div class="table-scroll">
           <table class="stance-table">
@@ -278,8 +291,10 @@
       <section class="card" id="brain-structure">
         <h2>Marked structure · H4 / H1 / M15</h2>
         <p class="sub" style="margin-bottom:10px">
-          What each posture is reading: EMA12/26, the 40-bar range behind range position, and the
-          10-bar vs prior-10-bar swings behind HH/HL/LH/LL. Rebuilt every stance cycle.
+          Vision across the timeframes Eva is monitoring — order blocks and key
+          levels, not a buy/sell recommendation. Also shows EMA12/26, range
+          position, and HH/HL/LH/LL swings. Charts refresh with every cycle
+          (about every 30 minutes).
         </p>
         {% for row in brain.structure_charts %}
         <div class="structure-row">
@@ -400,7 +415,10 @@
       <section class="card" id="brain-news">
         <h2>News desk</h2>
         <p class="sub" style="margin-bottom:10px">
-          Ranked bullish/bearish with conviction %. Scores marked <span class="bias-src">det</span> are the deterministic read shown at ingest; the hourly batched LLM refine replaces them.
+          Ranked bullish/bearish with conviction %. Severity is on a scale of
+          1 to 5. Scores marked <span class="bias-src">det</span> are the
+          deterministic read shown at ingest; the hourly batched LLM refine
+          replaces them.
         </p>
         <div class="news-feed" id="brain-news-feed">
           {% set news_items = brain.macro.active or brain.macro.recent %}
@@ -414,7 +432,7 @@
                 {{ bias_badge(item.bias_side, item.bias_pct, item.bias_source) }}
                 {% endif %}
                 {% if item.severity %}
-                <span class="badge badge-macro-sev-{{ item.severity }}">SEV {{ item.severity }}</span>
+                <span class="badge badge-macro-sev-{{ item.severity }}" title="Severity 1–5">SEV {{ item.severity }}/5</span>
                 {% endif %}
                 <span class="news-source">{{ item | news_source }}</span>
                 <time class="news-when" datetime="{{ when | news_iso }}">{{ when | news_when }}</time>
@@ -1938,9 +1956,16 @@
         var hold = (b.median_hold_h === null || b.median_hold_h === undefined)
           ? '—' : Number(b.median_hold_h).toFixed(1) + 'h';
         var stopped = b.stopped_n ? (b.stopped_then_paid + '/' + b.stopped_n) : '—';
+        // Match the server-rendered badge: live_mirror books trade real money
+        // as mirrors of the paper book but are NOT promoted, so they get the
+        // same LIVE* badge and tooltip as the Jinja template, not the raw
+        // "LIVE_MIRROR" enum value.
+        var modeCell = b.mode === 'live_mirror'
+          ? '<td><span class="badge badge-good" title="Trades real money as a live mirror of this paper book (operator decision, 2026-09-21). NOT a promotion — the paper book stays the experiment and the n=60 bar decides.">LIVE*</span></td>'
+          : '<td><span class="badge ' + (b.mode === 'live' ? 'badge-good' : 'badge-none') +
+            '">' + esc(String(b.mode).toUpperCase()) + '</span></td>';
         return '<tr><td class="kalshi-bot-cell">' + name + '</td>' +
-          '<td><span class="badge ' + (b.mode === 'live' ? 'badge-good' : 'badge-none') +
-          '">' + String(b.mode).toUpperCase() + '</span></td>' +
+          modeCell +
           '<td>' + (b.n_closed || 0) + (b.n_open ? ' (+' + b.n_open + ' open)' : '') + '</td>' +
           '<td>' + wr + '</td>' + meanR +
           '<td class="' + (b.sum_r >= 0 ? 'pos' : 'neg') + '">' +
@@ -2075,6 +2100,11 @@
         var cts = document.getElementById('brain-cycle-ts');
         if (cts) cts.textContent = brain.cycle_ts || '—';
 
+        var todays = document.getElementById('brain-todays-read-body');
+        if (todays && brain.todays_read && brain.todays_read.text) {
+          todays.textContent = brain.todays_read.text;
+        }
+
         function findStance(pid, tf) {
           return (brain.stances || []).find(function (s) { return s.product_id === pid && s.timeframe === tf; });
         }
@@ -2112,7 +2142,7 @@
               ? biasBadge(item.bias_side, item.bias_pct, item.bias_source) + ' '
               : '';
             var sev = item.severity != null
-              ? '<span class="badge badge-macro-sev-' + item.severity + '">SEV ' + item.severity + '</span> '
+              ? '<span class="badge badge-macro-sev-' + item.severity + '" title="Severity 1–5">SEV ' + item.severity + '/5</span> '
               : '';
             var age = newsAge(when);
             var meta = '<div class="news-meta">' + bias + sev +

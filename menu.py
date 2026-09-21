@@ -1,4 +1,4 @@
-﻿"""Button-first menu surfaces for the Eva Telegram bot.
+"""Button-first menu surfaces for the Eva Telegram bot.
 
 Called from bot.on_callback for menu:* callbacks. Keeps the progressive-
 disclosure copy and MoonPay / wallet / strategies / brain wiring in one place.
@@ -11,7 +11,6 @@ from typing import Any
 
 import bot_config
 import brain_report
-import chart_view
 import config
 import moonpay
 import pool
@@ -186,30 +185,41 @@ def help_surface() -> tuple[str, object]:
 def brain_menu() -> tuple[str, object]:
     return (
         "Eva's brain\n\n"
-        "What Eva sees right now — charts, ICT structure, the four-year cycle, "
-        "and live news. Pick a section:",
+        "What Eva sees right now — vision across timeframes, ICT structure, "
+        "the four-year cycle, and live news.\n"
+        "Charts and the ICT read refresh with every cycle (about every "
+        "30 minutes).\n\n"
+        "Pick a section:",
         telegram_ui.brain_keyboard(),
     )
 
 
 def brain_section(section: str) -> tuple[str, list[str] | None]:
-    """Return (text, optional chart paths)."""
+    """Return (text, optional chart paths). Never attaches a Decision trade card."""
     if section == "read":
-        report = brain_report.build_report()
-        paths = None
-        view = report.get("view")
-        if view is not None:
-            paths = list(view.chart_paths or [])
-        return report["text"], paths
+        # Synthesized ICT + cycle + news. Charts live under Charts.
+        return brain_report.synthesize_read(), None
     if section == "charts":
-        view = chart_view.get_latest_chart_view()
-        if view is None:
-            return "No charts yet — check back after the next cycle.", None
-        return view.caption or "Latest marked charts.", list(view.chart_paths or [])
+        paths = brain_report.vision_chart_paths()
+        if not paths:
+            return (
+                "No vision charts yet — check back after the next cycle "
+                "(about every 30 minutes).",
+                None,
+            )
+        return brain_report.vision_charts_caption(), paths
     if section == "ict":
         return brain_report.ict_view_text(), None
     if section == "cycle":
-        return brain_report.cycle_text(), None
+        text = brain_report.cycle_text()
+        chart = brain_report.cycle_chart_path()
+        caption = (
+            text
+            + "\n\n"
+            + "Headline pivots and progress are above; the chart is the "
+            "four-year cycle snapshot."
+        )
+        return caption, [chart] if chart else None
     if section == "news":
         return brain_report.news_text(), None
     if section == "ask":

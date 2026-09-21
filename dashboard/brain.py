@@ -132,6 +132,17 @@ def get_brain_payload() -> dict[str, Any]:
         )
         macro[key] = items
 
+    todays_read = None
+    try:
+        import brain_report
+
+        todays_read = {
+            "text": brain_report.synthesize_read(),
+            "refresh_note": brain_report.REFRESH_NOTE,
+        }
+    except Exception:
+        todays_read = None
+
     return {
         "spots": spots.get("spots") or {},
         "spot_as_of": spots.get("as_of"),
@@ -150,5 +161,6 @@ def get_brain_payload() -> dict[str, Any]:
         "structure_charts": structure_charts,
         "zmoves": zmoves,
         "macro": macro,
+        "todays_read": todays_read,
         "intelligence_enabled": bot_config.INTELLIGENCE_ENABLED,
     }

@@ -2633,6 +2633,138 @@ def open_stakes_for(trade_id: int) -> list[dict[str, Any]]:
     return [dict(r) for r in rows]
 
 
+def join_open_trade(
+    live_trade_id: int,
+    telegram_id: int,
+    *,
+    strategy: str | None = None,
+) -> dict[str, Any]:
+    """Late Accept: open a stake on a house trade that already filled.
+
+    Used when ICT Accept lands after ``live_pending`` was cleared by a market
+    fill or a pending sweep. Sizes like ``record_intent`` (strategy allocation
+    × POOL_RISK_PCT) and books a stake at the house fill price so exits still
+    ride the existing ladder.
+    """
+    import live_ledger
+
+    frozen = intents_frozen()
+    if frozen:
+        return {"ok": False, "reason": "frozen", "detail": frozen}
+    if not is_approved(telegram_id):
+        return {"ok": False, "reason": "not_approved"}
+
+    trade = live_ledger.get_trade(int(live_trade_id))
+    if trade is None or str(trade.get("status") or "") != "open":
+        return {"ok": False, "reason": "trade_closed"}
+
+    entry = float(trade.get("entry") or 0)
+    stop = trade.get("stop_loss")
+    house_qty = float(trade.get("qty") or 0)
+    if entry <= 0 or stop is None or house_qty <= 0:
+        return {"ok": False, "reason": "trade_incomplete"}
+    risk_per_unit = abs(entry - float(stop))
+    if risk_per_unit <= 0:
+        return {"ok": False, "reason": "trade_incomplete"}
+
+    existing = open_stakes_for(int(live_trade_id))
+    if any(int(s["telegram_id"]) == int(telegram_id) for s in existing):
+        return {"ok": False, "reason": "already_in"}
+
+    with _write_txn() as conn:
+        account = conn.execute(
+            f"SELECT cash_usd, {_AVAILABLE_SQL} AS available FROM pool_accounts "
+            "WHERE telegram_id = ?",
+            (telegram_id,),
+        ).fetchone()
+        if account is None or float(account["cash_usd"]) <= 0:
+            return {"ok": False, "reason": "not_funded"}
+        cash = float(account["cash_usd"])
+        if cash < float(bot_config.POOL_MIN_EQUITY_USD):
+            return {
+                "ok": False,
+                "reason": "below_min_equity",
+                "minimum_usd": float(bot_config.POOL_MIN_EQUITY_USD),
+            }
+        available = float(account["available"])
+        if strategy is not None:
+            alloc_row = conn.execute(
+                "SELECT amount_usd FROM pool_strategy_allocs "
+                "WHERE telegram_id = ? AND strategy = ?",
+                (telegram_id, strategy),
+            ).fetchone()
+            alloc = float(alloc_row["amount_usd"]) if alloc_row else 0.0
+            if alloc <= 0:
+                return {"ok": False, "reason": "no_allocation", "strategy": strategy}
+            if alloc < float(bot_config.POOL_MIN_ACCEPT_USD):
+                return {
+                    "ok": False,
+                    "reason": "below_min_accept",
+                    "minimum_usd": float(bot_config.POOL_MIN_ACCEPT_USD),
+                    "allocation_usd": alloc,
+                }
+            base = min(alloc, available)
+        else:
+            base = available
+        risk = round(base * float(bot_config.POOL_RISK_PCT), 2)
+        if risk <= 0 or available <= 0:
+            return {"ok": False, "reason": "no_available_cash"}
+
+        qty_share = risk / risk_per_unit
+        # Cap at remaining open size so a late join cannot oversize the book.
+        qty_open = float(trade.get("qty_open") if trade.get("qty_open") is not None else house_qty)
+        if qty_share > qty_open:
+            qty_share = qty_open
+            risk = round(risk_per_unit * qty_share, 2)
+        cost = round(qty_share * entry, 2)
+        if cost <= 0 or cost > available + 1e-9:
+            return {"ok": False, "reason": "no_available_cash"}
+        share = qty_share / house_qty
+
+        done = _apply_event(
+            conn,
+            telegram_id,
+            kind="trade_open",
+            amount_usd=cost,
+            ref=f"trade:{live_trade_id}:late:{telegram_id}",
+            note=f"late join trade #{live_trade_id}",
+        )
+        if not done:
+            return {"ok": False, "reason": "already_in"}
+        try:
+            conn.execute(
+                "INSERT INTO pool_stakes (live_trade_id, telegram_id, share_frac, "
+                "qty, cost_usd, risk_usd, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)",
+                (
+                    int(live_trade_id),
+                    int(telegram_id),
+                    round(share, 8),
+                    round(qty_share, 8),
+                    cost,
+                    risk,
+                    _now(),
+                ),
+            )
+        except sqlite3.IntegrityError:
+            return {"ok": False, "reason": "already_in"}
+
+    logger.info(
+        "pool: late join trade #%s telegram=%s risk=$%.2f cost=$%.2f",
+        live_trade_id,
+        telegram_id,
+        risk,
+        cost,
+    )
+    return {
+        "ok": True,
+        "risk_usd": risk,
+        "cost_usd": cost,
+        "qty": qty_share,
+        "share_frac": share,
+        "live_trade_id": int(live_trade_id),
+    }
+
+
 def stakes_for(trade_id: int) -> list[dict[str, Any]]:
     with _connect() as conn:
         rows = conn.execute(

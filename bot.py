@@ -250,6 +250,14 @@ def _pool_intent_reply(result: dict, *, risk_label: str = "risk") -> str:
             "You haven't deployed capital to this strategy yet — tap Strategies "
             "to deploy, then Accept the next card."
         )
+    if reason == "already_in":
+        return "You're already in this trade — tap Portfolio any time."
+    if reason in ("trade_closed", "trade_incomplete"):
+        return (
+            "This order has already gone on or been pulled — your Accept came "
+            "after the window, so you're not in this trade. The next card is "
+            "never far."
+        )
     return f"Could not join ({reason})."
 
 
@@ -259,42 +267,89 @@ def _deploy_prompt_reply(strategy_key: str, user_id: int) -> tuple[str, object]:
 
 
 def _pool_hq_accept(offer_id: str, user_id: int) -> tuple[str, object | None]:
-    """A funded tester's Accept on an ICT card → pool intent (sync, executor)."""
+    """A funded tester's Accept on an ICT card → pool intent or late join.
+
+    Resting plans live in ``live_pending`` keyed by cycle_id (== offer_id).
+    Market fills and pending sweeps clear that row before many Accepts land,
+    so we also join an already-open HQ trade on the same cycle_id.
+    """
+    import live_ledger
     import live_pending
 
     offer = user_books.get_offer(offer_id)
     if offer is None:
         return "Could not find that trade offer.", None
     product_id = str(offer.get("product_id") or "")
+    suggestion = offer.get("suggestion") or {}
+    if not isinstance(suggestion, dict):
+        suggestion = {}
+
     waiting = live_pending.get_pending(product_id)
     row = next(
         (r for r in waiting if str(r.get("cycle_id") or "") == str(offer_id)), None
     )
-    if row is None:
-        return (
-            "This order has already gone on or been pulled — your Accept came "
-            "after the window, so you're not in this trade. The next card is "
-            "never far."
-        ), None
-    result = pool.record_intent(
-        str(offer_id), user_id, strategy=strategy_catalog.ICT
+    if row is not None:
+        result = pool.record_intent(
+            str(offer_id), user_id, strategy=strategy_catalog.ICT
+        )
+        if result.get("reason") == "no_allocation":
+            return _deploy_prompt_reply(strategy_catalog.ICT, user_id)
+        if result.get("ok"):
+            entry = float(row.get("entry") or suggestion.get("entry") or 0)
+            stop = row.get("stop_loss") or suggestion.get("stop_loss")
+            side = str(row.get("side") or suggestion.get("side") or "long")
+            return telegram_ui.format_fill_celebration(
+                strategy_label="ICT Trades",
+                side=side,
+                entry=entry,
+                stop=float(stop) if stop is not None else None,
+                targets=None,
+                risk_usd=float(result["risk_usd"]),
+                resting=True,
+            ), None
+        return _pool_intent_reply(result), None
+
+    # Pending gone — join the live fill if the house already took it.
+    open_trade = next(
+        (
+            t
+            for t in live_ledger.get_open_trades(source="hq")
+            if str(t.get("cycle_id") or "") == str(offer_id)
+        ),
+        None,
     )
-    if result.get("reason") == "no_allocation":
-        return _deploy_prompt_reply(strategy_catalog.ICT, user_id)
-    if result.get("ok"):
-        entry = float(row.get("entry") or offer.get("entry") or 0)
-        stop = row.get("stop_loss") or offer.get("stop_loss")
-        side = str(row.get("side") or offer.get("side") or "long")
-        return telegram_ui.format_fill_celebration(
-            strategy_label="ICT Trades",
-            side=side,
-            entry=entry,
-            stop=float(stop) if stop is not None else None,
-            targets=None,
-            risk_usd=float(result["risk_usd"]),
-            resting=True,
-        ), None
-    return _pool_intent_reply(result), None
+    if open_trade is not None:
+        joined = pool.join_open_trade(
+            int(open_trade["id"]),
+            user_id,
+            strategy=strategy_catalog.ICT,
+        )
+        if joined.get("reason") == "no_allocation":
+            return _deploy_prompt_reply(strategy_catalog.ICT, user_id)
+        if joined.get("ok"):
+            return telegram_ui.format_fill_celebration(
+                strategy_label="ICT Trades",
+                side=str(open_trade.get("side") or "long"),
+                entry=float(open_trade.get("entry") or 0),
+                stop=(
+                    float(open_trade["stop_loss"])
+                    if open_trade.get("stop_loss") is not None
+                    else None
+                ),
+                targets=None,
+                risk_usd=float(joined["risk_usd"]),
+                notional_usd=float(joined.get("cost_usd") or 0) or None,
+                resting=False,
+            ), None
+        if joined.get("reason") == "already_in":
+            return "You're already in this trade — tap Portfolio any time.", None
+        return _pool_intent_reply(joined), None
+
+    return (
+        "This order has already gone on or been pulled — your Accept came "
+        "after the window, so you're not in this trade. The next card is "
+        "never far."
+    ), None
 
 
 DEMO_REF_PREFIX = "demo_"
@@ -1857,7 +1912,7 @@ async def cmd_allocate(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
 
 
 async def cmd_brain(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Eva's consolidated read: charts, ICT view, cycle, news."""
+    """Eva's consolidated read: synthesis + vision charts (no Decision card)."""
     user = update.effective_user
     if user is None or update.message is None:
         return
@@ -1875,33 +1930,32 @@ async def cmd_brain(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         await _reply(update, "Sorry, I could not assemble the read right now.")
         return
 
-    view = report.get("view")
     chat_id = (
         update.effective_chat.id if update.effective_chat
         else update.message.chat_id
     )
-    if view is not None:
+    paths = list(report.get("chart_paths") or [])
+    if paths:
+        await update.message.chat.send_action("upload_photo")
         try:
-            for i, chart_path in enumerate(view.chart_paths):
+            for i, chart_path in enumerate(paths):
                 caption = (
-                    view.caption if i == 0
-                    else f"Chart {i + 1}/{len(view.chart_paths)}"
+                    report.get("caption") if i == 0
+                    else f"Vision chart {i + 1}/{len(paths)}"
                 )
                 await notify.send_photo_with_caption(
-                    context.bot, chat_id, chart_path, caption
+                    context.bot, chat_id, chart_path, caption or ""
                 )
         except Exception:
             logger.exception("Brain chart send failed")
-    html = menu.format_html_pre(report["text"])
-    for chunk in notify.split_telegram_text(html):
-        try:
-            await context.bot.send_message(
-                chat_id, chunk, parse_mode="HTML",
-                reply_markup=telegram_ui.brain_keyboard(),
-            )
-        except Exception:
-            await _reply(update, report["text"][:4000])
-            break
+
+    text = str(report.get("text") or "")
+    html = menu.format_html_pre(text)
+    await _send_chunked(
+        context.bot, chat_id, html,
+        reply_markup=telegram_ui.brain_keyboard(),
+        parse_mode="HTML",
+    )
 
 
 async def cmd_status(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
