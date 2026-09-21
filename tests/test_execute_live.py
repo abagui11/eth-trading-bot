@@ -733,7 +733,7 @@ class HqClearsMillTests(unittest.TestCase):
         self.assertEqual(mill["status"], "closed")
         self.assertEqual(mill["close_reason"], "hq_priority")
         labels = [c.kwargs["label"] for c in gw.place_market_order.call_args_list]
-        self.assertTrue(any(lab.startswith("mill-hq-yield:") for lab in labels))
+        self.assertTrue(any(lab.startswith("mill-yield:") for lab in labels))
         self.assertTrue(any(lab.startswith("hq:") for lab in labels))
         gw.cancel_orders.assert_called()
 
@@ -756,7 +756,7 @@ class HqClearsMillTests(unittest.TestCase):
         self.assertIsNotNone(result)
         self.assertEqual(live_ledger.get_trade(mill_id)["status"], "open")
         labels = [c.kwargs["label"] for c in gw.place_market_order.call_args_list]
-        self.assertFalse(any(lab.startswith("mill-hq-yield:") for lab in labels))
+        self.assertFalse(any(lab.startswith("mill-yield:") for lab in labels))
         gw.cancel_orders.assert_not_called()
 
     def test_flag_off_leaves_opposing_mill_in_place(self) -> None:
@@ -780,7 +780,7 @@ class HqClearsMillTests(unittest.TestCase):
         self.assertIsNotNone(result)
         self.assertEqual(live_ledger.get_trade(mill_id)["status"], "open")
         labels = [c.kwargs["label"] for c in gw.place_market_order.call_args_list]
-        self.assertFalse(any(lab.startswith("mill-hq-yield:") for lab in labels))
+        self.assertFalse(any(lab.startswith("mill-yield:") for lab in labels))
 
     def test_mill_refill_is_skipped_after_hq_priority_close(self) -> None:
         mill_id = self._open_mill()
@@ -801,6 +801,152 @@ class HqClearsMillTests(unittest.TestCase):
             )
         refill.assert_not_called()
         self.assertEqual(live_ledger.get_trade(mill_id)["close_reason"], "hq_priority")
+
+    def _open_family(self, source: str, **over) -> int:
+        """An open mirror/control position holding the shared BTC contract."""
+        kwargs = dict(
+            cycle_id=f"{source}-1",
+            source=source,
+            product_id="BTC-USD",
+            instrument="BIP-20DEC30-CDE",
+            side="long",
+            qty=0.01,
+            entry=86095.0,
+            stop_loss=83200.0,
+            take_profits_json="[87000]",
+            order_id=f"{source}-entry",
+            stop_order_id=None,
+            exit_order_ids=[f"{source}-bracket"],
+        )
+        kwargs.update(over)
+        return live_ledger.record_open(**kwargs)
+
+    def _btc_short(self, ref: str) -> Suggestion:
+        return _hq_suggestion(
+            action="deriv_sell",
+            product_id="BTC-USD",
+            entry=85906.24,
+            stop_loss=86600.0,
+            take_profits=[85000.0],
+            order_block_ref=ref,
+        )
+
+    def test_swing_mirror_outranks_control(self) -> None:
+        """Operator order: the swing mirror takes the contract off control."""
+        hq_id = self._open_family("hq")
+        gw = self._gateway(mark=85906.24)
+        with patch.object(execute, "get_gateway", return_value=gw):
+            result = execute.maybe_execute_live(
+                self._btc_short("btc-ob-swing"),
+                85906.24,
+                cycle_id="var_eva_swing_llm_40",
+                source="hq_swing",
+            )
+
+        self.assertIsNotNone(result)
+        hq = live_ledger.get_trade(hq_id)
+        self.assertEqual(hq["status"], "closed")
+        self.assertEqual(hq["close_reason"], "hq_priority")
+        labels = [c.kwargs["label"] for c in gw.place_market_order.call_args_list]
+        self.assertTrue(any(lab.startswith("hq-yield:") for lab in labels))
+
+    def test_swing_mirror_outranks_the_day_mirror(self) -> None:
+        day_id = self._open_family("hq_day")
+        gw = self._gateway(mark=85906.24)
+        with patch.object(execute, "get_gateway", return_value=gw):
+            result = execute.maybe_execute_live(
+                self._btc_short("btc-ob-swing-2"),
+                85906.24,
+                cycle_id="var_eva_swing_llm_41",
+                source="hq_swing",
+            )
+
+        self.assertIsNotNone(result)
+        self.assertEqual(live_ledger.get_trade(day_id)["status"], "closed")
+
+    def test_day_mirror_outranks_control(self) -> None:
+        hq_id = self._open_family("hq")
+        gw = self._gateway(mark=85906.24)
+        with patch.object(execute, "get_gateway", return_value=gw):
+            result = execute.maybe_execute_live(
+                self._btc_short("btc-ob-day"),
+                85906.24,
+                cycle_id="var_eva_day_36",
+                source="hq_day",
+            )
+
+        self.assertIsNotNone(result)
+        self.assertEqual(live_ledger.get_trade(hq_id)["status"], "closed")
+
+    def test_day_mirror_yields_to_swing(self) -> None:
+        """Swing sits above day, so day refuses rather than flattening it."""
+        swing_id = self._open_family("hq_swing")
+        gw = self._gateway(mark=85906.24)
+        with patch.object(execute, "get_gateway", return_value=gw):
+            result = execute.maybe_execute_live(
+                self._btc_short("btc-ob-tie"),
+                85906.24,
+                cycle_id="var_eva_day_37",
+                source="hq_day",
+            )
+
+        self.assertIsNone(result)
+        self.assertEqual(live_ledger.get_trade(swing_id)["status"], "open")
+        gw.place_market_order.assert_not_called()
+
+    def test_control_yields_to_a_mirror_holding_the_contract(self) -> None:
+        """The 2026-09-21 case: control's BTC short into the swing mirror.
+
+        Still refused under the operator order — but as a logged skip rather
+        than a venue reject, so it no longer feeds a retry loop.
+        """
+        swing_id = self._open_family("hq_swing")
+        gw = self._gateway(mark=85906.24)
+        with patch.object(execute, "get_gateway", return_value=gw), patch.object(
+            bot_config, "LIVE_HQ_RISK_PCT", 0.007
+        ):
+            result = execute.maybe_execute_live(
+                self._btc_short("btc-ob-control"),
+                85906.24,
+                cycle_id="hq-btc-short-5",
+                source="hq",
+            )
+
+        self.assertIsNone(result)
+        self.assertEqual(live_ledger.get_trade(swing_id)["status"], "open")
+        gw.place_market_order.assert_not_called()
+
+    def test_mill_refuses_rather_than_letting_the_venue_reject(self) -> None:
+        """Mill outranks nothing, so it skips instead of retrying into a reject."""
+        swing_id = self._open_family("hq_swing")
+        gw = self._gateway(mark=85906.24)
+        with patch.object(execute, "get_gateway", return_value=gw):
+            result = execute.maybe_execute_live(
+                self._btc_short("btc-ob-mill"),
+                85906.24,
+                cycle_id="mill_1049",
+                source="mill",
+            )
+
+        self.assertIsNone(result)
+        self.assertEqual(live_ledger.get_trade(swing_id)["status"], "open")
+        gw.place_market_order.assert_not_called()
+
+    def test_same_direction_mirror_shares_the_contract(self) -> None:
+        swing_id = self._open_family("hq_swing", side="short", stop_loss=87000.0)
+        gw = self._gateway(mark=85906.24)
+        with patch.object(execute, "get_gateway", return_value=gw), patch.object(
+            bot_config, "LIVE_HQ_RISK_PCT", 0.007
+        ):
+            result = execute.maybe_execute_live(
+                self._btc_short("btc-ob-same"),
+                85906.24,
+                cycle_id="hq-btc-short-6",
+                source="hq",
+            )
+
+        self.assertIsNotNone(result)
+        self.assertEqual(live_ledger.get_trade(swing_id)["status"], "open")
 
 
 class PooledFillTests(unittest.TestCase):

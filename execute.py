@@ -876,6 +876,26 @@ def _realized_pnl_today(source: str) -> float:
 # day without any single book tripping.
 _HQ_FAMILY_SOURCES = ("hq", "hq_swing", "hq_day")
 
+# Every sleeve trades the same CDE contract per product, and a resting bracket
+# reserves the whole position, so two sleeves cannot hold opposite sides of one
+# product at the same time — the venue rejects the second with
+# PREVIEW_ORDER_SIZE_EXCEEDS_BRACKETED_POSITION. Who yields is decided here
+# rather than by whoever happened to fire first.
+#
+# Operator order (2026-09-21): swing, then day, then control, then mill. Set by
+# the operator, not derived from anything measured — the two mirrors take the
+# contract ahead of the shipped book. The cost is real and lands on control:
+# its live entries are the ones a mirror can now block or flatten, so the LIVE
+# row on the Eva tab is no longer a clean read of what control would have done
+# on its own. Promotion still turns on the paper books (EVA_VARIANTS_PREREG.md
+# §4), which nothing here touches.
+_SOURCE_PRIORITY: dict[str, int] = {
+    "hq_swing": 4,
+    "hq_day": 3,
+    "hq": 2,
+    "mill": 1,
+}
+
 
 def _check_daily_loss(source: str) -> bool:
     """True when the sleeve may trade; halts HQ when the day is blown."""
@@ -968,40 +988,56 @@ def _mill_clip(product_id: str, price: float) -> tuple[float, float] | None:
     return qty, qty * price
 
 
-def _clear_opposing_mill(
+def _clear_opposing_family(
     gw: Any,
     *,
     product_id: str,
     instrument: str,
-    hq_side: str,
-) -> None:
-    """Flatten mill clips that would block an HQ entry on this contract.
+    source: str,
+    side: str,
+) -> list[dict[str, Any]]:
+    """Flatten lower-ranked positions blocking this entry; return the rest.
 
-    HQ and mill share one CDE position. Mill's resting brackets reserve its
-    entire size, so an HQ order that needs to sell into a mill long (or buy
-    into a mill short) is rejected
-    ``PREVIEW_ORDER_SIZE_EXCEEDS_BRACKETED_POSITION`` — which is what killed
-    the 2026-09-03 HQ BTC short at 81,010.97.
+    Every sleeve shares one CDE position per product and a resting bracket
+    reserves its entire size, so an order that needs to sell into an open long
+    (or buy into an open short) is rejected
+    ``PREVIEW_ORDER_SIZE_EXCEEDS_BRACKETED_POSITION`` — which killed the
+    2026-09-03 HQ BTC short at 81,010.97 and, once the variant mirrors went
+    live, both the day mirror's and control's BTC shorts on 2026-09-21.
 
-    Temporary testing priority (``LIVE_HQ_CLEARS_MILL``): opposite mill on the
-    product is closed first, its refill sweep is skipped so it cannot
-    immediately re-open into the same conflict, and same-direction mill is
-    left alone.
+    Ranked by ``_SOURCE_PRIORITY``: anything the incoming entry outranks is
+    closed first with its refill sweep skipped, so it cannot immediately
+    re-open into the same conflict. Same-direction positions are left alone —
+    they share the contract happily. Whatever outranks the entry, or is the
+    same sleeve facing the other way, is returned so the caller can refuse
+    *before* the venue does; the order would be rejected either way, and a
+    logged skip beats a venue error and the retry loop it feeds.
     """
     opposing = [
         t
-        for t in live_ledger.get_open_trades(source="mill")
+        for src in _SOURCE_PRIORITY
+        for t in live_ledger.get_open_trades(source=src)
         if str(t.get("product_id") or "") == product_id
-        and str(t.get("side") or "") != hq_side
+        and str(t.get("side") or "") != side
+        and _qty_open(t) > 0
     ]
     if not opposing:
-        return
+        return []
+
+    rank = _SOURCE_PRIORITY.get(source, 0)
+    blockers: list[dict[str, Any]] = []
     for trade in opposing:
-        _force_close_mill_for_hq(gw, trade, instrument)
+        if _SOURCE_PRIORITY.get(str(trade.get("source") or ""), 0) >= rank:
+            blockers.append(trade)
+            continue
+        _force_close_for_priority(gw, trade, instrument)
+    return blockers
 
 
-def _force_close_mill_for_hq(gw: Any, trade: dict[str, Any], instrument: str) -> None:
-    """Cancel mill exits, flatten its size, book the close — no sleeve refill."""
+def _force_close_for_priority(
+    gw: Any, trade: dict[str, Any], instrument: str
+) -> None:
+    """Cancel the yielding trade's exits, flatten it, book it — no refill."""
     trade_id = int(trade["id"])
     qty_open = _qty_open(trade)
     if qty_open <= 0:
@@ -1010,39 +1046,42 @@ def _force_close_mill_for_hq(gw: Any, trade: dict[str, Any], instrument: str) ->
     closing = "sell" if side == "long" else "buy"
     entry = float(trade["entry"])
     direction = 1.0 if side == "long" else -1.0
+    src = str(trade.get("source") or "mill")
 
     logger.warning(
-        "HQ priority: closing mill #%s %s %s %.4f so HQ can take the opposite side",
-        trade_id, trade.get("product_id"), side, qty_open,
+        "Contract priority: closing %s #%s %s %s %.4f to free the contract",
+        src, trade_id, trade.get("product_id"), side, qty_open,
     )
 
     # Brackets must be gone before the flatten, or the venue rejects the close
-    # with the same EXCEEDS_BRACKETED_POSITION that blocked HQ.
+    # with the same EXCEEDS_BRACKETED_POSITION that blocked the entry.
     for oid in _exit_order_ids(trade):
         try:
             gw.cancel_orders([oid])
         except GatewayError:
             logger.exception(
-                "HQ priority: cancel of mill exit %s failed — aborting clear", oid
+                "Contract priority: cancel of %s exit %s failed — aborting clear",
+                src, oid,
             )
             raise
         settled = _await_cancel(gw, oid)
         if settled not in ("CANCELLED", "EXPIRED", "FILLED"):
             logger.warning(
-                "HQ priority: mill exit %s cancel unconfirmed (%s) — closing anyway",
-                oid, settled,
+                "Contract priority: %s exit %s cancel unconfirmed (%s) —"
+                " closing anyway",
+                src, oid, settled,
             )
 
     order = gw.place_market_order(
         instrument=instrument,
         side=closing,
         amount=qty_open,
-        label=f"mill-hq-yield:{trade_id}",
+        label=f"{src}-yield:{trade_id}",
     )
     info = (order or {}).get("order") or {}
     fill_qty = float(info.get("filled_qty") or qty_open)
     fill_price = float(info.get("average_price") or entry)
-    order_id = str(info.get("order_id") or f"hq-yield:{trade_id}")
+    order_id = str(info.get("order_id") or f"{src}-yield:{trade_id}")
     pnl = (fill_price - entry) * fill_qty * direction
 
     live_ledger.record_partial_exit(
@@ -1057,9 +1096,9 @@ def _force_close_mill_for_hq(gw: Any, trade: dict[str, Any], instrument: str) ->
     _close_out(gw, trade_id, row, reason="hq_priority", refill_mill=False)
     if bot_config.LIVE_FILL_ALERTS_ENABLED:
         _notify_ops(
-            f"MILL YIELDED #{trade_id} — hq_priority\n"
+            f"{src.upper()} YIELDED #{trade_id} — hq_priority\n"
             f"{trade.get('product_id')} {side} {fill_qty:.4f} @ {fill_price:,.2f}\n"
-            f"P&L {pnl:+,.2f} — cleared for HQ"
+            f"P&L {pnl:+,.2f} — contract cleared for a higher-ranked book"
         )
 
 
@@ -1402,18 +1441,29 @@ def _execute(
 
     # ---- live ----
     gw = get_gateway()
-    if source == "hq" and bot_config.LIVE_HQ_CLEARS_MILL:
+    if bot_config.LIVE_HQ_CLEARS_MILL:
         try:
-            _clear_opposing_mill(
+            blockers = _clear_opposing_family(
                 gw,
                 product_id=product_id,
                 instrument=instrument,
-                hq_side=side,
+                source=source,
+                side=side,
             )
         except GatewayError as exc:
             logger.error(
-                "Live skip: could not clear opposing mill for HQ %s: %s",
-                product_id, exc,
+                "Live skip: could not clear the %s contract for %s: %s",
+                product_id, source, exc,
+            )
+            return None
+        if blockers:
+            held = ", ".join(
+                f"#{b['id']} {b.get('source')} {b.get('side')}" for b in blockers
+            )
+            logger.info(
+                "Live skip: %s wants %s %s but %s holds the contract the other "
+                "way and does not yield — one position per product per venue",
+                source, side, product_id, held,
             )
             return None
     try:

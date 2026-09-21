@@ -325,14 +325,18 @@ LIVE_MILL_MAX_OPEN = 3
 LIVE_MILL_MAX_FILLS_PER_DAY = 0      # 0 = no daily fill cap
 LIVE_MILL_DAILY_LOSS_LIMIT_USD = 112.0  # 8% of sleeve, same ratio as HQ
 
-# Temporary testing priority: before an HQ live entry, flatten any open mill
-# clip on the same product that is the *opposite* direction. HQ and mill share
-# one CDE contract, and mill's resting brackets reserve its whole size, so an
-# HQ short into a mill long (or the reverse) is rejected
-# PREVIEW_ORDER_SIZE_EXCEEDS_BRACKETED_POSITION — that is what killed the
-# 2026-09-03 HQ BTC short at 81,010.97. Same-direction mill is left alone.
-# Mill refill is skipped on these closes so it cannot immediately re-open into
-# the same conflict. Turn this off once HQ testing no longer needs the lane.
+# Temporary testing priority: before a live entry, flatten any open position on
+# the same product that is the *opposite* direction and ranks below the entry
+# (execute._SOURCE_PRIORITY — swing > day > control > mill). Every sleeve
+# shares one CDE contract per product and a resting bracket reserves its whole
+# size, so a short into an open long (or the reverse) is rejected
+# PREVIEW_ORDER_SIZE_EXCEEDS_BRACKETED_POSITION — that killed the 2026-09-03 HQ
+# BTC short at 81,010.97, and both the day mirror's and control's BTC shorts on
+# 2026-09-21 once the mirrors went live. Same-direction positions are left
+# alone. Mill refill is skipped on these closes so it cannot immediately
+# re-open into the same conflict. An entry that outranks nothing on the
+# contract is refused and logged rather than sent to be rejected. Off = attempt
+# anyway and let the venue decide, which is the pre-2026-09-03 behaviour.
 LIVE_HQ_CLEARS_MILL: bool = True
 
 # Objective: keep a mill clip open at all times. When the sleeve is EMPTY the
