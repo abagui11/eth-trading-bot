@@ -75,6 +75,18 @@ experiment must test, not a fact it may assume.
   mirror shuts off and the live P&L it accumulated is reported in the
   changelog as the cost of running ahead of the evidence — not netted away,
   not re-based.
+- **Contract priority (same day, later):** every live sleeve shares one CDE
+  contract per product, so opposite directions cannot both hold it — the
+  venue rejects the second with `PREVIEW_ORDER_SIZE_EXCEEDS_BRACKETED_POSITION`
+  (control BTC short into the swing mirror at 18:30Z, same day the mirrors
+  shipped). Operator order, recorded here: swing > day > control > mill
+  (`execute._SOURCE_PRIORITY`). An entry flattens what it outranks and
+  refuses as a logged skip when it does not. **The cost lands on control:**
+  its live entries can be blocked and its open positions flattened mid-trade
+  by either mirror (booked `hq_priority`). The LIVE row on Eva Trades is
+  therefore no longer a clean read of what control would have done alone.
+  The paper books are untouched; live results stay excluded from §4; this
+  does not change the promotion bar.
 
 ## 1. Books
 
