@@ -474,27 +474,64 @@ def send(telegram_id: int, *, product: str = "BTC-USD",
         suggestion = build_suggestion(product, side, spot)
 
     token = uuid.uuid4().hex[:12]
+    # A live card is a mill card: its Accept fills against the Trade Mill
+    # allocation, so the copy and the sizing line must read that sleeve —
+    # an "ICT" label on it describes an account the tap will not touch.
+    # A demo mirror of a real mill position reads the same sleeve for the
+    # same reason.
+    strategy = (
+        "mill"
+        if idea is not None
+        or (trade is not None and str(trade.get("source") or "") == "mill")
+        else "ict"
+    )
     try:
         body = display_summary.build_card_body(
             suggestion, telegram_id=telegram_id,
-            spot=spot or None,
+            spot=spot or None, strategy=strategy,
         )
     except Exception:
         logger.exception("demo card: render failed")
         return {"ok": False, "reason": "render_failed"}
 
+    # The live card's tap fills against the mill allocation, so its summary
+    # sizes there. A demo card's Accept reserves against available cash
+    # (its ref reaches no executor), so its summary keeps the cash base —
+    # passing a strategy here would quote a sleeve the demo tap never reads.
     prosp = pool.prospective_accept(
         telegram_id, entry=float(suggestion.entry),
         stop_loss=float(suggestion.stop_loss),
+        strategy="mill" if idea is not None else None,
     )
 
     keyboard = (
         telegram_ui.idea_live_keyboard(int(idea["id"])) if idea is not None
         else telegram_ui.pool_demo_keyboard(token)
     )
-    sent = notify.send_pool_dm_with_keyboard(
-        telegram_id, f"{banner}\n\n{body}"[:4096], keyboard,
-    )
+
+    # A live mill card carries the decision chart, exactly like the mill's own
+    # broadcast — the demo is the one place a bare-text card hurts most.
+    # Fail-soft to text: a recording session gets a card either way.
+    chart_path = None
+    if idea is not None:
+        try:
+            import charts
+
+            bars = research.get_ohlc("M5", limit=250, product_id=product)
+            chart_path = charts.build_decision_chart(
+                suggestion, {"M5": bars}, f"mill_{int(idea['id'])}"
+            )
+        except Exception:
+            logger.exception("demo card: decision chart render failed")
+
+    if chart_path:
+        sent = notify.send_pool_photo_dm_with_keyboard(
+            telegram_id, chart_path, f"{banner}\n\n{body}"[:1024], keyboard,
+        )
+    else:
+        sent = notify.send_pool_dm_with_keyboard(
+            telegram_id, f"{banner}\n\n{body}"[:4096], keyboard,
+        )
     if not sent:
         return {"ok": False, "reason": "send_failed"}
 

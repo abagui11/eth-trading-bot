@@ -1107,6 +1107,39 @@ def send_pool_dm_with_keyboard(telegram_id: int, text: str, keyboard) -> bool:
         return False
 
 
+async def send_pool_photo_dm_with_keyboard_async(
+    telegram_id: int, photo_path: str, caption: str, keyboard
+) -> bool:
+    """A pool DM as a photo with inline buttons — how a mill card looks live."""
+    bot = Bot(token=config.TELEGRAM_BOT_TOKEN)
+    try:
+        with open(photo_path, "rb") as fh:
+            await bot.send_photo(
+                chat_id=int(telegram_id), photo=fh,
+                caption=caption.strip()[:1024],
+                reply_markup=keyboard,
+            )
+        return True
+    except Exception:
+        logger.exception("Pool photo DM failed for user %s", telegram_id)
+        return False
+
+
+def send_pool_photo_dm_with_keyboard(
+    telegram_id: int, photo_path: str, caption: str, keyboard
+) -> bool:
+    """Sync wrapper for the photo DM; never raises."""
+    try:
+        return asyncio.run(
+            send_pool_photo_dm_with_keyboard_async(
+                telegram_id, photo_path, caption, keyboard
+            )
+        )
+    except Exception:
+        logger.exception("Pool photo DM wrapper failed for %s", telegram_id)
+        return False
+
+
 def send_pool_admin_alert(text: str) -> None:
     """Alert every pool admin by DM. Never raises."""
     import pool

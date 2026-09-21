@@ -302,8 +302,17 @@ def build_card_body(
     offer_id: str | None = None,
     resting: bool | None = None,
     spot: float | None = None,
+    strategy: str = "ict",
 ) -> str:
-    """Concise photo caption / card text (Telegram caption limit 1024)."""
+    """Concise photo caption / card text (Telegram caption limit 1024).
+
+    ``strategy`` names the sleeve the card belongs to — it sets the title
+    prefix, which allocation the sizing line reads, and which allocation the
+    "you haven't allocated" nudge points at. Everything HQ sends is "ict";
+    a live mill idea (``/democard mint``/``real``) must pass "mill", because
+    its Accept fills against the Trade Mill allocation and a card that quotes
+    the ICT sleeve is describing a different account.
+    """
     if suggestion.action == "no_trade":
         return "NO TRADE — tap See more for the full rationale."
 
@@ -317,11 +326,12 @@ def build_card_body(
     stop = float(suggestion.stop_loss)
     tp1 = float(suggestion.take_profits[0]) if suggestion.take_profits else None
 
-    # HQ hourly (abstention-first ICT) cards carry the ICT label;
-    # watchdog programmatic fires do not.
+    # HQ hourly (abstention-first ICT) cards carry the ICT label, mill cards
+    # the Trade Mill one; watchdog programmatic fires carry none.
     title = friendly_title(suggestion)
-    if not is_watchdog_suggestion(suggestion):
-        title = f"ICT · {title}"
+    strategy_prefix = {"ict": "ICT", "mill": "Trade Mill"}.get(strategy)
+    if strategy_prefix and not is_watchdog_suggestion(suggestion):
+        title = f"{strategy_prefix} · {title}"
 
     # The banner already names the entry and says what happens to it, so the
     # old lead would only repeat the price under a vaguer verb.
@@ -360,9 +370,13 @@ def build_card_body(
             import pool
 
             if pool.is_approved(int(telegram_id)):
+                import strategy_catalog
+
+                strat = strategy_catalog.get(strategy)
+                alloc_label = strat.label if strat else strategy
                 prosp = pool.prospective_accept(
                     int(telegram_id), entry=entry, stop_loss=stop,
-                    strategy="ict",
+                    strategy=strategy,
                 )
                 lines.append("")
                 if prosp.get("ok"):
@@ -373,16 +387,16 @@ def build_card_body(
                     lines.append(
                         f"Your Accept ≈ ${float(prosp['risk_usd']):,.2f} at risk "
                         f"({risk_pct:.1f}% of your ${base:,.0f} "
-                        "ICT Trades allocation)"
+                        f"{alloc_label} allocation)"
                     )
                     lines.append(
                         f"≈ ${float(prosp['notional_usd']):,.0f} position size at this stop"
                     )
                 elif prosp.get("reason") == "no_allocation":
                     lines.append(
-                        "You haven't allocated to ICT Trades yet — /subscribe "
-                        "to deploy capital, then Accept puts money on cards "
-                        "like this."
+                        f"You haven't allocated to {alloc_label} yet — "
+                        "/subscribe to deploy capital, then Accept puts money "
+                        "on cards like this."
                     )
                 elif prosp.get("reason") == "below_min_equity":
                     lines.append(

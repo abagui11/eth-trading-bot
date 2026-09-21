@@ -23,6 +23,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import bot
 import bot_config
+import charts
 import config
 import demo_card
 import notify
@@ -82,6 +83,7 @@ class DemocardFillableBroadcastTests(unittest.TestCase):
         pool.set_allocation(TESTER_A, "mill", 1000.0)
 
         self.sent: list[tuple[int, str, object]] = []
+        self.photo_sent: list[tuple[int, str, str, object]] = []
 
     # -- harness -----------------------------------------------------------
 
@@ -89,13 +91,23 @@ class DemocardFillableBroadcastTests(unittest.TestCase):
         self.sent.append((int(uid), str(text), keyboard))
         return True
 
-    def _run(self, args, *, fillable=None, minted_id=None, spot=2410.0):
+    def _photo_dm(self, uid, chart_path, caption, keyboard):
+        # Recorded in `sent` too so every card assertion holds regardless of
+        # whether the card went out as text or as a chart photo.
+        self.photo_sent.append((int(uid), str(chart_path), str(caption), keyboard))
+        self.sent.append((int(uid), str(caption), keyboard))
+        return True
+
+    def _run(self, args, *, fillable=None, minted_id=None, spot=2410.0,
+             chart=None):
         """Drive `/democard <args>` as the admin, with the mill stubbed.
 
         `fillable` is what the book offers (defaults to one fillable idea);
         `minted_id` is the row id the mint insert would return. Previews say
         yes for any id, so what these tests decide is *which* idea gets sent,
         not whether the fill gate works — the gate has its own tests.
+        `chart` is what the decision-chart render returns; None (the default)
+        exercises the text fallback.
         """
         update = MagicMock()
         update.effective_user.id = ADMIN
@@ -120,7 +132,12 @@ class DemocardFillableBroadcastTests(unittest.TestCase):
                              return_value=minted_id) as self.mint, \
                 patch.object(research, "get_spot_price",
                              return_value=spot), \
-                patch.object(notify, "send_pool_dm_with_keyboard", self._dm):
+                patch.object(research, "get_ohlc", return_value=[]), \
+                patch.object(charts, "build_decision_chart",
+                             return_value=chart) as self.chart, \
+                patch.object(notify, "send_pool_dm_with_keyboard", self._dm), \
+                patch.object(notify, "send_pool_photo_dm_with_keyboard",
+                             self._photo_dm):
             asyncio.run(bot.cmd_democard(update, context))
 
         reply = "\n".join(
@@ -292,6 +309,45 @@ class DemocardFillableBroadcastTests(unittest.TestCase):
         self.assertEqual(self.mint.call_count, 1)
         for uid, _, keyboard in self.sent:
             self.assertIn("idea:accept:501", self._callbacks(keyboard), uid)
+
+    # -- a live card is a Trade Mill card, and looks like one ----------------
+
+    def test_a_live_card_reads_the_mill_sleeve_not_ict(self) -> None:
+        """An Accept fills against the Trade Mill allocation, so the label
+        and the sizing line must read that sleeve — TESTER_A deployed to the
+        mill and the ICT wording would tell them they can't trade."""
+        self._run(["fillable", str(TESTER_A)])
+        _, text, _ = self.sent[0]
+        self.assertIn("Trade Mill", text)
+        self.assertNotIn("ICT", text)
+        self.assertIn("at risk", text)  # the sizing line rendered
+
+    def test_an_undeployed_account_is_pointed_at_the_mill_allocation(self) -> None:
+        """TESTER_B has cash but no mill allocation; the nudge must name the
+        sleeve their Accept would actually need."""
+        self._run(["fillable", str(TESTER_B)])
+        _, text, _ = self.sent[0]
+        self.assertIn("haven't allocated to Trade Mill", text)
+        self.assertNotIn("ICT Trades", text)
+
+    def test_a_live_card_carries_the_decision_chart(self) -> None:
+        """The mill's own broadcast is a chart photo; the on-demand live card
+        must look the same — a bare text card is what the demo bug was."""
+        self._run(["mint", str(TESTER_A)], minted_id=501, chart="idea.png")
+        self.assertEqual(len(self.photo_sent), 1)
+        uid, chart_path, caption, keyboard = self.photo_sent[0]
+        self.assertEqual(uid, TESTER_A)
+        self.assertEqual(chart_path, "idea.png")
+        self.assertIn("LIVE CARD", caption)
+        self.assertLessEqual(len(caption), 1024)  # Telegram caption cap
+        self.assertIn("idea:accept:501", self._callbacks(keyboard))
+
+    def test_a_failed_chart_render_still_sends_the_card_as_text(self) -> None:
+        """A recording session gets a card either way — fail-soft to text."""
+        self._run(["mint", str(TESTER_A)], minted_id=501, chart=None)
+        self.assertEqual(self.photo_sent, [])
+        self.assertEqual([uid for uid, _, _ in self.sent], [TESTER_A])
+        self.assertIn("LIVE CARD", self.sent[0][1])
 
 
 # Mirrors the mill's schema (trade_ideas/trade_ideas/store.py).

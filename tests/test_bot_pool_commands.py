@@ -649,6 +649,7 @@ class LiveCardTests(unittest.TestCase):
                                            "risk_pct": 0.007,
                                            "available_usd": 500.0,
                                            "notional_usd": 168.0}), \
+                patch.object(research, "get_ohlc", return_value=[]), \
                 patch.object(notify, "send_pool_dm_with_keyboard", _capture):
             result = demo_card.send(UID, live_idea=True)
 

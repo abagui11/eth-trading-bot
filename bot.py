@@ -829,10 +829,24 @@ async def _handle_menu_callback(
                 maximum = pool.max_withdrawal_usd(user_id)
                 minimum = float(bot_config.POOL_MIN_WITHDRAWAL_USD)
                 if maximum < minimum:
+                    # Name where the money is, not just "not enough": the
+                    # balance the user remembers may be sitting in open
+                    # trades, and a refusal that quotes a healthy "free"
+                    # number reads like a bug.
+                    account = pool.get_account(user_id) or {}
+                    reserved = float(account.get("reserved_usd") or 0)
+                    free = pool.withdrawable_usd(user_id)
+                    if reserved > 0:
+                        return (
+                            f"Only ${free:,.2f} is free right now — "
+                            f"${reserved:,.2f} is working in open trades and "
+                            "comes back when they close. After the network "
+                            f"fee that's below the ${minimum:,.0f} minimum, "
+                            "so nothing can go out yet."
+                        )
                     return (
                         f"Not enough withdrawable balance yet "
-                        f"(${pool.withdrawable_usd(user_id):,.2f} free, "
-                        f"min ${minimum:,.0f})."
+                        f"(${free:,.2f} free, min ${minimum:,.0f})."
                     )
                 result = pool.request_withdrawal(user_id, maximum)
                 if result.get("ok"):
@@ -840,7 +854,7 @@ async def _handle_menu_callback(
                         f"Withdrawal of ${maximum:,.2f} queued — you'll get a "
                         "DM when it lands."
                     )
-                return f"Could not withdraw ({result.get('reason')})."
+                return _withdrawal_refusal(result, maximum)
 
             text = await loop.run_in_executor(None, _do_all)
             await bot.send_message(
@@ -850,10 +864,14 @@ async def _handle_menu_callback(
 
         if data == telegram_ui.CB_WALLET_WITHDRAW_X:
             context.user_data[menu.AWAITING_WITHDRAW] = True
+            # Quote max_withdrawal_usd, not the raw free balance: the network
+            # fee is debited on top of the amount, so the raw balance is a
+            # number that gets refused if the user types it back.
             await bot.send_message(
                 user_id,
                 "How much USDC do you want to withdraw?\n\n"
-                f"Available: ${pool.withdrawable_usd(user_id):,.2f}\n"
+                f"Up to ${pool.max_withdrawal_usd(user_id):,.2f} can go out "
+                "right now (network fee already set aside).\n"
                 "Reply with a number (e.g. 100), or tap Back.",
                 reply_markup=telegram_ui.back_home_keyboard(),
             )
@@ -3126,9 +3144,11 @@ async def on_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
                 reply_markup=telegram_ui.wallet_keyboard(),
             )
         else:
+            # Same refusal copy as /withdraw: actionable ("the most you can
+            # take is $X"), not a bare internal reason code.
             await _reply(
                 update,
-                f"Could not withdraw ({result.get('reason')}).",
+                _withdrawal_refusal(result, pool.max_withdrawal_usd(user.id)),
                 reply_markup=telegram_ui.wallet_keyboard(),
             )
         return
