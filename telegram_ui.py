@@ -827,7 +827,7 @@ def format_portfolio(p: dict) -> str:
     by_strat = p.get("deployments") or {}
     if by_strat:
         lines.append("")
-        lines.append("Deployed by strategy:")
+        lines.append("Your deployments:")
         for key, amt in by_strat.items():
             if float(amt) <= 0:
                 continue
@@ -836,7 +836,7 @@ def format_portfolio(p: dict) -> str:
                 label = strategy_catalog.STRATEGIES[key].label
             except Exception:
                 label = key
-            lines.append(f"• {label}: ${float(amt):,.2f}")
+            lines.append(f"• {label}: ${float(amt):,.2f} (yours)")
 
     opens = p.get("open_stakes") or []
     if opens:

@@ -574,6 +574,8 @@ def set_allocation(telegram_id: int, strategy: str, amount_usd: float) -> dict[s
     account = get_account(telegram_id)
     if account is None or float(account["cash_usd"]) <= 0:
         return {"ok": False, "reason": "not_funded"}
+    # Drop stale soft-locks above cash before sizing the new deploy.
+    clamp_allocations_to_cash(telegram_id)
     cash = float(account["cash_usd"])
     current = get_allocation(telegram_id, strategy)
     others = sum(
@@ -613,31 +615,6 @@ def set_allocation(telegram_id: int, strategy: str, amount_usd: float) -> dict[s
         "amount_usd": amount,
         "cash_usd": cash,
         "wallet_usd": round(max(0.0, cash - others - amount), 2),
-    }
-
-
-def wallet_balance(telegram_id: int) -> dict[str, float]:
-    """Undeployed wallet vs deployed totals for Portfolio / Wallet surfaces."""
-    account = get_account(telegram_id)
-    if account is None:
-        return {
-            "cash_usd": 0.0,
-            "wallet_usd": 0.0,
-            "deployed_usd": 0.0,
-            "reserved_usd": 0.0,
-            "total_usd": 0.0,
-        }
-    cash = float(account["cash_usd"])
-    reserved = float(account["reserved_usd"])
-    deployed = sum(allocations(telegram_id).values())
-    wallet = max(0.0, cash - deployed)
-    return {
-        "cash_usd": cash,
-        "wallet_usd": round(wallet, 2),
-        "deployed_usd": round(deployed, 2),
-        "reserved_usd": round(reserved, 2),
-        "total_usd": round(cash, 2),
-        "withdrawable_usd": round(min(wallet, max(0.0, cash - reserved)), 2),
     }
 
 
@@ -811,6 +788,85 @@ def allocations(telegram_id: int) -> dict[str, float]:
             (int(telegram_id),),
         ).fetchall()
     return {str(r["strategy"]): float(r["amount_usd"]) for r in rows}
+
+
+def clamp_allocations_to_cash(telegram_id: int) -> dict[str, float]:
+    """Keep per-user deployments ≤ that user's cash claim.
+
+    Allocations are a soft lock of the tester's own cash for Accept sizing.
+    Cash can fall (losses, withdrawals, admin debit) while an old allocation
+    row stays large — Portfolio then showed e.g. Deployed $252 with Total $3.
+    Clamp (and persist) so displayed/deployed figures never exceed cash.
+    """
+    account = get_account(telegram_id)
+    if account is None:
+        return {}
+    cash = max(0.0, float(account["cash_usd"]))
+    current = allocations(telegram_id)
+    total = sum(current.values())
+    if total <= cash + 1e-9:
+        return {k: round(v, 2) for k, v in current.items() if v > 0}
+    if cash <= 0 or total <= 0:
+        with _connect() as conn:
+            conn.execute(
+                "UPDATE pool_strategy_allocs SET amount_usd = 0, updated_at = ? "
+                "WHERE telegram_id = ?",
+                (_now(), int(telegram_id)),
+            )
+        return {}
+    scale = cash / total
+    clamped: dict[str, float] = {}
+    with _connect() as conn:
+        for strategy, amount in current.items():
+            new_amt = round(float(amount) * scale, 2)
+            # Last residual cents go to the largest line so sum matches cash.
+            clamped[strategy] = new_amt
+        # Fix rounding drift on the largest allocation.
+        drift = round(cash - sum(clamped.values()), 2)
+        if clamped and abs(drift) >= 0.01:
+            top = max(clamped, key=clamped.get)
+            clamped[top] = round(clamped[top] + drift, 2)
+        now = _now()
+        for strategy, new_amt in clamped.items():
+            conn.execute(
+                "UPDATE pool_strategy_allocs SET amount_usd = ?, updated_at = ? "
+                "WHERE telegram_id = ? AND strategy = ?",
+                (new_amt, now, int(telegram_id), strategy),
+            )
+    logger.info(
+        "pool: clamped allocations for %s to cash $%.2f (was $%.2f)",
+        telegram_id, cash, total,
+    )
+    return {k: v for k, v in clamped.items() if v > 0}
+
+
+def wallet_balance(telegram_id: int) -> dict[str, float]:
+    """Undeployed wallet vs this user's deployments (never above their cash)."""
+    account = get_account(telegram_id)
+    if account is None:
+        return {
+            "cash_usd": 0.0,
+            "wallet_usd": 0.0,
+            "deployed_usd": 0.0,
+            "reserved_usd": 0.0,
+            "total_usd": 0.0,
+            "withdrawable_usd": 0.0,
+            "deployments": {},
+        }
+    cash = float(account["cash_usd"])
+    reserved = float(account["reserved_usd"])
+    deploys = clamp_allocations_to_cash(telegram_id)
+    deployed = sum(deploys.values())
+    wallet = max(0.0, round(cash - deployed, 2))
+    return {
+        "cash_usd": cash,
+        "wallet_usd": wallet,
+        "deployed_usd": round(deployed, 2),
+        "reserved_usd": round(reserved, 2),
+        "total_usd": round(cash, 2),
+        "withdrawable_usd": round(min(wallet, max(0.0, cash - reserved)), 2),
+        "deployments": deploys,
+    }
 
 
 def seed_default_subscriptions() -> int:
@@ -2747,15 +2803,17 @@ def portfolio(telegram_id: int, spots: dict[str, float] | None = None) -> dict[s
     realized_total = sum(float(s["realized_pnl_usd"]) for s in map(dict, stake_rows))
     cash = float(account["cash_usd"])
     reserved = float(account["reserved_usd"])
-    deploys = allocations(telegram_id)
+    # Per-user deployments only — clamp so a stale allocation cannot exceed
+    # this tester's cash (never house sleeve / strategy AUM).
+    deploys = clamp_allocations_to_cash(telegram_id)
     deployed = sum(deploys.values())
-    wallet = max(0.0, cash - deployed)
+    wallet = max(0.0, round(cash - deployed, 2))
     return {
         "ok": True,
         "cash_usd": cash,
         "reserved_usd": reserved,
         "available_usd": round(cash - reserved, 2),
-        "wallet_usd": round(wallet, 2),
+        "wallet_usd": wallet,
         "deployed_usd": round(deployed, 2),
         "total_usd": round(cash, 2),
         "deployments": {k: round(v, 2) for k, v in deploys.items() if v > 0},
