@@ -85,6 +85,12 @@ REAL = ("real", "fillable", "forreal")
 # (`deploy/_show_fillable.py`) -- which is the one thing the command exists to
 # avoid having in the shot.
 SCAN = ("scan", "check", "what")
+# Mint a fresh mill idea at the current price and send it live, instead of
+# hoping the book has one. Implies `real`: a minted card spends real money on
+# Accept. The `real` path also falls back to this when nothing on the book
+# would fill, because the reason this exists is a recording that cannot wait
+# for the next mill cycle.
+MINT = ("mint", "fresh")
 
 
 def parse_args(args: list[str], *, default_id: int) -> dict[str, Any]:
@@ -97,7 +103,7 @@ def parse_args(args: list[str], *, default_id: int) -> dict[str, Any]:
     out: dict[str, Any] = {
         "telegram_id": default_id, "product": "BTC-USD", "side": "buy",
         "mirror": False, "source": None, "trade_id": None, "everyone": False,
-        "live_idea": False, "idea_id": None, "scan": False,
+        "live_idea": False, "idea_id": None, "scan": False, "mint": False,
     }
     for raw in args:
         token = str(raw).strip().lower().lstrip("-#")
@@ -105,6 +111,9 @@ def parse_args(args: list[str], *, default_id: int) -> dict[str, Any]:
             out["everyone"] = True
         elif token in SCAN:
             out["scan"] = True
+        elif token in MINT:
+            out["mint"] = True
+            out["live_idea"] = True
         elif token in REAL:
             out["live_idea"] = True
         elif token in MIRRORS:
@@ -324,6 +333,53 @@ def pick_fillable_idea(user_id: int, *, limit: int = 30) -> dict[str, Any] | Non
 def scan_ideas(user_id: int, *, limit: int = 10) -> list[dict[str, Any]]:
     """Fill verdicts for the newest mill ideas — a pre-flight, sends nothing."""
     return find_live_idea(user_id, limit=limit)[1]
+
+
+def mint_live_idea(product: str = "BTC-USD", side: str = "buy") -> dict[str, Any]:
+    """Mint a fresh mill idea at the current price, so a live card always exists.
+
+    The mill runs on a cycle and its recent cards are usually expired, taken,
+    or refusable at the current mark -- which means "show a real fill" can be
+    impossible at exactly the moment someone is recording. This puts a real
+    row in the real ideas book: entry beside the live mark with the ordinary
+    synthetic geometry (~0.9% stop, 2.4R first target), so the manual fill
+    gate's lenient revalidation passes unless the market moves materially in
+    the seconds before the tap.
+
+    What it does NOT bypass: the sleeve capacity, halt, exposure and dedupe
+    gates all still apply, and the card still expires on the normal clock.
+    The idea carries no confidence score, so the house auto-fill and the
+    re-offer sweep can never take it -- it fills only from an Accept.
+    """
+    import research
+    import trade_ideas_bridge as bridge
+
+    try:
+        spot = float(research.get_spot_price(product_id=product) or 0)
+    except Exception:
+        logger.exception("mint: spot read failed")
+        spot = 0.0
+    if spot <= 0:
+        return {"ok": False, "reason": "no_spot"}
+
+    sug = build_suggestion(product, side, spot)
+    direction = "long" if side == "buy" else "short"
+    idea_id = bridge.mint_idea(
+        product_id=product,
+        direction=direction,
+        entry=float(sug.entry),
+        stop_loss=float(sug.stop_loss),
+        take_profits=[float(t) for t in (sug.take_profits or [])],
+        title=f"Operator-minted: {product} {direction} at the current price",
+        blurb=(
+            "Minted on demand via /democard. Entry set beside the live mark "
+            "with the standard ~0.9% stop and 2.4R first target; not a mill "
+            "signal."
+        ),
+    )
+    if idea_id is None:
+        return {"ok": False, "reason": "mint_failed"}
+    return {"ok": True, "idea_id": int(idea_id), "spot": spot}
 
 
 def build_from_idea(idea: dict[str, Any]) -> Suggestion:

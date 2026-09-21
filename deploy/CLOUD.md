@@ -510,6 +510,7 @@ a real card would quote for that account.
 | `/democard all live` | mirrors it **to every approved account** |
 | `/democard real` | **a real, fillable mill card — Accept places a real trade** |
 | `/democard real 57` | the same, aimed at mill idea #57 |
+| `/democard mint 8708390551` | **mints a fresh mill idea at the current price** and sends it as a LIVE card — for when the book has nothing fillable and someone is recording |
 | `/democard scan` | fill verdict on each recent idea; sends nothing |
 
 Telegram ids are long and trade ids are short, which is what keeps `85` and
@@ -553,11 +554,15 @@ combination worse than either alone.
 It picks the newest idea that would fill *right now*, checked by running the
 real gates in dry-run mode. Treat that as a strong no and a weak yes: exposure,
 contract-floor and dedupe checks only run when an order is genuinely sent, so a
-card can still be refused after passing the preview. If nothing is fillable the
-command says so instead of sending a card that will bounce — and it names the
-ideas it looked at with a plain-language reason for each, because "nothing
-right now" cannot tell a market that has moved from a mill that has stopped,
-and that is the question being asked ten minutes before a recording.
+card can still be refused after passing the preview. If nothing on the book
+would fill, `real` **mints a fresh idea at the current price** and sends that
+instead of refusing — a recording cannot wait for the next mill cycle.
+`/democard mint` asks for a fresh one outright, skipping the scan; `mint eth
+short <id>` controls product and side. The minted row is a real idea in the
+real book (title "Operator-minted: …", normal expiry clock, every real-money
+gate still applies), and it carries **no confidence score**, so the auto-fill
+path and the re-offer sweep can never take it — it fills from an Accept or it
+expires. A named idea (`real 57`) is never overridden by a mint.
 
 `/democard scan` asks that question without sending anything: the same verdicts
 as `deploy/_show_fillable.py <id>`, in Telegram, ending in the exact

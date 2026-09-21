@@ -18,6 +18,7 @@ import json
 import logging
 import os
 import sqlite3
+import uuid
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
@@ -338,6 +339,63 @@ def _mark_idea_live_fill(
         "UPDATE ideas SET live_fill_type = ?, live_filled_by = ? WHERE id = ?",
         (fill_type, int(filled_by) if filled_by is not None else None, int(idea_id)),
     )
+
+
+def mint_idea(
+    *,
+    product_id: str,
+    direction: str,
+    entry: float,
+    stop_loss: float,
+    take_profits: list[float],
+    title: str,
+    blurb: str = "",
+    source: str = "ondemand",
+) -> int | None:
+    """Insert one operator-minted idea, live and Accept-able right now.
+
+    Exists for `/democard mint`: the mill runs on a cycle and most recent
+    cards are expired or already taken, so "show a real fill on demand" needs
+    an idea whose levels are fresh at this moment. The row is a real idea in
+    the real book — same statuses, same expiry clock, same fill gate — not a
+    parallel demo object.
+
+    ``confidence`` is deliberately left NULL. Both house-initiated paths
+    demand a conviction score — `execute_mill_idea`'s auto path skips a None
+    with `low_conviction`, and `reoffer_candidates` filters on
+    `confidence >= LIVE_MILL_AUTO_MIN_CONFIDENCE`, which NULL never passes —
+    so a minted card can only ever fill from someone's Accept. The house
+    never takes it on its own.
+
+    Fail-soft like the rest of the bridge: None when IDEAS_DB is unavailable.
+    """
+    conn = _connect()
+    if conn is None:
+        return None
+    now = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    key = f"{source}:{uuid.uuid4().hex[:12]}"
+    try:
+        with conn:
+            cur = conn.execute(
+                """
+                INSERT INTO ideas
+                    (source, product_id, direction, title, blurb, signal_key,
+                     status, created_at, sent_at, entry, stop_loss,
+                     take_profits_json)
+                VALUES (?, ?, ?, ?, ?, ?, 'sent', ?, ?, ?, ?, ?)
+                """,
+                (
+                    str(source), str(product_id), str(direction), str(title),
+                    str(blurb), key, now, now, float(entry), float(stop_loss),
+                    json.dumps([float(t) for t in take_profits]),
+                ),
+            )
+        return int(cur.lastrowid)
+    except sqlite3.Error:
+        logger.exception("mint_idea failed for %s %s", product_id, direction)
+        return None
+    finally:
+        conn.close()
 
 
 def may_fill(user_id: int) -> bool:

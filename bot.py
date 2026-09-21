@@ -2246,8 +2246,9 @@ def _format_idea_scan(rows: list[dict], telegram_id: int) -> str:
         )
     else:
         lines.append(
-            "\nNothing to send live yet. Wait for the next mill cycle, or use "
-            "/democard live to mirror an open position as a demo."
+            "\nNothing on the book would fill, so /democard real <id> will "
+            "mint a fresh idea at the current price and send that. "
+            "/democard mint <id> does the same without scanning first."
         )
     return "\n".join(lines)[:4096]
 
@@ -2257,7 +2258,9 @@ async def cmd_democard(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
 
     `real` sends a live mill card instead, optionally aimed at one idea
     (`real 57`), and `scan` reports what could be sent live without sending
-    anything.
+    anything. When `real` finds nothing fillable it mints a fresh idea at the
+    current price rather than refusing — a recording cannot wait for the next
+    mill cycle — and `mint` skips the scan and goes straight to a fresh one.
 
     Admin only, and from Telegram rather than a server script so it can be
     fired mid-recording without an SSH session in the shot.
@@ -2288,6 +2291,39 @@ async def cmd_democard(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         await _reply(update, _format_idea_scan(rows, int(opts["telegram_id"])))
         return
 
+    # A live card needs a fillable idea and the book usually has none, so
+    # `mint` — or a `real` request that finds nothing — creates one at the
+    # current price and aims the send at it. Minted here, once, rather than
+    # inside demo_card.send: a broadcast that minted per recipient would put
+    # one new real idea on the book per account. A named idea is never
+    # overridden — asking for #57 means #57, minted or not.
+    minted: dict | None = None
+    if opts["live_idea"] and opts["idea_id"] is None:
+        need_mint = bool(opts["mint"])
+        if not need_mint:
+            picked = await loop.run_in_executor(
+                None,
+                lambda: demo_card.pick_fillable_idea(int(opts["telegram_id"])),
+            )
+            need_mint = picked is None
+        if need_mint:
+            minted = await loop.run_in_executor(
+                None,
+                lambda: demo_card.mint_live_idea(
+                    str(opts["product"]), str(opts["side"])
+                ),
+            )
+            if not minted.get("ok"):
+                await _reply(
+                    update,
+                    "No card sent: could not mint a fresh idea — "
+                    + ("no spot price is readable right now."
+                       if minted.get("reason") == "no_spot"
+                       else "the ideas book (IDEAS_DB) is unavailable."),
+                )
+                return
+            kwargs["idea_id"] = int(minted["idea_id"])
+
     if opts["everyone"]:
         batch = await loop.run_in_executor(
             None, lambda: demo_card.send_many(demo_card.recipients(), **kwargs)
@@ -2298,16 +2334,35 @@ async def cmd_democard(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
             await _reply(update, f"No cards sent ({reasons or 'no recipients'}).")
             return
         quoted = sum(1 for s in sent if s.get("quotes_a_size"))
+        # `all` fans out whatever card was asked for, including a `real` one,
+        # so this summary must not call a fan-out of money-spending cards a
+        # demo -- the admin reads this line to decide whether it is safe to
+        # let people tap.
+        live = bool(sent[0].get("live"))
+        origin = (
+            f" (mill idea #{sent[0]['idea_id']}"
+            + (", minted fresh at the current price)" if minted else ")")
+            if live
+            else f" (mirrors live {sent[0]['mirrored_source']} "
+                 f"#{sent[0]['mirrored_trade_id']})"
+            if sent[0].get("mirrored_trade_id") else ""
+        )
         lines = [
-            f"Demo card sent to {len(sent)} account(s) — "
-            f"{sent[0]['product']} "
-            f"{'long' if sent[0]['side'] == 'buy' else 'short'}"
-            + (f" (mirrors live {sent[0]['mirrored_source']} "
-               f"#{sent[0]['mirrored_trade_id']})"
-               if sent[0].get("mirrored_trade_id") else ""),
-            f"{quoted} of them are funded and saw a real size; "
-            f"{len(sent) - quoted} were invited to /deposit.",
+            f"{'LIVE card' if live else 'Demo card'} sent to {len(sent)} "
+            f"account(s) — {sent[0]['product']} "
+            f"{'long' if sent[0]['side'] == 'buy' else 'short'}{origin}",
         ]
+        if live:
+            lines.append(
+                f"Accept on these places a real trade. {quoted} account(s) "
+                f"are funded and saw a real size; {len(sent) - quoted} are "
+                f"unfunded and will be refused if they tap."
+            )
+        else:
+            lines.append(
+                f"{quoted} of them are funded and saw a real size; "
+                f"{len(sent) - quoted} were invited to /deposit."
+            )
         if failed:
             lines.append(
                 "Could not reach: "
@@ -2360,7 +2415,8 @@ async def cmd_democard(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         lines = [
             f"LIVE card sent to {opts['telegram_id']} — mill idea "
             f"#{result['idea_id']}, {result['product']} "
-            f"{'long' if result['side'] == 'buy' else 'short'}",
+            f"{'long' if result['side'] == 'buy' else 'short'}"
+            + (" (minted fresh at the current price)" if minted else ""),
             f"Entry ${result['entry']:,.2f} · stop ${result['stop_loss']:,.2f} "
             f"(spot ${result['spot']:,.2f})",
             "Accept on this one places a real trade. It passed the fill gate "

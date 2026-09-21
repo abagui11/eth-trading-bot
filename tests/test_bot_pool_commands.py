@@ -746,7 +746,7 @@ class LiveCardTests(unittest.TestCase):
         with patch.object(trade_ideas_bridge, "fillable_ideas", return_value=rows):
             text = bot._format_idea_scan(demo_card.scan_ideas(UID), UID)
 
-        self.assertIn("Nothing to send live yet", text)
+        self.assertIn("Nothing on the book would fill", text)
         self.assertNotIn("/democard real 30", text)
 
 
