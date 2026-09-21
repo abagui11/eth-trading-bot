@@ -130,7 +130,37 @@ LIVE_PENDING_EXPIRY_HOURS: float = 4.0
 # book allowed to touch real money; promoting anything off `control` requires
 # its pre-registered bar in EVA_VARIANTS_PREREG.md to clear first.
 EVA_VARIANTS_ENABLED = True
-EVA_LIVE_VARIANT = "control"          # the ONLY book that trades real money
+EVA_LIVE_VARIANT = "control"          # the only book whose PROMOTION bar has run
+
+# --- Live mirrors for the two leading variant books (2026-09-21) -------------
+# Operator risk decision, recorded in EVA_VARIANTS_PREREG.md (amendment
+# 2026-09-21): eva_swing_llm and eva_day trade live ALONGSIDE control, ahead of
+# the §4 bar. This is an addition, not a promotion — the paper books stay the
+# measurement instrument, the epoch is unchanged, and live results are
+# excluded from the §4 statistics. Each flag is a kill-switch: off stops the
+# mirror without touching the paper book or the experiment.
+EVA_SWING_LLM_LIVE_ENABLED = True     # mirrors entry_source == "swing_vision"
+EVA_DAY_LIVE_ENABLED = True           # mirrors entry_source == "vision_rebracket"
+                                      # m1_trigger is EXCLUDED: negative prior
+                                      # (prereg §2 H3), zero closed positions.
+# Fixed dollar risk per live variant clip, like the paper books' $10 — NOT a
+# portfolio fraction, so the live mirror stays recognisable next to its paper
+# twin. Venue contract floors can force more risk than the budget on wide
+# swing stops; the ceiling below bounds how much more before the clip is
+# skipped instead.
+LIVE_VARIANT_RISK_USD = 12.0
+LIVE_VARIANT_MAX_RISK_USD = 40.0
+# eva_day re-brackets control's own entries, so control-live + day-live can
+# stack the same idea. Allowed, but combined open risk per (product, side)
+# across the hq family (hq + hq_swing + hq_day) is capped here — chosen over
+# "skip day when control filled", which would silently censor day's live book
+# on exactly the entries it shares with control.
+LIVE_VARIANT_STACK_RISK_CAP_USD = 45.0
+LIVE_VARIANT_MAX_OPEN = 2             # per variant source
+# A live mirror is only honest if it fills near the paper book's entry. If the
+# market has already left the plan's entry by more than this, skip the mirror
+# (the paper book still opens; the divergence is logged).
+LIVE_VARIANT_MAX_CHASE_PCT = 0.003
 # Compared as a string against `closed_at`, so it can carry a time. It is set
 # to the moment the candle-window fix shipped rather than to midnight: every
 # position resolved before it — control's included — was walked against bars

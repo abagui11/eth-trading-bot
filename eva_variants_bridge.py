@@ -234,8 +234,21 @@ def performance_payload(limit: int = 20) -> dict[str, Any]:
         except Exception:
             logger.exception("variant summary failed for %s", name)
 
+    # Three-state mode since the 2026-09-21 prereg amendment: control is the
+    # promoted live book; the two mirrored variants trade real money too but
+    # are NOT promoted — the tab must say both things at once, because a live
+    # badge that reads as a verdict is how an n=9 lead becomes "the strategy".
+    mirrored = {
+        "eva_swing_llm": getattr(bot_config, "EVA_SWING_LLM_LIVE_ENABLED", False),
+        "eva_day": getattr(bot_config, "EVA_DAY_LIVE_ENABLED", False),
+    }
     for b in books:
-        b["mode"] = "live" if b["variant"] == live else "paper"
+        if b["variant"] == live:
+            b["mode"] = "live"
+        elif mirrored.get(b["variant"]):
+            b["mode"] = "live_mirror"
+        else:
+            b["mode"] = "paper"
 
     # Best paper book by mean R — the promotion candidate, *not* a
     # recommendation. Whether it has earned promotion is decided by the

@@ -177,7 +177,19 @@ def create_app() -> FastAPI:
         mill_paper = trade_ideas_bridge.volume_book_payload(limit=12)
         kalshi = kalshi_bridge.performance_payload(limit=15)
         eva_variants = eva_variants_bridge.performance_payload(limit=20)
-        live_open = data.enrich_live_trades(live_ledger.get_open_trades(source="hq"))
+        # The ICT family: control plus the two live variant mirrors (prereg
+        # amendment 2026-09-21). Shown together on Eva Trades, never blended —
+        # the per-source strip is built from live_performance.by_source.
+        _hq_family = ("hq", "hq_swing", "hq_day")
+        live_open = data.enrich_live_trades(
+            [t for s in _hq_family for t in live_ledger.get_open_trades(source=s)]
+        )
+        _family_closed = sorted(
+            (t for s in _hq_family
+             for t in live_ledger.get_closed_trades(limit=15, source=s)),
+            key=lambda t: str(t.get("closed_at") or t.get("opened_at") or ""),
+            reverse=True,
+        )[:15]
         mill_open = data.enrich_live_trades(live_ledger.get_open_trades(source="mill"))
         mill_closed = data.enrich_live_trades(
             live_ledger.get_closed_trades(limit=20, source="mill"),
@@ -198,7 +210,7 @@ def create_app() -> FastAPI:
                 "brain": get_brain_payload(),
                 "live_open": live_open,
                 "live_closed": data.enrich_live_trades(
-                    live_ledger.get_closed_trades(limit=15, source="hq"),
+                    _family_closed,
                     closed=True,
                 ),
                 "live_unrealized_usd": data.live_unrealized_usd(live_open),

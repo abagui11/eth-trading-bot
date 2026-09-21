@@ -37,6 +37,26 @@ Conventions we are choosing (ICT does not fix these)
   (equal highs / equal lows). The tolerance is a choice.
 * premium/discount = position in the current dealing range, equilibrium being
   the middle `_EQ_BAND` of it.
+
+Convention amendments, 2026-09-21 (PLAN_20260921_ROUND2 workstream A)
+---------------------------------------------------------------------
+The first 3 live days produced 580 reads with 97% bias withheld: 51% found no
+array at all, 34% found one price had never retested, and all 19 emitted
+biases hung on a single BTC H1 array. The generator was starving the schema,
+so four conventions changed — dated here because each is a choice:
+
+* zone lookback 60 -> 120 bars;
+* H1 reads also see H4 arrays and H4-swing pools, tagged `@H4` in the kind;
+* `_POOL_TOL_PCT` 15 -> 30 bps;
+* `holding` = price inside the array OR within `_RETEST_ATR_MULT` x ATR24 of
+  its nearest edge (strict containment was ours, not doctrine, and it was the
+  second-largest null source).
+
+Also fixed then: a bias is refused when its draw sits on the wrong side of
+spot (three recorded 09-18 reads carried a bullish bias drawing *down*; the
+prompt stated the rule, the programmatic path enforced it, the LLM path did
+not), and re-prints of an unchanged setup are deduplicated at write time via
+`dedup_key`, because 19 rows of one setup is one observation, not nineteen.
 """
 
 from __future__ import annotations
@@ -58,10 +78,13 @@ from patterns.swing import find_pivots
 
 logger = logging.getLogger(__name__)
 
-_POOL_TOL_PCT = 0.0015     # 15 bps: two extremes this close are "equal"
+_POOL_TOL_PCT = 0.0030     # 30 bps: two extremes this close are "equal" (was 15)
 _EQ_BAND = 0.10            # +/-10% of the range around the midpoint
 _MAX_CANDIDATES = 6
 _MAX_TOKENS = 1600
+_ZONE_LOOKBACK = 120       # bars handed to the zone detector (was 60)
+_RETEST_ATR_MULT = 0.25    # proximity that counts as a retest of an array
+_ATR_BARS = {"M15": 96, "H1": 24, "H4": 6}   # ~24h of bars per timeframe
 
 
 def timeframes() -> tuple[str, ...]:
@@ -119,19 +142,76 @@ def _location(df, price: float) -> tuple[str, float, float]:
     return ("premium" if pos > 0.5 else "discount"), lo, hi
 
 
-def _array_state(zone, price: float, last_close: float) -> str:
-    """holding | traded_through | untested, from the zone's own geometry."""
+def _atr24_pct(df, tf: str) -> float:
+    """Mean true range over ~24h of this timeframe's bars, % of last close."""
+    n = _ATR_BARS.get(tf, 24)
+    seg = df.tail(n + 1)
+    if len(seg) < 3:
+        return 0.0
+    highs = seg["high"].values
+    lows = seg["low"].values
+    closes = seg["close"].values
+    tr = [
+        max(highs[i] - lows[i],
+            abs(highs[i] - closes[i - 1]),
+            abs(lows[i] - closes[i - 1]))
+        for i in range(1, len(seg))
+    ]
+    last = float(closes[-1])
+    return (sum(tr) / len(tr)) / last * 100 if last else 0.0
+
+
+def _array_state(zone, price: float, last_close: float,
+                 atr_buffer: float = 0.0) -> str:
+    """holding | traded_through | untested, from the zone's own geometry.
+
+    2026-09-21: "holding" widened from strict containment to containment OR
+    proximity within `atr_buffer` (price units) of the nearest edge. Strict
+    containment produced an `untested` bucket covering a third of all reads —
+    price hovering one tick outside an array it had just bounced from was
+    scored as if the array were irrelevant.
+    """
     if zone.mitigated:
         return "traded_through"
     if zone.direction == "bullish" and last_close < zone.low:
         return "traded_through"
     if zone.direction == "bearish" and last_close > zone.high:
         return "traded_through"
-    # "Holding" means price has actually come back and been rejected from it;
-    # a zone price has never revisited is context, not support.
     if zone.low <= price <= zone.high:
         return "holding"
+    edge_gap = min(abs(price - zone.low), abs(price - zone.high))
+    if atr_buffer > 0 and edge_gap <= atr_buffer:
+        return "holding"
     return "untested"
+
+
+def _tf_primitives(
+    bars: list[dict],
+    product_id: str,
+    tf: str,
+    price: float,
+    *,
+    tag: str = "",
+) -> tuple[list[dict], list[dict]]:
+    """(repelling, attracting) from one timeframe's bars.
+
+    `tag` marks candidates merged in from a higher timeframe (e.g. "@H4") so
+    the model and the stored read both say where a level came from.
+    """
+    df = research.to_dataframe(bars)
+    atr_buffer = _atr24_pct(df, tf) / 100 * price * _RETEST_ATR_MULT
+    zones = detect_htf_zones(bars, lookback=_ZONE_LOOKBACK, product_id=product_id)
+    repelling = [
+        {"kind": f"{z.zone_type}{tag}", "side": z.direction,
+         "lo": z.low, "hi": z.high,
+         "state": _array_state(z, price, price, atr_buffer)}
+        for z in zones
+    ]
+    attracting = [
+        {**a, "kind": f"{a['kind']}{tag}"}
+        for a in _liquidity_pools(df, price) + _open_gaps(df, price)
+    ]
+    return repelling, attracting
 
 
 def build_candidates(
@@ -140,7 +220,9 @@ def build_candidates(
     """{(product, timeframe): {attracting: [...], repelling: [...], ...}}.
 
     Every candidate comes from a detector, so every price the model can pick
-    is one the code found.
+    is one the code found. Since 2026-09-21, H1 reads also see the H4
+    timeframe's arrays and pools (tagged "@H4") — the first weekend found one
+    usable H1 array in three days, which starved the whole experiment.
     """
     out: dict[tuple[str, str], dict[str, Any]] = {}
     for product_id, by_tf in bars_by_product.items():
@@ -151,17 +233,19 @@ def build_candidates(
             try:
                 df = research.to_dataframe(bars)
                 price = float(df["close"].iloc[-1])
-                last_close = price
-                zones = detect_htf_zones(bars, product_id=product_id)
-                repelling = [
-                    {"kind": z.zone_type, "side": z.direction,
-                     "lo": z.low, "hi": z.high,
-                     "state": _array_state(z, price, last_close)}
-                    for z in zones
-                ]
+                repelling, attracting = _tf_primitives(
+                    bars, product_id, tf, price
+                )
+                if tf == "H1":
+                    h4_bars = by_tf.get("H4") or []
+                    if len(h4_bars) >= 40:
+                        rep4, att4 = _tf_primitives(
+                            h4_bars, product_id, "H4", price, tag="@H4"
+                        )
+                        repelling += rep4
+                        attracting += att4
                 # Nearest-first: a distant array is not the operative one.
                 repelling.sort(key=lambda z: abs((z["lo"] + z["hi"]) / 2 - price))
-                attracting = _liquidity_pools(df, price) + _open_gaps(df, price)
                 attracting.sort(key=lambda a: abs((a["lo"] + a["hi"]) / 2 - price))
                 location, range_lo, range_hi = _location(df, price)
             except Exception:
@@ -272,6 +356,7 @@ def assemble_read(
     if bias not in ("bullish", "bearish"):
         bias = None
 
+    price = candidate["price"]
     dropped = None
     if bias and not (repelling and attracting):
         dropped, bias = "bias without both anchors", None
@@ -279,12 +364,20 @@ def assemble_read(
         dropped, bias = f"array state={repelling['state']}", None
     elif bias and repelling["side"] != bias:
         dropped, bias = "array side opposes the bias", None
+    elif bias:
+        # 2026-09-21: the missing half of the direction rule. The prompt says
+        # a bullish bias needs its draw above price; the programmatic selector
+        # enforces it; this path did not, and three recorded reads carried a
+        # bullish bias drawing *down*. Enforced in code, not trusted to the
+        # prompt — same policy as every other rule here.
+        draw_mid = (attracting["lo"] + attracting["hi"]) / 2
+        if (bias == "bullish") != (draw_mid > price):
+            dropped, bias = "draw on wrong side of price", None
     if dropped:
         logger.info(
             "Conditional bias dropped for %s %s: %s", product_id, tf, dropped
         )
 
-    price = candidate["price"]
     invalidation = _invalidation(repelling, bias)
     # Computed here, never asked of the model: is the thesis already dead at
     # publish time? This is the stale-invalidation metric.
@@ -294,6 +387,15 @@ def assemble_read(
              or (bias == "bearish" and price > invalidation))
     )
     return {
+        # One setup, one row: a re-print with the same anchors is the same
+        # observation, and the first weekend counted one setup 19 times.
+        "dedup_key": "|".join(
+            str(x) for x in (
+                product_id, tf, bias,
+                (repelling or {}).get("lo"), (repelling or {}).get("hi"),
+                (attracting or {}).get("lo"), (attracting or {}).get("hi"),
+            )
+        ),
         "product_id": product_id,
         "timeframe": tf,
         "bias": bias,
@@ -403,16 +505,27 @@ def run_conditional_cycle(
         choice = choices.get(key) or _programmatic_choice(candidate)
         reads.append(assemble_read(product_id, tf, candidate, choice))
 
-    store.insert_reads(cycle_ts, reads, source=source)
+    # Write-time dedup: an unchanged setup is not a new observation. A read
+    # that resolves changes its own key (invalidation flips the array to
+    # traded_through, which nulls the bias), so resolution re-opens the slot.
+    last_keys = store.latest_read_keys()
+    fresh = [
+        r for r in reads
+        if last_keys.get((r["product_id"], r["timeframe"])) != r["dedup_key"]
+    ]
+    skipped = len(reads) - len(fresh)
+    store.insert_reads(cycle_ts, fresh, source=source)
     logger.info(
-        "Conditional cycle %s: %s reads (%s with a bias, %s stale) source=%s",
+        "Conditional cycle %s: %s reads (%s with a bias, %s stale, "
+        "%s unchanged re-prints skipped) source=%s",
         cycle_ts,
-        len(reads),
-        sum(1 for r in reads if r["bias"]),
-        sum(1 for r in reads if r["stale_invalidation"]),
+        len(fresh),
+        sum(1 for r in fresh if r["bias"]),
+        sum(1 for r in fresh if r["stale_invalidation"]),
+        skipped,
         source,
     )
-    return {"cycle_ts": cycle_ts, "reads": reads, "source": source}
+    return {"cycle_ts": cycle_ts, "reads": fresh, "source": source}
 
 
 if __name__ == "__main__":

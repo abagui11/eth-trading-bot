@@ -464,16 +464,38 @@
     </section>
     <section class="card" id="live-book-card">
       <h2>Eva live book (Coinbase US futures)</h2>
-      <p class="sub" style="margin-bottom:10px">Mill clips live on the Trade mill tab — they are never mixed in here.</p>
+      <p class="sub" style="margin-bottom:10px">Mill clips live on the Trade mill tab — they are never mixed in here.
+        Three ICT books trade this sleeve since 2026-09-21: control, plus live mirrors of the
+        swing and day paper experiments (an operator risk decision recorded in the prereg —
+        <strong>not</strong> a promotion; determinations still land at n=60 on the paper books).</p>
       {% set hq_live = live_performance.by_source.get('hq') %}
+      {% set swing_live = live_performance.by_source.get('hq_swing') %}
+      {% set day_live = live_performance.by_source.get('hq_day') %}
+      <div class="metrics" style="margin-bottom:10px">
+        {% for label, s in [('Control (HQ)', hq_live), ('Swing mirror', swing_live), ('Day mirror', day_live)] %}
+        <div class="metric">
+          <div class="label">{{ label }}</div>
+          <div class="value {{ 'pos' if s and s.pnl_usd >= 0 else ('neg' if s else '') }}">
+            {% if s %}{{ "%+.2f"|format(s.pnl_usd) }}{% else %}no fills{% endif %}
+          </div>
+          {% if s %}<div class="sub">{{ s.closed }} closed · {{ s.open }} open{% if s.win_rate is not none %} · {{ (s.win_rate * 100)|round|int }}% win{% endif %}</div>{% endif %}
+        </div>
+        {% endfor %}
+      </div>
+      {% set family_pnl = (hq_live.pnl_usd if hq_live else 0)
+                        + (swing_live.pnl_usd if swing_live else 0)
+                        + (day_live.pnl_usd if day_live else 0) %}
+      {% set family_banked = (hq_live.banked_open_usd if hq_live else 0)
+                           + (swing_live.banked_open_usd if swing_live else 0)
+                           + (day_live.banked_open_usd if day_live else 0) %}
       <div class="metrics" style="margin-bottom:10px">
         <div class="metric">
-          <div class="label">Realized P&amp;L</div>
-          <div class="value {{ 'pos' if hq_live and hq_live.pnl_usd >= 0 else ('neg' if hq_live else '') }}">
-            {% if hq_live %}{{ "%+.2f"|format(hq_live.pnl_usd) }}{% else %}no fills{% endif %}
+          <div class="label">Combined realized (3 books)</div>
+          <div class="value {{ 'pos' if family_pnl >= 0 else 'neg' }}">
+            {% if hq_live or swing_live or day_live %}{{ "%+.2f"|format(family_pnl) }}{% else %}no fills{% endif %}
           </div>
-          {% if hq_live and hq_live.banked_open_usd %}
-          <div class="sub">incl. {{ "%+.2f"|format(hq_live.banked_open_usd) }} scaled out of open trades</div>
+          {% if family_banked %}
+          <div class="sub">incl. {{ "%+.2f"|format(family_banked) }} scaled out of open trades</div>
           {% endif %}
         </div>
         <div class="metric">
@@ -1206,7 +1228,13 @@
                   <div class="kalshi-bot-name">{{ b.label }}</div>
                   {% if b.blurb %}<div class="kalshi-bot-blurb">{{ b.blurb }}</div>{% endif %}
                 </td>
-                <td><span class="badge {{ 'badge-good' if b.mode == 'live' else 'badge-none' }}">{{ b.mode | upper }}</span></td>
+                <td>
+                  {% if b.mode == 'live_mirror' %}
+                  <span class="badge badge-good" title="Trades real money as a live mirror of this paper book (operator decision, 2026-09-21). NOT a promotion — the paper book stays the experiment and the n=60 bar decides.">LIVE*</span>
+                  {% else %}
+                  <span class="badge {{ 'badge-good' if b.mode == 'live' else 'badge-none' }}">{{ b.mode | upper }}</span>
+                  {% endif %}
+                </td>
                 <td>{{ b.n_closed }}{% if b.n_open %} (+{{ b.n_open }} open){% endif %}</td>
                 <td>{% if b.win_rate is not none %}{{ (b.win_rate * 100)|round|int }}%{% else %}—{% endif %}</td>
                 <td class="{{ 'pos' if b.mean_r is not none and b.mean_r >= 0 else 'neg' }}">{% if b.mean_r is not none %}{{ "%+.3f"|format(b.mean_r) }}{% else %}—{% endif %}</td>

@@ -50,6 +50,32 @@ experiment must test, not a fact it may assume.
 
 ---
 
+**Amendment 2026-09-21 — live capital extended to `eva_swing_llm` and
+`eva_day`, ahead of the §4 bar. An operator risk decision, recorded as such.**
+
+- **What changed:** both books now mirror their qualifying opens onto the live
+  sleeve (`live_trades` sources `hq_swing` / `hq_day`), at fixed
+  `LIVE_VARIANT_RISK_USD` per clip, behind per-book kill-switches
+  (`EVA_SWING_LLM_LIVE_ENABLED`, `EVA_DAY_LIVE_ENABLED`). `eva_day` mirrors
+  its `vision_rebracket` source only — `m1_trigger` keeps its §2 negative
+  prior and stays paper-only inside the same book.
+- **What did NOT change:** `EVA_LIVE_VARIANT` remains `control`; the §4 bar
+  still governs promotion; the epoch is unmoved; the paper books remain the
+  measurement instrument and are written before, and independently of, the
+  mirror. **Live results are excluded from the §4 statistics.**
+- **Why, honestly:** the books led at n=9 apiece (+3.05R / +3.28R), which is
+  inside one standard error of zero and proves nothing — recorded here as
+  context, not justification. The decision is a bet on better P&L while the
+  experiment runs, with bounded risk: fixed clips, a family stacking cap
+  (`LIVE_VARIANT_STACK_RISK_CAP_USD` — day re-brackets control's own entries,
+  so one idea can be live twice), a pooled family daily-loss halt, and a
+  chase guard so a mirror that cannot fill near the paper entry does not fill
+  at all.
+- **Exit, stated in advance:** if a mirrored book fails §4 at n=60, its
+  mirror shuts off and the live P&L it accumulated is reported in the
+  changelog as the cost of running ahead of the evidence — not netted away,
+  not re-based.
+
 ## 1. Books
 
 | book | mode | writes | new LLM cost |

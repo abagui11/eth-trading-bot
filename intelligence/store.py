@@ -54,6 +54,7 @@ CREATE TABLE IF NOT EXISTS intel_reads (
     source TEXT NOT NULL DEFAULT 'llm',
     stale_invalidation INTEGER NOT NULL DEFAULT 0,
     dropped_reason TEXT,
+    dedup_key TEXT,
     created_at TEXT NOT NULL
 );
 
@@ -188,6 +189,9 @@ def _ensure_stance_columns(conn: sqlite3.Connection) -> None:
     for name in ("det_stance", "llm_stance", "override_kind", "override_reason"):
         if name not in cols:
             conn.execute(f"ALTER TABLE intel_stances ADD COLUMN {name} TEXT")
+    read_cols = {row[1] for row in conn.execute("PRAGMA table_info(intel_reads)")}
+    if read_cols and "dedup_key" not in read_cols:
+        conn.execute("ALTER TABLE intel_reads ADD COLUMN dedup_key TEXT")
 
 
 def init_db() -> None:
@@ -300,8 +304,24 @@ _READ_FIELDS = (
     "attracting_hi", "repelling_kind", "repelling_side", "repelling_lo",
     "repelling_hi", "repelling_state", "location", "invalidation_price",
     "invalidation_trigger", "spot", "rationale", "stale_invalidation",
-    "dropped_reason",
+    "dropped_reason", "dedup_key",
 )
+
+
+def latest_read_keys() -> dict[tuple[str, str], str | None]:
+    """{(product, timeframe): dedup_key of the newest stored read}."""
+    init_db()
+    with _connect() as conn:
+        rows = conn.execute(
+            """
+            SELECT product_id, timeframe, dedup_key FROM intel_reads
+            WHERE id IN (
+                SELECT MAX(id) FROM intel_reads GROUP BY product_id, timeframe
+            )
+            """
+        ).fetchall()
+    return {(str(r["product_id"]), str(r["timeframe"])): r["dedup_key"]
+            for r in rows}
 
 
 def insert_reads(

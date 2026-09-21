@@ -865,14 +865,21 @@ def _realized_pnl_today(source: str) -> float:
     return total
 
 
+# The ICT family shares one sleeve and one daily-loss budget: control plus the
+# two live variant mirrors. Pooling the halt is deliberate — three books each
+# allowed a private LIVE_DAILY_LOSS_LIMIT_USD would triple the sleeve's worst
+# day without any single book tripping.
+_HQ_FAMILY_SOURCES = ("hq", "hq_swing", "hq_day")
+
+
 def _check_daily_loss(source: str) -> bool:
     """True when the sleeve may trade; halts HQ when the day is blown."""
-    limit = (
-        bot_config.LIVE_DAILY_LOSS_LIMIT_USD
-        if source == "hq"
-        else bot_config.LIVE_MILL_DAILY_LOSS_LIMIT_USD
-    )
-    pnl = _realized_pnl_today(source)
+    if source in _HQ_FAMILY_SOURCES:
+        limit = bot_config.LIVE_DAILY_LOSS_LIMIT_USD
+        pnl = sum(_realized_pnl_today(s) for s in _HQ_FAMILY_SOURCES)
+    else:
+        limit = bot_config.LIVE_MILL_DAILY_LOSS_LIMIT_USD
+        pnl = _realized_pnl_today(source)
     if pnl <= -limit:
         halt_live(f"daily_loss:{source}:{pnl:.2f}")
         return False
@@ -882,6 +889,62 @@ def _check_daily_loss(source: str) -> bool:
 # ---------------------------------------------------------------------------
 # Sizing (live-only — paper caps untouched)
 # ---------------------------------------------------------------------------
+
+def _variant_clip(
+    product_id: str,
+    entry: float,
+    stop_loss: float,
+) -> tuple[float, float, float] | None:
+    """(qty, notional, actual_risk) for a fixed-risk variant clip.
+
+    Sized like the paper books: LIVE_VARIANT_RISK_USD ÷ stop distance. The
+    venue fills whole contracts, so qty rounds DOWN to the contract floor's
+    multiple; when even one contract carries more risk than the budget (wide
+    swing stops), the single contract is taken up to
+    LIVE_VARIANT_MAX_RISK_USD and skipped beyond it — the overshoot is a
+    known, bounded cost of mirroring on a contract venue, not a silent one.
+    """
+    floor = bot_config.LIVE_PRODUCT_QTY_FLOORS.get(product_id)
+    if not floor or floor <= 0 or entry <= 0:
+        return None
+    risk_per_unit = abs(entry - stop_loss)
+    if risk_per_unit <= 0:
+        return None
+    raw_qty = bot_config.LIVE_VARIANT_RISK_USD / risk_per_unit
+    qty = max(int(raw_qty / floor), 0) * floor
+    if qty <= 0:
+        qty = floor  # one contract minimum...
+        if qty * risk_per_unit > bot_config.LIVE_VARIANT_MAX_RISK_USD:
+            logger.info(
+                "Live variant skip: one %s contract risks $%.2f > cap $%.2f",
+                product_id, qty * risk_per_unit,
+                bot_config.LIVE_VARIANT_MAX_RISK_USD,
+            )
+            return None
+    qty = round(qty, 6)
+    return qty, qty * entry, qty * risk_per_unit
+
+
+def _hq_family_open_risk(product_id: str, side: str) -> float:
+    """Open dollar risk on one (product, side) across the whole ICT family.
+
+    The stacking cap: eva_day re-brackets control's entries, so without this
+    the same idea can be live twice (three times with swing agreeing) and the
+    sleeve's concentration is invisible to any single book's own caps.
+    """
+    total = 0.0
+    for src in _HQ_FAMILY_SOURCES:
+        for t in live_ledger.get_open_trades(source=src):
+            if str(t.get("product_id") or "") != product_id:
+                continue
+            if str(t.get("side") or "") != side:
+                continue
+            stop = t.get("stop_loss") or t.get("initial_stop_loss")
+            if not stop:
+                continue
+            total += abs(float(t["entry"]) - float(stop)) * _qty_open(t)
+    return total
+
 
 def _mill_clip(product_id: str, price: float) -> tuple[float, float] | None:
     """Always size mill clips to exactly one CDE nano contract.
@@ -1213,6 +1276,42 @@ def _execute(
         open_trades = live_ledger.get_open_trades(source="hq")
         if ob_ref and any((t.get("notes") or "") == f"ob:{ob_ref}" for t in open_trades):
             logger.info("Live skip: already live on OB %s", ob_ref)
+            return None
+    elif source in ("hq_swing", "hq_day"):
+        # Live mirrors of the two leading variant paper books (prereg
+        # amendment 2026-09-21). Fixed-risk clips, own open cap, and the
+        # family stacking cap — no vault admission (that is control's
+        # allocator) and no mill sleeve accounting.
+        open_trades = live_ledger.get_open_trades(source=source)
+        if len(open_trades) >= bot_config.LIVE_VARIANT_MAX_OPEN:
+            logger.info("Live skip: %s at max open (%d)", source, len(open_trades))
+            return None
+        clip = _variant_clip(product_id, entry, float(suggestion.stop_loss))
+        if clip is None:
+            return None
+        qty, notional, clip_risk = clip
+        stacked = _hq_family_open_risk(product_id, side)
+        if stacked + clip_risk > bot_config.LIVE_VARIANT_STACK_RISK_CAP_USD:
+            logger.info(
+                "Live skip: %s stack cap — $%.2f open + $%.2f new > $%.2f "
+                "on %s %s", source, stacked, clip_risk,
+                bot_config.LIVE_VARIANT_STACK_RISK_CAP_USD, product_id, side,
+            )
+            return None
+        # The whole ICT family shares the HQ margin sleeve; variants respect
+        # the same leverage ceiling control's vault admission enforces.
+        family_notional = sum(
+            _qty_open(t) * float(t["entry"])
+            for s in _HQ_FAMILY_SOURCES
+            for t in live_ledger.get_open_trades(source=s)
+        )
+        sleeve = bot_config.LIVE_HQ_EQUITY_USD
+        if family_notional + notional > sleeve * bot_config.LIVE_MAX_LEVERAGE:
+            logger.info(
+                "Live skip: %s exposure %.0f + %.0f exceeds %.0f×%.1fx",
+                source, family_notional, notional, sleeve,
+                bot_config.LIVE_MAX_LEVERAGE,
+            )
             return None
     else:
         open_trades = live_ledger.get_open_trades(source=source)

@@ -142,6 +142,164 @@ class TestNullRule(unittest.TestCase):
         self.assertTrue(read["stale_invalidation"])
 
 
+class TestDrawSideRule(unittest.TestCase):
+    """2026-09-21 fix: a bias whose draw sits on the wrong side is refused.
+
+    Fixture prices are the three recorded 09-18 reads that motivated it:
+    bullish bias on the 80,471-81,128 array with the draw at 78,124 — a
+    bullish read drawing DOWN, which the LLM path accepted and stored.
+    """
+
+    def _sept18_candidate(self) -> dict:
+        return {
+            "price": 80800.0,
+            "location": "premium",
+            "range_lo": 78000.0,
+            "range_hi": 82000.0,
+            "repelling": [
+                {"kind": "order_block", "side": "bullish",
+                 "lo": 80471.0, "hi": 81128.0, "state": "holding"}
+            ],
+            "attracting": [
+                {"kind": "sellside_pool", "lo": 78124.0, "hi": 78200.0,
+                 "touches": 2}
+            ],
+        }
+
+    def test_the_recorded_bad_read_is_now_refused(self) -> None:
+        read = conditional.assemble_read(
+            "BTC-USD", "H1", self._sept18_candidate(),
+            {"repelling_id": 0, "attracting_id": 0, "bias": "bullish"},
+        )
+        self.assertIsNone(read["bias"])
+        self.assertIn("wrong side", read["dropped_reason"])
+
+    def test_bearish_draw_above_price_is_refused(self) -> None:
+        candidate = self._sept18_candidate()
+        candidate["repelling"][0]["side"] = "bearish"
+        candidate["attracting"][0] = {
+            "kind": "buyside_pool", "lo": 81500.0, "hi": 81600.0, "touches": 2}
+        read = conditional.assemble_read(
+            "BTC-USD", "H1", candidate,
+            {"repelling_id": 0, "attracting_id": 0, "bias": "bearish"},
+        )
+        self.assertIsNone(read["bias"])
+        self.assertIn("wrong side", read["dropped_reason"])
+
+    def test_correctly_oriented_bias_still_passes(self) -> None:
+        candidate = self._sept18_candidate()
+        candidate["attracting"][0] = {
+            "kind": "buyside_pool", "lo": 81500.0, "hi": 81600.0, "touches": 2}
+        read = conditional.assemble_read(
+            "BTC-USD", "H1", candidate,
+            {"repelling_id": 0, "attracting_id": 0, "bias": "bullish"},
+        )
+        self.assertEqual(read["bias"], "bullish")
+        self.assertIsNone(read["dropped_reason"])
+
+
+class TestDedup(TempDbTestCase):
+    def _read(self, bias="bullish", lo=99.0):
+        candidate = _candidate()
+        candidate["repelling"][0]["lo"] = lo
+        return conditional.assemble_read(
+            "BTC-USD", "H4", candidate,
+            {"repelling_id": 0, "attracting_id": 0, "bias": bias},
+        )
+
+    def test_unchanged_setup_is_not_reinserted(self) -> None:
+        bars = _bars([100 + (4 if i % 2 else 0) for i in range(120)])
+        with mock.patch("anthropic.Anthropic") as cls:
+            cls.return_value.messages.create.side_effect = RuntimeError("down")
+            conditional.run_conditional_cycle(
+                "2026-09-21T15:00:00Z", {"BTC-USD": {"H4": bars, "H1": bars}})
+            first = len(store.read_history())
+            conditional.run_conditional_cycle(
+                "2026-09-21T15:30:00Z", {"BTC-USD": {"H4": bars, "H1": bars}})
+            second = len(store.read_history())
+        self.assertGreater(first, 0)
+        self.assertEqual(first, second)   # identical tape -> no new rows
+
+    def test_key_changes_when_an_anchor_moves(self) -> None:
+        a = self._read(lo=99.0)
+        b = self._read(lo=98.5)
+        self.assertNotEqual(a["dedup_key"], b["dedup_key"])
+
+    def test_key_changes_when_bias_resolves_away(self) -> None:
+        """Invalidation flips state -> bias nulls -> key changes -> slot reopens."""
+        a = self._read(bias="bullish")
+        candidate = _candidate(state="traded_through")
+        b = conditional.assemble_read(
+            "BTC-USD", "H4", candidate,
+            {"repelling_id": 0, "attracting_id": 0, "bias": "bullish"},
+        )
+        self.assertIsNone(b["bias"])
+        self.assertNotEqual(a["dedup_key"], b["dedup_key"])
+
+
+class TestWidenedCandidates(unittest.TestCase):
+    def test_h1_sees_h4_arrays_tagged(self) -> None:
+        """The merge + tag logic, with the detector mocked.
+
+        Synthetic sawtooths do not produce MSB structure, so driving the real
+        detector here would test candle geometry rather than the merge. The
+        detector has its own suite (test_htf_structure); what must hold HERE
+        is that an H4-detected zone reaches the H1 candidate list tagged, and
+        an H1 zone does not get the tag.
+        """
+        class _Zone:
+            zone_type, direction = "order_block", "bullish"
+            mitigated = False
+            def __init__(self, lo, hi):
+                self.low, self.hi = lo, hi
+                self.high = hi
+
+        calls = []
+
+        def fake_zones(bars, lookback=60, product_id=None, **kw):
+            calls.append(len(bars))
+            # 60 bars -> the H1 call; 80 -> the H4 call (distinguished below)
+            return [_Zone(99.0, 100.0)] if len(bars) == 60 else [_Zone(95.0, 96.0)]
+
+        h1_bars = _bars([100.0] * 60)
+        h4_bars = _bars([100.0] * 80)
+        with mock.patch.object(conditional, "detect_htf_zones",
+                               side_effect=fake_zones):
+            out = conditional.build_candidates(
+                {"BTC-USD": {"H4": h4_bars, "H1": h1_bars}}
+            )
+        h1 = out[("BTC-USD", "H1")]
+        kinds = [z["kind"] for z in h1["repelling"]]
+        self.assertIn("order_block", kinds)          # native H1, untagged
+        self.assertIn("order_block@H4", kinds)       # merged, tagged
+        h4 = out[("BTC-USD", "H4")]
+        self.assertTrue(
+            all(not z["kind"].endswith("@H4") for z in h4["repelling"]),
+            "the H4 read's own candidates must not carry the merge tag",
+        )
+        # lookback widened to 120 on every detector call
+        with mock.patch.object(conditional, "detect_htf_zones",
+                               side_effect=fake_zones) as m:
+            conditional.build_candidates({"BTC-USD": {"H4": h4_bars,
+                                                      "H1": h1_bars}})
+            for call in m.call_args_list:
+                self.assertEqual(call.kwargs.get("lookback"), 120)
+
+    def test_holding_by_proximity(self) -> None:
+        class _Z:
+            zone_type, direction = "order_block", "bullish"
+            low, high, mitigated = 99.0, 100.0, False
+
+        # price 0.1 above the zone with a buffer of 0.2 -> holding now
+        self.assertEqual(
+            conditional._array_state(_Z(), 100.1, 100.1, atr_buffer=0.2),
+            "holding")
+        # same geometry with no buffer -> the old strict answer
+        self.assertEqual(
+            conditional._array_state(_Z(), 100.1, 100.1, atr_buffer=0.0),
+            "untested")
+
+
 class TestProgrammaticSelection(unittest.TestCase):
     def test_picks_the_nearest_holding_array(self) -> None:
         choice = conditional._programmatic_choice(_candidate())

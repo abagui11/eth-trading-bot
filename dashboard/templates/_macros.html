@@ -37,6 +37,11 @@
       <span class="trade-badges">
         {{ tip_badge(t.product_label or 'ETH', 'badge-none') }}
         {{ tip_badge(t.side, 'badge-good' if t.side == 'long' else 'badge-bad') }}
+        {%- if t.source == 'hq_swing' %}
+        {{ tip_badge('swing', 'badge-none') }}
+        {%- elif t.source == 'hq_day' %}
+        {{ tip_badge('day', 'badge-none') }}
+        {%- endif %}
         {% if mode == 'open' %}
         {{ tip_badge('LIVE', 'badge-live') }}
         {% elif t.close_reason %}

@@ -294,7 +294,90 @@ def open_position(
         "variant %s opened %s %s @ %.2f stop %.2f tps %s (%s)",
         variant, side, product_id, entry, stop_loss, tps, entry_source,
     )
+    _maybe_mirror_live(
+        variant=variant, entry_source=entry_source, position_id=pid,
+        product_id=product_id, side=side, entry=entry, stop_loss=stop_loss,
+        take_profits=tps, rationale=rationale, cycle_id=cycle_id,
+    )
     return pid
+
+
+# Which (book, entry_source) pairs may mirror live, and under which flag.
+# entry_source is part of the key on purpose: eva_day's m1_trigger arm has an
+# explicit negative prior in the prereg and zero closed positions — it stays
+# paper-only inside the same book.
+_LIVE_MIRRORS: dict[tuple[str, str], tuple[str, str]] = {
+    ("eva_swing_llm", "swing_vision"): ("EVA_SWING_LLM_LIVE_ENABLED", "hq_swing"),
+    ("eva_day", "vision_rebracket"): ("EVA_DAY_LIVE_ENABLED", "hq_day"),
+}
+
+
+def _maybe_mirror_live(
+    *,
+    variant: str,
+    entry_source: str,
+    position_id: int,
+    product_id: str,
+    side: str,
+    entry: float,
+    stop_loss: float,
+    take_profits: list[float],
+    rationale: str | None,
+    cycle_id: str | None,
+) -> None:
+    """Mirror a qualifying paper open onto the live sleeve. Fully fail-soft.
+
+    Prereg amendment 2026-09-21: an operator risk decision, not a promotion.
+    The paper book this row belongs to is the experiment and has already been
+    written by the time this runs — nothing in here can affect it, and any
+    failure logs and returns. The chase guard keeps the mirror honest: a fill
+    far from the paper entry would be a different trade wearing the same name.
+    """
+    flag_name_tag = _LIVE_MIRRORS.get((variant, entry_source))
+    if not flag_name_tag:
+        return
+    flag_name, source_tag = flag_name_tag
+    if not getattr(bot_config, flag_name, False):
+        return
+    try:
+        import execute
+        import research
+        from models import Suggestion
+
+        spot = float(research.get_spot_price(product_id=product_id))
+        chase = abs(spot - entry) / entry if entry else 1.0
+        max_chase = float(getattr(bot_config, "LIVE_VARIANT_MAX_CHASE_PCT", 0.003))
+        if chase > max_chase:
+            logger.info(
+                "%s live mirror skipped for #%s: spot %.2f is %.2f%% from "
+                "entry %.2f (cap %.2f%%) — paper opens, live does not",
+                variant, position_id, spot, chase * 100, entry, max_chase * 100,
+            )
+            return
+        suggestion = Suggestion(
+            action="spot_buy" if side == "long" else "spot_sell",
+            size=0.0,
+            entry=entry,
+            stop_loss=stop_loss,
+            take_profits=list(take_profits),
+            rationale=(rationale or f"{variant} live mirror")[:400],
+            product_id=product_id,
+        )
+        result = execute.maybe_execute_live(
+            suggestion,
+            spot,
+            cycle_id=f"var_{variant}_{position_id}",
+            source=source_tag,
+        )
+        logger.info(
+            "%s live mirror for #%s -> %s", variant, position_id,
+            "placed" if result else "skipped by execute gates",
+        )
+    except Exception:
+        logger.exception(
+            "%s live mirror failed for #%s — paper book unaffected",
+            variant, position_id,
+        )
 
 
 # --------------------------------------------------------------- resolution
