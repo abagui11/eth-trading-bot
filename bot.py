@@ -25,6 +25,8 @@ import chat
 import config
 import critic
 import ledger
+import menu
+import moonpay
 import notify
 import paper
 import pool
@@ -213,23 +215,18 @@ def _pool_intent_reply(result: dict, *, risk_label: str = "risk") -> str:
         risk = float(result["risk_usd"])
         pct = float(bot_config.POOL_RISK_PCT) * 100
         base = (
-            "your allocation to this strategy"
+            "your deployment to this strategy"
             if result.get("strategy") else "your available cash"
         )
         return (
-            f"You're in if it fills.\n\n"
-            f"Reserved: ${risk:,.2f} at risk ({pct:.1f}% of {base}). "
-            "That is the most this trade can cost you if stopped out — not your "
-            "full balance. Same fill price as the house; exits are automatic.\n\n"
-            "I'll DM you either way — when it fills, or when it's pulled and "
-            "your reserve comes back. A card can rest a couple of hours while "
-            "the setup is still in play, so no news isn't bad news. "
-            "/portfolio any time."
+            f"You're in — resting limit joined.\n\n"
+            f"Sized at ${risk:,.2f} risk ({pct:.1f}% of {base}). "
+            "I'll DM you the moment it fills. Tap Portfolio any time."
         )
     reason = result.get("reason")
     if reason == "already_recorded":
         if result.get("status") == "pooled":
-            return "You're already in this one — /portfolio shows your share."
+            return "You're already in this one — Portfolio shows your share."
         return "Already recorded — you're on this order."
     if reason == "frozen":
         return (
@@ -239,13 +236,18 @@ def _pool_intent_reply(result: dict, *, risk_label: str = "risk") -> str:
     if reason == "below_min_equity":
         return (
             f"Pool trades need at least ${float(result.get('minimum_usd') or 0):,.0f} "
-            "cash. /deposit to top up."
+            "cash. Tap Fund to top up."
+        )
+    if reason == "below_min_accept":
+        return (
+            f"Deploy at least ${float(result.get('minimum_usd') or 0):,.0f} into "
+            "this strategy before Accepting — tap Strategies."
         )
     if reason in ("not_funded", "no_available_cash"):
-        return "No available cash for this one — /portfolio shows what's reserved."
+        return "No available cash for this one — Portfolio shows what's reserved."
     if reason == "no_allocation":
         return (
-            "You haven't allocated capital to this strategy yet — /subscribe "
+            "You haven't deployed capital to this strategy yet — tap Strategies "
             "to deploy, then Accept the next card."
         )
     return f"Could not join ({reason})."
@@ -253,13 +255,7 @@ def _pool_intent_reply(result: dict, *, risk_label: str = "risk") -> str:
 
 def _deploy_prompt_reply(strategy_key: str, user_id: int) -> tuple[str, object]:
     """(text, keyboard) asking the tester to allocate before accepting."""
-    p = pool.portfolio(user_id)
-    if not p.get("ok"):
-        p = {"cash_usd": 0.0, "available_usd": 0.0}
-    return (
-        strategy_catalog.deploy_prompt(strategy_key, p),
-        telegram_ui.alloc_keyboard(strategy_key),
-    )
+    return menu.strategy_detail(user_id, strategy_key)
 
 
 def _pool_hq_accept(offer_id: str, user_id: int) -> tuple[str, object | None]:
@@ -285,6 +281,19 @@ def _pool_hq_accept(offer_id: str, user_id: int) -> tuple[str, object | None]:
     )
     if result.get("reason") == "no_allocation":
         return _deploy_prompt_reply(strategy_catalog.ICT, user_id)
+    if result.get("ok"):
+        entry = float(row.get("entry") or offer.get("entry") or 0)
+        stop = row.get("stop_loss") or offer.get("stop_loss")
+        side = str(row.get("side") or offer.get("side") or "long")
+        return telegram_ui.format_fill_celebration(
+            strategy_label="ICT Trades",
+            side=side,
+            entry=entry,
+            stop=float(stop) if stop is not None else None,
+            targets=None,
+            risk_usd=float(result["risk_usd"]),
+            resting=True,
+        ), None
     return _pool_intent_reply(result), None
 
 
@@ -404,12 +413,15 @@ def _pool_fill_reply(recorded: dict, verdict: dict, user_id: int) -> str:
         return _pool_intent_reply(recorded)
 
     notional = float(stake["qty"]) * fill if fill else float(stake["cost_usd"])
-    return (
-        f"You're in — filled at ${fill:,.2f}.\n\n"
-        f"Your share: ${notional:,.2f} notional, "
-        f"${float(stake['risk_usd']):,.2f} at risk. Same fill price as the "
-        "house. Exits are automatic — I'll DM you when it closes. "
-        "/portfolio any time."
+    return telegram_ui.format_fill_celebration(
+        strategy_label="Trade Mill",
+        side=str((verdict.get("result") or {}).get("side") or "long"),
+        entry=fill or float((verdict.get("revalidation") or {}).get("entry") or 0),
+        stop=(verdict.get("revalidation") or {}).get("stop_loss"),
+        targets=(verdict.get("revalidation") or {}).get("take_profits"),
+        risk_usd=float(stake["risk_usd"]),
+        notional_usd=notional,
+        resting=False,
     )
 
 
@@ -573,16 +585,13 @@ async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         return
 
     if bot_config.POOL_ENABLED and pool.is_approved(user.id):
-        p = pool.portfolio(user.id)
-        lines = [telegram_ui.POOL_WELCOME_MESSAGE]
-        if p.get("ok") and float(p.get("cash_usd") or 0) > 0:
-            lines.append("")
-            lines.append(telegram_ui.format_portfolio(p))
+        bal = pool.wallet_balance(user.id)
         await _reply(
             update,
-            "\n".join(lines)[:4096],
-            markdown=True,
-            reply_markup=telegram_ui.pool_account_keyboard(),
+            telegram_ui.format_pool_welcome(
+                wallet_usd=float(bal.get("wallet_usd") or 0)
+            ),
+            reply_markup=telegram_ui.pool_main_keyboard(),
         )
         if sub_key is not None:
             loop = asyncio.get_running_loop()
@@ -632,6 +641,177 @@ async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     )
 
 
+async def _send_chunked(
+    bot, chat_id: int, text: str, *, reply_markup=None, parse_mode=None
+) -> None:
+    """Send text in Telegram-safe chunks (avoid silent 4096 truncation)."""
+    chunks = notify.split_telegram_text(text)
+    for i, chunk in enumerate(chunks):
+        kwargs: dict = {}
+        if parse_mode:
+            kwargs["parse_mode"] = parse_mode
+        if reply_markup is not None and i == len(chunks) - 1:
+            kwargs["reply_markup"] = reply_markup
+        await bot.send_message(chat_id, chunk, **kwargs)
+
+
+async def _handle_menu_callback(
+    context: ContextTypes.DEFAULT_TYPE, user_id: int, data: str
+) -> None:
+    """Dispatch menu:* / legacy pool:portfolio|deposit buttons."""
+    loop = asyncio.get_running_loop()
+    bot = context.bot
+
+    # Legacy aliases
+    if data == telegram_ui.CB_POOL_PORTFOLIO:
+        data = telegram_ui.CB_MENU_PORTFOLIO
+    elif data == telegram_ui.CB_POOL_DEPOSIT:
+        data = telegram_ui.CB_MENU_FUND
+
+    try:
+        if data in (telegram_ui.CB_MENU_HOME, telegram_ui.CB_MENU_BACK,
+                    telegram_ui.CB_MENU_REFRESH):
+            text = await loop.run_in_executor(None, menu.home_text, user_id)
+            await bot.send_message(
+                user_id, text, reply_markup=telegram_ui.pool_main_keyboard()
+            )
+            return
+
+        if data in (telegram_ui.CB_MENU_FUND, telegram_ui.CB_WALLET_DEPOSIT):
+            text, keyboard = await loop.run_in_executor(
+                None, menu.fund_surface, user_id
+            )
+            await bot.send_message(
+                user_id, text, reply_markup=keyboard, parse_mode="Markdown"
+            )
+            return
+
+        if data == telegram_ui.CB_MENU_WALLET:
+            text, keyboard = await loop.run_in_executor(
+                None, menu.wallet_surface, user_id
+            )
+            await bot.send_message(
+                user_id, text, reply_markup=keyboard, parse_mode="Markdown"
+            )
+            return
+
+        if data == telegram_ui.CB_MENU_PORTFOLIO:
+            text, keyboard = await loop.run_in_executor(
+                None, menu.portfolio_surface, user_id
+            )
+            await _send_chunked(bot, user_id, text, reply_markup=keyboard)
+            return
+
+        if data == telegram_ui.CB_MENU_STRATEGIES:
+            text, keyboard = await loop.run_in_executor(
+                None, menu.strategies_surface, user_id
+            )
+            await _send_chunked(bot, user_id, text, reply_markup=keyboard)
+            return
+
+        if data.startswith(telegram_ui.CB_STRAT_PREFIX):
+            key = data[len(telegram_ui.CB_STRAT_PREFIX):]
+            text, keyboard = await loop.run_in_executor(
+                None, menu.strategy_detail, user_id, key
+            )
+            if strategy_catalog.is_valid(key) and strategy_catalog.STRATEGIES[key].executable:
+                context.user_data[menu.AWAITING_DEPLOY] = key
+            await bot.send_message(user_id, text, reply_markup=keyboard)
+            return
+
+        if data == telegram_ui.CB_MENU_HELP:
+            text, keyboard = menu.help_surface()
+            await bot.send_message(user_id, text, reply_markup=keyboard)
+            return
+
+        if data == telegram_ui.CB_MENU_BRAIN:
+            text, keyboard = menu.brain_menu()
+            await bot.send_message(user_id, text, reply_markup=keyboard)
+            return
+
+        if data.startswith(telegram_ui.CB_BRAIN_PREFIX):
+            section = data[len(telegram_ui.CB_BRAIN_PREFIX):]
+            text, paths = await loop.run_in_executor(
+                None, menu.brain_section, section
+            )
+            if paths:
+                for i, chart_path in enumerate(paths):
+                    caption = text if i == 0 and len(text) <= 1024 else (
+                        f"Chart {i + 1}/{len(paths)}"
+                    )
+                    try:
+                        await notify.send_photo_with_caption(
+                            bot, user_id, chart_path, caption
+                        )
+                    except Exception:
+                        logger.exception("brain chart send failed")
+                if len(text) > 1024:
+                    await _send_chunked(
+                        bot, user_id, text,
+                        reply_markup=telegram_ui.brain_keyboard(),
+                        parse_mode="HTML",
+                    )
+                else:
+                    await bot.send_message(
+                        user_id, "Pick another section:",
+                        reply_markup=telegram_ui.brain_keyboard(),
+                    )
+            else:
+                html = menu.format_html_pre(text)
+                await _send_chunked(
+                    bot, user_id, html,
+                    reply_markup=telegram_ui.brain_keyboard(),
+                    parse_mode="HTML",
+                )
+            return
+
+        if data == telegram_ui.CB_WALLET_WITHDRAW_ALL:
+            context.args = ["all"]
+            # Fabricate a minimal update path via cmd_withdraw helpers — send
+            # instructions and run the withdraw request inline.
+            def _do_all() -> str:
+                maximum = pool.max_withdrawal_usd(user_id)
+                minimum = float(bot_config.POOL_MIN_WITHDRAWAL_USD)
+                if maximum < minimum:
+                    return (
+                        f"Not enough withdrawable balance yet "
+                        f"(${pool.withdrawable_usd(user_id):,.2f} free, "
+                        f"min ${minimum:,.0f})."
+                    )
+                result = pool.request_withdrawal(user_id, maximum)
+                if result.get("ok"):
+                    return (
+                        f"Withdrawal of ${maximum:,.2f} queued — you'll get a "
+                        "DM when it lands."
+                    )
+                return f"Could not withdraw ({result.get('reason')})."
+
+            text = await loop.run_in_executor(None, _do_all)
+            await bot.send_message(
+                user_id, text, reply_markup=telegram_ui.wallet_keyboard()
+            )
+            return
+
+        if data == telegram_ui.CB_WALLET_WITHDRAW_X:
+            context.user_data[menu.AWAITING_WITHDRAW] = True
+            await bot.send_message(
+                user_id,
+                "How much USDC do you want to withdraw?\n\n"
+                f"Available: ${pool.withdrawable_usd(user_id):,.2f}\n"
+                "Reply with a number (e.g. 100), or tap Back.",
+                reply_markup=telegram_ui.back_home_keyboard(),
+            )
+            return
+
+    except Exception:
+        logger.exception("menu callback failed for %s data=%s", user_id, data)
+        await bot.send_message(
+            user_id,
+            "Something went wrong opening that menu — try again.",
+            reply_markup=telegram_ui.pool_main_keyboard(),
+        )
+
+
 async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     query = update.callback_query
     if query is None or query.from_user is None:
@@ -653,6 +833,14 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
 
     data = query.data or ""
     chat_id = query.message.chat_id if query.message else user_id
+
+    # --- Button-first main menu -------------------------------------------
+    if data.startswith(telegram_ui.CB_MENU_PREFIX) or data in (
+        telegram_ui.CB_POOL_PORTFOLIO,
+        telegram_ui.CB_POOL_DEPOSIT,
+    ):
+        await _handle_menu_callback(context, user_id, data)
+        return
 
     # --- Strategy subscriptions (/subscribe flow) --------------------------
     if data.startswith(telegram_ui.CB_SUB_PREFIX):
@@ -688,34 +876,44 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
                 return
 
             def _alloc() -> str:
-                p = pool.portfolio(user_id)
-                if not p.get("ok"):
-                    return "Fund your account first — /deposit."
-                amount = round(
-                    float(p.get("available_usd") or 0) * pct / 100.0, 2
-                )
+                bal = pool.wallet_balance(user_id)
+                # Deploy from undeployed wallet, not total available cash.
+                base = float(bal.get("wallet_usd") or 0)
+                current = pool.get_allocation(user_id, key)
+                # Percent of (wallet + current) so 100% can re-commit everything
+                # already sitting on this strategy plus free wallet.
+                amount = round((base + current) * pct / 100.0, 2)
                 if amount <= 0:
                     return (
-                        "No available cash to allocate right now — /deposit "
-                        "to top up, or free a reserve first."
+                        "No wallet USDC to deploy — tap Fund to top up."
                     )
                 result = pool.set_allocation(user_id, key, amount)
                 if not result.get("ok"):
-                    return f"Could not allocate ({result.get('reason')})."
+                    reason = result.get("reason")
+                    if reason == "below_min_deploy":
+                        return (
+                            f"Minimum deploy is "
+                            f"${float(result.get('minimum_usd') or 0):,.0f}."
+                        )
+                    if reason in ("exceeds_wallet", "exceeds_cash"):
+                        return (
+                            "Not enough wallet USDC for that deploy — "
+                            f"max about ${float(result.get('max_usd') or 0):,.2f}."
+                        )
+                    return f"Could not deploy ({reason})."
                 pool.subscribe_strategy(user_id, key)
                 risk = amount * float(bot_config.POOL_RISK_PCT)
                 text = (
-                    f"Allocated ${amount:,.2f} to {strat.label} "
-                    f"({pct}% of your available cash).\n\n"
+                    f"Deployed ${amount:,.2f} into {strat.label} "
+                    f"({pct}% of wallet available).\n\n"
                     f"Each Accept on its cards now risks about ${risk:,.2f} "
                     f"({bot_config.POOL_RISK_PCT * 100:.1f}% of the "
-                    "allocation) at the stop. /allocate "
-                    f"{key} <amount> changes it any time."
+                    "deployment) at the stop."
                 )
                 if not strat.executable:
                     text += (
-                        "\n\nThis lane publishes idea cards only for now — "
-                        "the allocation activates once Kalshi execution ships."
+                        "\n\nIdea feed only for now — accepting into this "
+                        "lane with real capital is coming soon."
                     )
                 return text
 
@@ -741,26 +939,14 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
             logger.exception("subscribe reply DM failed for %s", user_id)
         return
 
-    # --- Kalshi lane cards (relayed; cards only, no execution yet) ---------
+    # --- Kalshi lane cards (relayed; feed only — accepting coming soon) ---
     if data.startswith(_CB_KALSHI_PREFIX):
-        parts = data.split(":")
-        action = parts[1] if len(parts) > 1 else ""
-        key = parts[2] if len(parts) > 2 else ""
-        label = (
-            strategy_catalog.STRATEGIES[key].label
-            if strategy_catalog.is_valid(key) else "this Kalshi lane"
+        reply = (
+            "Kalshi ideas are feed-only for now — accepting into this lane "
+            "with real capital is coming soon.\n\n"
+            "You're still subscribed to the stream. Tap Strategies for ICT "
+            "or Trade Mill to deploy."
         )
-        if action == "accept":
-            reply = (
-                f"Noted — you're tracking this {label} idea.\n\n"
-                "Capital deployment to Kalshi is coming soon, so Accept "
-                "doesn't place an order on this lane yet. The card settles "
-                "on its own within the 15-minute window."
-            )
-        elif action == "reject":
-            reply = "Noted — you're staying out of this one."
-        else:
-            return
         try:
             await context.bot.send_message(user_id, reply)
         except Exception:
@@ -1067,26 +1253,12 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
         return
 
     if data == telegram_ui.CB_POOL_PORTFOLIO:
-        loop = asyncio.get_running_loop()
-
-        def _load_portfolio() -> str:
-            spots = research.get_spot_prices()
-            return telegram_ui.format_portfolio(pool.portfolio(user_id, spots))
-
-        try:
-            text = await loop.run_in_executor(None, _load_portfolio)
-        except Exception:
-            logger.exception("Portfolio load failed for %s", user_id)
-            text = "Could not load your portfolio right now."
-        await context.bot.send_message(
-            user_id, text[:4096], reply_markup=telegram_ui.pool_account_keyboard()
-        )
+        # Handled via menu: prefix above; kept as dead-code guard.
+        await _handle_menu_callback(context, user_id, data)
         return
 
     if data == telegram_ui.CB_POOL_DEPOSIT:
-        await context.bot.send_message(
-            user_id, telegram_ui.format_deposit_instructions()
-        )
+        await _handle_menu_callback(context, user_id, data)
         return
 
     # Personal idea portfolio: close open trade at spot from /me buttons.
@@ -1520,36 +1692,18 @@ async def cmd_help(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 
     if bot_config.POOL_ENABLED and pool.is_approved(user.id):
         await update.message.reply_text(
-            "Portfolio commands:\n"
-            "/portfolio — your cash, positions, and P&L\n"
-            "/wallet — the address you fund from and are paid back to\n"
-            "/deposit — fund your account (sizes stay small while we prove the strategies)\n"
-            "/withdraw — take money out, back to your registered wallet "
-            "(/withdraw all for everything)\n\n"
-            "Eva commands:\n"
-            "/brain — Eva's current read: marked charts, the ICT view with "
-            "order blocks and breakers, the four-year cycle, and the biggest news\n"
-            "/research — deeper market studies (funding, volume, dominance, macro)\n"
-            "Or just talk to her — ask anything in plain English.\n\n"
-            "Strategy commands:\n"
-            "/subscribe — pick which strategies' trade ideas you receive\n"
-            "/allocate — set capital per strategy; Accept sizes from it\n\n"
-            "/start — welcome + how risk works\n"
-            "/help — this message\n\n"
-            "Trade cards arrive here as private messages. Accept risks about "
-            f"{bot_config.POOL_RISK_PCT * 100:.1f}% of your allocation to that "
-            "strategy — not your full balance.",
-            reply_markup=telegram_ui.pool_account_keyboard(),
+            telegram_ui.HELP_MESSAGE,
+            reply_markup=telegram_ui.pool_main_keyboard(),
         )
         return
 
     await update.message.reply_text(
         "Commands:\n"
-        "/start — welcome + menu (Open account, My Metrics, My book, Idea feed, Journal, Research)\n"
+        "/start — welcome + menu\n"
         "/status — current suggestion + paper PnL\n"
         "/performance — volume idea book (realized + unrealized)\n"
-        "/me — your accepted-idea portfolio PnL (Close buttons on open trades)\n"
-        "/chart — latest analysis chart + what the bot is watching\n"
+        "/me — your accepted-idea portfolio PnL\n"
+        "/chart — latest analysis chart\n"
         "/research — research topic catalog\n"
         "/help — this message\n\n"
         + research_router.build_catalog(),
@@ -1738,7 +1892,16 @@ async def cmd_brain(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
                 )
         except Exception:
             logger.exception("Brain chart send failed")
-    await _reply(update, report["text"])
+    html = menu.format_html_pre(report["text"])
+    for chunk in notify.split_telegram_text(html):
+        try:
+            await context.bot.send_message(
+                chat_id, chunk, parse_mode="HTML",
+                reply_markup=telegram_ui.brain_keyboard(),
+            )
+        except Exception:
+            await _reply(update, report["text"][:4000])
+            break
 
 
 async def cmd_status(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -1905,13 +2068,10 @@ async def cmd_deposit(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
     wallet = pool.get_wallet(user.id)
     args = context.args or []
     if not args:
-        await _reply(
-            update,
-            telegram_ui.format_deposit_instructions(
-                wallet=str(wallet["address"]) if wallet else None
-            ),
-            markdown=True,
-        )
+        # Prefer MoonPay Fund surface; legacy instructions still available
+        # when the user explicitly files a hash claim below.
+        text, keyboard = menu.fund_surface(user.id)
+        await _reply(update, text, markdown=True, reply_markup=keyboard)
         return
 
     try:
@@ -2835,6 +2995,77 @@ async def on_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 
     user_text = update.message.text.strip()
 
+    # Button-first pending prompts (Withdraw X / typed deploy amount).
+    if context.user_data.pop(menu.AWAITING_WITHDRAW, None):
+        token = user_text.lower().lstrip("$").replace(",", "")
+        try:
+            amount = round(float(token), 2)
+        except ValueError:
+            await _reply(
+                update,
+                "Send a number like 100, or tap Wallet again.",
+                reply_markup=telegram_ui.wallet_keyboard(),
+            )
+            return
+        result = pool.request_withdrawal(user.id, amount)
+        if result.get("ok"):
+            await _reply(
+                update,
+                f"Withdrawal of ${amount:,.2f} queued — you'll get a DM when it lands.",
+                reply_markup=telegram_ui.wallet_keyboard(),
+            )
+        else:
+            await _reply(
+                update,
+                f"Could not withdraw ({result.get('reason')}).",
+                reply_markup=telegram_ui.wallet_keyboard(),
+            )
+        return
+
+    deploy_key = context.user_data.pop(menu.AWAITING_DEPLOY, None)
+    if deploy_key and strategy_catalog.is_valid(str(deploy_key)):
+        token = user_text.lower().lstrip("$").replace(",", "")
+        try:
+            amount = round(float(token), 2)
+        except ValueError:
+            context.user_data[menu.AWAITING_DEPLOY] = deploy_key
+            await _reply(
+                update,
+                "Send a dollar amount like 100, or use the percent buttons.",
+                reply_markup=telegram_ui.alloc_keyboard(str(deploy_key)),
+            )
+            return
+
+        def _deploy() -> str:
+            pool.subscribe_strategy(user.id, str(deploy_key))
+            result = pool.set_allocation(user.id, str(deploy_key), amount)
+            if not result.get("ok"):
+                reason = result.get("reason")
+                if reason == "below_min_deploy":
+                    return (
+                        f"Minimum deploy is ${float(result.get('minimum_usd') or 0):,.0f}."
+                    )
+                if reason in ("exceeds_wallet", "exceeds_cash"):
+                    return (
+                        f"Not enough wallet USDC — available about "
+                        f"${float(result.get('wallet_usd') or result.get('max_usd') or 0):,.2f}."
+                    )
+                return f"Could not deploy ({reason})."
+            label = strategy_catalog.STRATEGIES[str(deploy_key)].label
+            risk = amount * float(bot_config.POOL_RISK_PCT)
+            return (
+                f"Deployed ${amount:,.2f} into {label}.\n\n"
+                f"Each Accept now risks about ${risk:,.2f} "
+                f"({bot_config.POOL_RISK_PCT * 100:.1f}%). "
+                "Cards for this strategy will arrive here."
+            )
+
+        text = await asyncio.get_running_loop().run_in_executor(None, _deploy)
+        await _reply(
+            update, text, reply_markup=telegram_ui.pool_main_keyboard()
+        )
+        return
+
     if _is_research_query(user_text):
         await _handle_research(update, context, user_text)
         return
@@ -2878,7 +3109,9 @@ async def on_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     except Exception:
         logger.exception("Chat monitor audit failed")
 
-    await _reply(update, telegram_text.to_plain_text(reply)[:4096])
+    plain = telegram_text.to_plain_text(reply)
+    for chunk in notify.split_telegram_text(plain):
+        await _reply(update, chunk)
 
 
 async def cmd_watchdog(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -2995,6 +3228,7 @@ def build_application() -> Application:
     app = (
         Application.builder()
         .token(config.TELEGRAM_BOT_TOKEN)
+        .post_init(_post_init_bot_profile)
         .build()
     )
     app.add_handler(CommandHandler("start", cmd_start))
@@ -3020,6 +3254,35 @@ def build_application() -> Application:
     app.add_handler(CommandHandler("brain", cmd_brain))
     app.add_handler(CommandHandler("subscribe", cmd_subscribe))
     app.add_handler(CommandHandler("allocate", cmd_allocate))
+    app.add_handler(CommandHandler("sweep", cmd_sweep))
     app.add_handler(CallbackQueryHandler(on_callback))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, on_text))
     return app
+
+
+async def _post_init_bot_profile(app: Application) -> None:
+    """Set the pre-/start About text Telegram shows before the user joins."""
+    try:
+        await app.bot.set_my_description(telegram_ui.BOT_DESCRIPTION[:512])
+        await app.bot.set_my_short_description(
+            telegram_ui.BOT_SHORT_DESCRIPTION[:120]
+        )
+    except Exception:
+        logger.exception("Failed to set bot description")
+
+
+async def cmd_sweep(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Admin: report how much MoonPay-credited capital should sit on Coinbase."""
+    user = update.effective_user
+    if user is None or not pool.is_admin(user.id):
+        await _reply(update, "Admin only.")
+        return
+    report = pool.sweep_report()
+    await _reply(
+        update,
+        "MoonPay → Coinbase sweep report\n\n"
+        f"Tester claims (cash): ${report['tester_cash_usd']:,.2f}\n"
+        f"MoonPay customers: {report['moonpay_customers']}\n"
+        f"MoonPay credited (lifetime): ${report['moonpay_credited_usd']:,.2f}\n\n"
+        f"{report['note']}",
+    )

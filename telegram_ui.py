@@ -26,50 +26,82 @@ CB_TRADE_JOIN_PREFIX = "trade:join:"
 CB_TRADE_SKIP_PREFIX = "trade:skip:"
 CB_TRADE_MORE_PREFIX = "trade:more:"
 
+# Button-first main menu (BONKbot-style). menu:<surface>
+CB_MENU_PREFIX = "menu:"
+CB_MENU_FUND = "menu:fund"
+CB_MENU_WALLET = "menu:wallet"
+CB_MENU_STRATEGIES = "menu:strategies"
+CB_MENU_PORTFOLIO = "menu:portfolio"
+CB_MENU_BRAIN = "menu:brain"
+CB_MENU_HELP = "menu:help"
+CB_MENU_REFRESH = "menu:refresh"
+CB_MENU_HOME = "menu:home"
+CB_MENU_BACK = "menu:back"
+
+# Wallet sub-actions
+CB_WALLET_DEPOSIT = "menu:wallet:deposit"
+CB_WALLET_WITHDRAW_ALL = "menu:wallet:withdraw_all"
+CB_WALLET_WITHDRAW_X = "menu:wallet:withdraw_x"
+
+# Brain sub-menu
+CB_BRAIN_PREFIX = "menu:brain:"
+CB_BRAIN_READ = "menu:brain:read"
+CB_BRAIN_CHARTS = "menu:brain:charts"
+CB_BRAIN_ICT = "menu:brain:ict"
+CB_BRAIN_CYCLE = "menu:brain:cycle"
+CB_BRAIN_NEWS = "menu:brain:news"
+CB_BRAIN_ASK = "menu:brain:ask"
+
+# Strategy picker
+CB_STRAT_PREFIX = "menu:strat:"
+
 WELCOME_MESSAGE = (
-    "Welcome to the ETH/BTC Trading Agent (beta).\n\n"
-    "This bot does NOT place real trades. It runs an ICT-style swing/day strategy "
-    "on ETH and BTC (including W1 ETH/BTC relative strength).\n\n"
-    "You get a personal demo paper account. Trade suggestions include Accept / Reject — "
-    "only Accept puts your demo cash into a trade. The public dashboard is the "
-    "agent/house journal; My book shows your personal ledger.\n\n"
-    "Open account once and choose $500 / $1,000 / $2,500 "
-    "(demo capital — not real funding).\n\n"
-    "Use the buttons below, or /research for market studies. Not financial advice."
+    "Welcome to Eva.\n\n"
+    "Market intelligence and live strategy books — ICT, Trade Mill, and "
+    "Kalshi lanes — in one place.\n\n"
+    "Tap Fund to deposit USDC, then Strategies to deploy. Not financial advice."
+)
+
+BOT_DESCRIPTION = (
+    "Blazingly-fast trading intelligence at your fingertips with Eva. "
+    "Use /start to open the main menu — fund with USDC, deploy into strategies, "
+    "and follow Eva's live read.\n\n"
+    "Powered by Republic Technologies\n"
+    "https://eva.finance/"
+)
+
+BOT_SHORT_DESCRIPTION = (
+    "Eva — market intelligence & live strategy books. Powered by Republic Technologies."
 )
 
 RESEARCH_HELP = (
-    "Research — how to use it\n\n"
-    "• /research — topic catalog (digest, funding, volume, dominance, macro, asian_session, SFP studies)\n"
-    "• /research funding — run a specific topic\n"
-    "• Or ask in plain English: \"What's ETH funding?\" / \"Asian session BTC\" / \"weekly SFP study\"\n\n"
-    "Research is read-only context for the paper strategy; it does not move the portfolio."
+    "Research — tap Brain on the main menu, or ask Eva in plain English.\n\n"
+    "Topics: digest, funding, volume, dominance, macro, asian_session."
+)
+
+HELP_MESSAGE = (
+    "Eva is Republic Technologies' market intelligence layer — structure, "
+    "cycle, and news — with live strategy books built on top.\n\n"
+    f"Questions? {config.EVA_SUPPORT_EMAIL}\n"
+    f"Website: {config.EVA_WEBSITE_URL}\n\n"
+    "Use the buttons below — Fund, Wallet, Strategies, Portfolio, Brain."
 )
 
 
 def main_keyboard() -> InlineKeyboardMarkup:
-    # With the pool live there is no demo account to open and no demo book to
-    # read, so those buttons are replaced by the real ones rather than left to
-    # be tapped and refused.
+    """Primary button-first home keyboard (pool or demo)."""
     if bot_config.POOL_ENABLED:
-        rows: list[list[InlineKeyboardButton]] = [
-            [
-                InlineKeyboardButton("Portfolio", callback_data=CB_POOL_PORTFOLIO),
-                InlineKeyboardButton("Deposit", callback_data=CB_POOL_DEPOSIT),
-            ],
-            [InlineKeyboardButton("Idea feed", callback_data=CB_FEED)],
-        ]
-    else:
-        rows = [
-            [
-                InlineKeyboardButton("Open account", callback_data=CB_OPEN),
-                InlineKeyboardButton("My Metrics", callback_data=CB_METRICS),
-            ],
-            [
-                InlineKeyboardButton("My book", callback_data=CB_MY_BOOK),
-                InlineKeyboardButton("Idea feed", callback_data=CB_FEED),
-            ],
-        ]
+        return pool_main_keyboard()
+    rows = [
+        [
+            InlineKeyboardButton("Open account", callback_data=CB_OPEN),
+            InlineKeyboardButton("My Metrics", callback_data=CB_METRICS),
+        ],
+        [
+            InlineKeyboardButton("My book", callback_data=CB_MY_BOOK),
+            InlineKeyboardButton("Idea feed", callback_data=CB_FEED),
+        ],
+    ]
     dash = config.DASHBOARD_PUBLIC_URL
     if dash:
         rows.append(
@@ -90,6 +122,88 @@ def main_keyboard() -> InlineKeyboardMarkup:
             InlineKeyboardButton("Refresh", callback_data=CB_REFRESH),
         ]
     )
+    return InlineKeyboardMarkup(rows)
+
+
+def pool_main_keyboard() -> InlineKeyboardMarkup:
+    """BONKbot-style home: Fund / Wallet / Strategies / Portfolio / Brain / Help."""
+    return InlineKeyboardMarkup(
+        [
+            [
+                InlineKeyboardButton("Fund", callback_data=CB_MENU_FUND),
+                InlineKeyboardButton("Wallet", callback_data=CB_MENU_WALLET),
+            ],
+            [
+                InlineKeyboardButton("Strategies", callback_data=CB_MENU_STRATEGIES),
+                InlineKeyboardButton("Portfolio", callback_data=CB_MENU_PORTFOLIO),
+            ],
+            [
+                InlineKeyboardButton("Brain", callback_data=CB_MENU_BRAIN),
+                InlineKeyboardButton("Help", callback_data=CB_MENU_HELP),
+            ],
+            [InlineKeyboardButton("Refresh", callback_data=CB_MENU_REFRESH)],
+        ]
+    )
+
+
+def back_home_keyboard() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(
+        [[InlineKeyboardButton("← Back", callback_data=CB_MENU_HOME)]]
+    )
+
+
+def wallet_keyboard() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(
+        [
+            [
+                InlineKeyboardButton("Deposit USDC", callback_data=CB_WALLET_DEPOSIT),
+            ],
+            [
+                InlineKeyboardButton(
+                    "Withdraw all", callback_data=CB_WALLET_WITHDRAW_ALL
+                ),
+                InlineKeyboardButton(
+                    "Withdraw X USDC", callback_data=CB_WALLET_WITHDRAW_X
+                ),
+            ],
+            [InlineKeyboardButton("← Back", callback_data=CB_MENU_HOME)],
+        ]
+    )
+
+
+def brain_keyboard() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(
+        [
+            [
+                InlineKeyboardButton("Today's Read", callback_data=CB_BRAIN_READ),
+                InlineKeyboardButton("Charts", callback_data=CB_BRAIN_CHARTS),
+            ],
+            [
+                InlineKeyboardButton("ICT Table", callback_data=CB_BRAIN_ICT),
+                InlineKeyboardButton("Cycle", callback_data=CB_BRAIN_CYCLE),
+            ],
+            [
+                InlineKeyboardButton("News", callback_data=CB_BRAIN_NEWS),
+                InlineKeyboardButton("Ask Eva", callback_data=CB_BRAIN_ASK),
+            ],
+            [InlineKeyboardButton("← Back", callback_data=CB_MENU_HOME)],
+        ]
+    )
+
+
+def strategies_keyboard() -> InlineKeyboardMarkup:
+    import strategy_catalog
+
+    rows = [
+        [
+            InlineKeyboardButton(
+                strategy_catalog.STRATEGIES[key].label,
+                callback_data=f"{CB_STRAT_PREFIX}{key}",
+            )
+        ]
+        for key in strategy_catalog.ORDER
+    ]
+    rows.append([InlineKeyboardButton("← Back", callback_data=CB_MENU_HOME)])
     return InlineKeyboardMarkup(rows)
 
 
@@ -245,38 +359,12 @@ DENIED_MESSAGE = "Access is invite-only right now, and we can't add you today."
 
 POOL_WELCOME_MESSAGE = (
     "Welcome to Eva — you're in.\n\n"
-    "This is an early tester pool. We are still solidifying the strategies, so "
-    "position sizes are kept deliberately small on purpose — not because your "
-    "deposit is ignored, but so each Accept risks only a small slice of your "
-    "cash while the books are proven.\n\n"
-    "How risk works:\n"
-    "• When you Accept an ICT or Trade Mill card, only about "
-    f"{bot_config.POOL_RISK_PCT * 100:.1f}% of your allocation to that "
-    "strategy is put at risk on that trade (same rule as the house clip).\n"
-    "• Example: $1,000 allocated → roughly $7 at the stop if that trade is "
-    "stopped out. Most of your balance stays out of that trade.\n"
-    "• You fill at the same price as the house; exits (stop, targets, trail) "
-    "are automatic and your share is credited as each one fills.\n\n"
-    "*Portfolio commands*\n"
-    "• /portfolio — cash, positions, P&L\n"
-    "• /wallet — register the address you fund from; withdrawals return there\n"
-    "• /deposit — how to fund; your balance updates automatically once the "
-    "transfer settles\n"
-    "• /withdraw — take money out, back to your registered wallet "
-    "(/withdraw all empties the account)\n\n"
-    "*Eva commands*\n"
-    "• /brain — Eva's current read: marked charts on every timeframe, the "
-    "ICT view with order blocks and breakers, the four-year cycle, and the "
-    "biggest news right now\n"
-    "• /research — deeper market studies (funding, volume, dominance, macro)\n"
-    "• Or just talk to her — ask anything in plain English\n\n"
-    "*Strategy commands*\n"
-    "• /subscribe — pick the strategies whose trade ideas you want, and "
-    "optionally allocate capital to them\n"
-    "• /allocate — set how much a strategy can size your Accepts from\n\n"
-    "Trade cards arrive here as private messages with *your* size on them. "
-    "Anything about your money stays in this chat.\n\n"
-    "Trading futures involves substantial risk of loss. Not financial advice."
+    "Tap the buttons below to Fund, check Wallet, deploy into Strategies, "
+    "or open Portfolio. Brain shows what Eva sees right now.\n\n"
+    "Each Accept risks about "
+    f"{bot_config.POOL_RISK_PCT * 100:.1f}% of your deployment to that "
+    "strategy — not your full balance.\n\n"
+    "Trading involves substantial risk of loss. Not financial advice."
 )
 
 
@@ -316,6 +404,7 @@ def alloc_keyboard(strategy_key: str) -> InlineKeyboardMarkup:
             [InlineKeyboardButton(
                 "Not now", callback_data=f"{CB_SUB_PREFIX}skip:{strategy_key}"
             )],
+            [InlineKeyboardButton("← Back", callback_data=CB_MENU_STRATEGIES)],
         ]
     )
 
@@ -422,20 +511,158 @@ def pool_demo_keyboard(token: str) -> InlineKeyboardMarkup:
 
 
 def pool_account_keyboard() -> InlineKeyboardMarkup:
-    """Light DM home: Portfolio + Deposit."""
-    return InlineKeyboardMarkup(
-        [
-            [
-                InlineKeyboardButton("Portfolio", callback_data=CB_POOL_PORTFOLIO),
-                InlineKeyboardButton("Deposit", callback_data=CB_POOL_DEPOSIT),
-            ]
+    """Alias for the button-first home keyboard."""
+    return pool_main_keyboard()
+
+
+def format_pool_welcome(*, wallet_usd: float = 0.0) -> str:
+    """Short /start welcome for the live pool (progressive disclosure)."""
+    lines = [
+        "Welcome to Eva — the intelligence layer for crypto markets.",
+        "Powered by Republic Technologies.",
+        "",
+    ]
+    if wallet_usd <= 0:
+        lines.append("You have no USDC yet — tap Fund to get started.")
+    else:
+        lines.append(
+            f"Wallet: ${wallet_usd:,.2f} USDC available. "
+            "Tap Strategies to deploy, or Portfolio for the full picture."
+        )
+    lines += [
+        "",
+        "Each Accept risks about "
+        f"{bot_config.POOL_RISK_PCT * 100:.1f}% of what you deployed into "
+        "that strategy — not your full balance.",
+        "",
+        "Trading involves substantial risk of loss. Not financial advice.",
+    ]
+    return "\n".join(lines)
+
+
+def format_fill_celebration(
+    *,
+    strategy_label: str,
+    side: str,
+    entry: float,
+    stop: float | None,
+    targets: list[float] | None,
+    risk_usd: float,
+    notional_usd: float | None = None,
+    resting: bool = False,
+) -> str:
+    """Punchy confirmation after an Accept lands (fill or resting limit)."""
+    side_u = (side or "").upper()
+    if resting:
+        lines = [
+            f"You're in — {strategy_label}",
+            "",
+            f"{side_u} resting limit at ${float(entry):,.2f}.",
+            f"Sized at ${float(risk_usd):,.2f} risk "
+            f"({bot_config.POOL_RISK_PCT * 100:.1f}%).",
         ]
-    )
+        if stop is not None:
+            try:
+                lines.append(f"Stop ${float(stop):,.2f}.")
+            except (TypeError, ValueError):
+                pass
+        lines += [
+            "",
+            "I'll DM you the moment it fills. Tap Portfolio any time.",
+        ]
+        return "\n".join(lines)
+
+    lines = [
+        f"Filled — {strategy_label}",
+        "",
+        f"{side_u} @ ${float(entry):,.2f}",
+    ]
+    if stop is not None:
+        try:
+            lines.append(f"Stop ${float(stop):,.2f}")
+        except (TypeError, ValueError):
+            pass
+    if targets:
+        tp_bits = []
+        for t in targets[:3]:
+            try:
+                tp_bits.append(f"${float(t):,.2f}")
+            except (TypeError, ValueError):
+                continue
+        if tp_bits:
+            lines.append(f"Targets {', '.join(tp_bits)}")
+    size_bit = f"${float(risk_usd):,.2f} at risk"
+    if notional_usd is not None:
+        size_bit = f"${float(notional_usd):,.2f} notional · " + size_bit
+    lines += ["", size_bit, "", "Exits are automatic. Tap Portfolio any time."]
+    return "\n".join(lines)
+
+
+def format_fund_moonpay(
+    *,
+    address: str | None,
+    widget_url: str | None = None,
+    configured: bool = True,
+) -> str:
+    """Fund button copy — personal Base USDC deposit address."""
+    minimum = float(bot_config.POOL_MIN_DEPOSIT_USD)
+    if not configured or not address:
+        return "\n".join([
+            "Fund your wallet\n",
+            "USDC deposits on Base are being wired up. "
+            f"Message {config.EVA_SUPPORT_EMAIL} if you need a manual credit, "
+            "or try again shortly.",
+            "",
+            f"Minimum once live: ${minimum:,.0f} USDC on Base.",
+        ])
+    lines = [
+        "Fund your wallet\n",
+        "Send USDC on Base to your personal deposit address (tap to copy):",
+        f"`{address}`",
+        "",
+        f"Network: Base · Asset: USDC only · Minimum: ${minimum:,.0f}",
+        "",
+        "Once it settles, your balance updates here automatically — "
+        "tap Refresh or Wallet.",
+    ]
+    if widget_url:
+        lines += ["", f"Or buy USDC with a card: {widget_url}"]
+    return "\n".join(lines)
+
+
+def format_wallet_surface(
+    *,
+    address: str | None,
+    wallet_usd: float,
+    deployed_usd: float,
+    reserved_usd: float = 0.0,
+) -> str:
+    total = wallet_usd + deployed_usd
+    lines = [
+        "Your wallet\n",
+        (
+            f"Address: `{address}`"
+            if address
+            else "Address: not provisioned yet — tap Deposit USDC."
+        ),
+        "",
+        f"Wallet (undeployed): ${wallet_usd:,.2f} USDC",
+        f"Deployed in strategies: ${deployed_usd:,.2f} USDC",
+        f"Total: ${total:,.2f} USDC",
+    ]
+    if reserved_usd > 0:
+        lines.append(f"In open trades / reserved: ${reserved_usd:,.2f}")
+    lines += [
+        "",
+        "Deposit USDC on Base, or withdraw back to an address you control.",
+    ]
+    return "\n".join(lines)
 
 
 def format_deposit_instructions(
     *, has_pending: bool = False, wallet: str | None = None
 ) -> str:
+    """Legacy Coinbase+txhash path — kept for admin / fallback copy."""
     address = config.POOL_DEPOSIT_ADDRESS or "(deposit address not configured — ask the admin)"
     # Never guess the chain: USDC sent to this address on a network we do not
     # control it on is unrecoverable.
@@ -446,27 +673,21 @@ def format_deposit_instructions(
     example_risk = example * float(bot_config.POOL_RISK_PCT)
 
     if wallet is None:
-        # Ordered deliberately: registering first is what makes the deposit
-        # attributable and the payout address known, and a tester who sends
-        # before registering creates a transfer nobody can match to them.
         return "\n".join([
             "Fund your account\n",
-            "First, register the wallet you'll send from:",
+            "Prefer the Fund button — it gives you a personal USDC address on Base.",
+            "",
+            "Legacy path (admin fallback): register a payout wallet with",
             "   /wallet 0x<your address>",
-            "",
-            "We pay withdrawals back to that same address and nowhere else. "
-            "That is deliberate — it means your funds can only ever return to "
-            "a wallet you've proven you control, and it's how we recognise "
-            "your deposit when it arrives.",
-            "",
-            "Once that's set, /deposit shows where to send.",
+            "then /deposit shows where to send.",
         ])
 
     lines = [
-        "Fund your account\n",
+        "Fund your account (legacy)\n",
+        "Prefer the Fund button for MoonPay USDC on Base.\n",
         "Sizes stay intentionally small while we solidify the strategy. "
         "Depositing $1,000 does *not* put $1,000 into the next trade — each "
-        f"Accept risks about {risk_pct:.1f}% of your available cash.\n",
+        f"Accept risks about {risk_pct:.1f}% of your deployment.\n",
         f"Example: ${example:,.0f} available → about ${example_risk:,.2f} at "
         "risk if that trade is stopped out. The rest stays available for "
         "other Accepts or sits in cash.\n",
@@ -478,15 +699,7 @@ def format_deposit_instructions(
         "   /deposit 1000 0x<transaction hash>",
         "",
         "*The hash is what credits you.* We watch the exchange for it and "
-        "credit your balance automatically the moment your transfer settles — "
-        "usually about 5 minutes, no waiting on anyone. Send from your "
-        "registered wallet so we can also confirm the wallet is yours.",
-        "",
-        f"Only USDC, only on {network}. Anything else sent to that address "
-        "may be unrecoverable — by us or by anyone.",
-        "",
-        "You'll get a message here the second it lands, with your new balance. "
-        "Trade cards will then show the dollar risk *your* Accept would take.",
+        "credit your balance automatically the moment your transfer settles.",
     ]
     if has_pending:
         lines.append("")
@@ -510,12 +723,10 @@ def format_wallet_status(
     if wallet is None:
         return "\n".join([
             "Your payout wallet\n",
-            "You haven't registered one yet. Send:",
+            "You haven't registered one yet. For withdrawals, send:",
             "   /wallet 0x<your address>",
             "",
-            "This is the address you'll fund from, and the *only* address "
-            "withdrawals are ever sent back to. Use a wallet you control — "
-            "not an exchange deposit address, which may not let funds return.",
+            "Funding uses the Fund button (USDC on Base) — no registration needed.",
         ])
 
     verified = str(wallet.get("status")) == "verified"
@@ -580,36 +791,66 @@ def format_wallet_status(
 
 
 def format_portfolio(p: dict) -> str:
-    """Telegram text for /portfolio — the tester's real book."""
+    """Telegram text for Portfolio — wallet, deployments, PnL, open trades."""
     if not p.get("ok"):
         return (
-            "No pool account yet. Once you're admitted, /deposit shows how to "
-            "fund it."
+            "No pool account yet. Once you're admitted, tap Fund to deposit USDC."
         )
-    lines = ["Your portfolio\n"]
-    lines.append(f"Cash: ${float(p['cash_usd']):,.2f}")
+    wallet = float(
+        p["wallet_usd"] if p.get("wallet_usd") is not None
+        else max(0.0, float(p["cash_usd"]) - float(p.get("deployed_usd") or 0))
+    )
+    deployed = float(p.get("deployed_usd") or 0)
+    cash = float(p["cash_usd"])
+    total = float(p.get("total_usd") or (wallet + deployed))
+    realized = float(p.get("realized_pnl_usd") or 0)
+    unrealized = float(p.get("unrealized_pnl_usd") or 0)
+    deposited = float(p.get("deposited_usd") or 0)
+    pnl_total = realized + unrealized
+    pnl_pct = (pnl_total / deposited * 100.0) if deposited > 0 else 0.0
+
+    lines = [
+        "Your portfolio\n",
+        f"Total size: ${total:,.2f}",
+        f"  Wallet: ${wallet:,.2f}",
+        f"  Deployed: ${deployed:,.2f}",
+    ]
     if float(p.get("reserved_usd") or 0) > 0:
         lines.append(
-            f"In trades / reserved: ${float(p['reserved_usd']):,.2f} "
-            f"(available ${float(p['available_usd']):,.2f})"
+            f"  Reserved in trades: ${float(p['reserved_usd']):,.2f}"
         )
-    lines.append(f"Deposited: ${float(p['deposited_usd']):,.2f}")
     lines.append(
-        f"Realized P&L: ${float(p['realized_pnl_usd']):+,.2f} · "
-        f"Unrealized: ${float(p['unrealized_pnl_usd']):+,.2f}"
+        f"PnL: ${pnl_total:+,.2f} ({pnl_pct:+.2f}%) · "
+        f"realized ${realized:+,.2f} · unrealized ${unrealized:+,.2f}"
     )
+
+    by_strat = p.get("deployments") or {}
+    if by_strat:
+        lines.append("")
+        lines.append("Deployed by strategy:")
+        for key, amt in by_strat.items():
+            if float(amt) <= 0:
+                continue
+            try:
+                import strategy_catalog
+                label = strategy_catalog.STRATEGIES[key].label
+            except Exception:
+                label = key
+            lines.append(f"• {label}: ${float(amt):,.2f}")
+
     opens = p.get("open_stakes") or []
     if opens:
         lines.append("")
-        lines.append(f"Open positions ({len(opens)}):")
+        lines.append(f"Outstanding trades ({len(opens)}):")
         for s in opens:
             product = bot_config.product_label(str(s.get("product_id") or ""))
             unreal = s.get("unrealized_usd")
             unreal_bit = f" · now ${float(unreal):+,.2f}" if unreal is not None else ""
             lines.append(
-                f"• {product} {s.get('side')} — your size "
-                f"${float(s['cost_usd']):,.2f} ({float(s['share_frac']) * 100:.1f}% of "
-                f"the position) · risk ${float(s['risk_usd']):,.2f}{unreal_bit}"
+                f"• {product} {s.get('side')} — "
+                f"${float(s['cost_usd']):,.2f} "
+                f"({float(s['share_frac']) * 100:.1f}%) · "
+                f"risk ${float(s['risk_usd']):,.2f}{unreal_bit}"
             )
     closed = p.get("closed_stakes") or []
     if closed:
@@ -623,12 +864,11 @@ def format_portfolio(p: dict) -> str:
             )
     if not opens and not closed:
         lines.append("")
-        if float(p.get("cash_usd") or 0) <= 0:
-            lines.append("No funds yet — /deposit to get started.")
+        if cash <= 0 and deployed <= 0:
+            lines.append("No funds yet — tap Fund to get started.")
         else:
             lines.append(
-                "No positions yet. Accept a trade card in the group to join "
-                "the next one."
+                "No open trades. Accept a card after deploying into a strategy."
             )
     if p.get("frozen"):
         lines.append("")

@@ -1034,6 +1034,64 @@ def _epoch(stamp: Any) -> int:
         return 0
 
 
+def _moonpay_deposit_poll() -> None:
+    """Backup crediting path when a MoonPay webhook is missed."""
+    import moonpay
+    import notify
+    import pool
+
+    if not bot_config.POOL_ENABLED or not moonpay.configured():
+        return
+    for tx in moonpay.list_recent_deposit_txs(limit=40):
+        status = str(
+            ((tx.get("meta") or {}).get("transactionStatus"))
+            or tx.get("status")
+            or ""
+        ).upper()
+        if status and status not in ("SUCCESS", "CONFIRMED", "COMPLETE", ""):
+            continue
+        customer_id = str(
+            tx.get("customerId")
+            or (tx.get("meta") or {}).get("customerId")
+            or ""
+        )
+        telegram_id = pool.find_telegram_id_by_moonpay_customer(customer_id)
+        if telegram_id is None and customer_id.startswith("tg_"):
+            try:
+                telegram_id = int(customer_id[3:])
+            except ValueError:
+                continue
+        if telegram_id is None:
+            continue
+        amount = moonpay.parse_deposit_amount_usd(tx)
+        if amount <= 0:
+            # Treat top-level amount with 6 dec USDC assumption
+            try:
+                amount = round(float(tx.get("amount") or 0) / 1_000_000.0, 2)
+            except (TypeError, ValueError):
+                continue
+        tx_key = str(
+            tx.get("txIdempotencyKey")
+            or (tx.get("meta") or {}).get("transactionSignature")
+            or tx.get("id")
+            or ""
+        )
+        if not tx_key:
+            continue
+        result = pool.credit_moonpay_deposit(
+            telegram_id=telegram_id,
+            amount_usd=amount,
+            tx_key=tx_key,
+            note="MoonPay poll",
+        )
+        if result.get("ok"):
+            notify.send_pool_dm(
+                telegram_id,
+                f"Deposit received: ${amount:,.2f} USDC.\n"
+                f"Wallet balance: ${float(result.get('cash_usd') or 0):,.2f}.",
+            )
+
+
 def _deposit_sweep() -> None:
     """Credit arrived deposits and tell the tester, without waiting on anyone.
 
@@ -1130,6 +1188,7 @@ def _pool_sweep(spots: dict[str, float] | None = None) -> None:
        of tester claims. A shortfall freezes NEW intents and alerts ops;
        balances are never touched, and an unreadable balance skips the check
        rather than failing it.
+    3. MoonPay deposit poll (backup if webhooks miss).
     """
     import time as _time
 
@@ -1137,6 +1196,11 @@ def _pool_sweep(spots: dict[str, float] | None = None) -> None:
     import notify
     import pool
     import trade_ideas_bridge
+
+    try:
+        _moonpay_deposit_poll()
+    except Exception:
+        logger.exception("MoonPay deposit poll failed")
 
     active: set[str] = {
         str(r.get("cycle_id") or "") for r in live_pending.get_pending()

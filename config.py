@@ -150,6 +150,25 @@ TWITTER_CLIENT_SECRET: str | None = _optional("TWITTER_CLIENT_SECRET")
 DASHBOARD_PUBLIC_URL: str | None = _optional("DASHBOARD_PUBLIC_URL")
 DASHBOARD_PORT: int = int(os.getenv("DASHBOARD_PORT", "8080") or "8080")
 
+# --- MoonPay Commerce (hel.io) deposits — USDC on Base ---------------------
+# Public + secret API keys from moonpay.hel.io Settings. Deposit id is the
+# Helio Deposit product that provisions per-user addresses. Recipient is the
+# merchant EVM wallet Helio sweeps into. Webhook shared token verifies HMAC.
+MOONPAY_PUBLIC_KEY: str | None = _optional("MOONPAY_PUBLIC_KEY")
+MOONPAY_SECRET_KEY: str | None = _optional("MOONPAY_SECRET_KEY")
+MOONPAY_DEPOSIT_ID: str | None = _optional("MOONPAY_DEPOSIT_ID")
+MOONPAY_RECIPIENT_PUBLIC_KEY: str | None = _optional("MOONPAY_RECIPIENT_PUBLIC_KEY")
+MOONPAY_WEBHOOK_SECRET: str | None = _optional("MOONPAY_WEBHOOK_SECRET")
+# Production api.hel.io; set MOONPAY_API_BASE=https://api.dev.hel.io for devnet.
+MOONPAY_API_BASE: str = (
+    _optional("MOONPAY_API_BASE") or "https://api.hel.io"
+).rstrip("/")
+# Optional hosted deposit / on-ramp URL template. {deposit_id}, {customer_token},
+# {customer_id} are substituted when present.
+MOONPAY_WIDGET_URL_TEMPLATE: str | None = _optional("MOONPAY_WIDGET_URL_TEMPLATE")
+EVA_WEBSITE_URL: str = _optional("EVA_WEBSITE_URL") or "https://eva.finance/"
+EVA_SUPPORT_EMAIL: str = _optional("EVA_SUPPORT_EMAIL") or "info@republictech.io"
+
 # Yield generation dashboard (yield_gen_bot Next.js app). API base is used by
 # the hub's Yield Generation tab; the dashboard URL is the outbound link.
 YIELD_GEN_API_URL: str | None = _optional("YIELD_GEN_API_URL")

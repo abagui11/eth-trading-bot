@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import logging
 import secrets
 from pathlib import Path
 
@@ -18,6 +19,8 @@ import config
 import ledger
 import live_ledger
 import paper
+
+logger = logging.getLogger(__name__)
 import user_books
 from dashboard import data
 from dashboard.brain import get_brain_payload
@@ -608,6 +611,69 @@ def create_app() -> FastAPI:
         if event is None:
             return {"ok": True, "duplicate": True, "event": None}
         return {"ok": True, "duplicate": False, "event": event}
+
+    @app.post("/api/v1/moonpay/webhook")
+    async def api_moonpay_webhook(request: Request) -> dict:
+        """Helio / MoonPay Commerce deposit webhook — credit USDC on confirm."""
+        import moonpay
+        import notify
+        import pool
+
+        raw = await request.body()
+        signature = request.headers.get("X-Signature") or request.headers.get(
+            "x-signature"
+        )
+        if config.MOONPAY_WEBHOOK_SECRET and not moonpay.verify_webhook_signature(
+            raw, signature
+        ):
+            raise HTTPException(status_code=401, detail="Invalid signature")
+        try:
+            payload = await request.json()
+        except Exception:
+            raise HTTPException(status_code=400, detail="Invalid JSON") from None
+
+        event = str(payload.get("event") or "")
+        if event not in ("DEPOSIT_TX_CONFIRMED", "DEPOSIT_TX_ENRICHED"):
+            return {"ok": True, "ignored": event or "unknown"}
+
+        customer_id = str(payload.get("customerId") or "")
+        telegram_id = pool.find_telegram_id_by_moonpay_customer(customer_id)
+        if telegram_id is None and customer_id.startswith("tg_"):
+            try:
+                telegram_id = int(customer_id[3:])
+            except ValueError:
+                telegram_id = None
+        if telegram_id is None:
+            logger.warning("moonpay webhook: unknown customer %s", customer_id)
+            return {"ok": False, "reason": "unknown_customer"}
+
+        amount = moonpay.parse_deposit_amount_usd(payload)
+        tx_obj = payload.get("transactionObject") or {}
+        meta = tx_obj.get("meta") or {}
+        tx_key = str(
+            payload.get("txIdempotencyKey")
+            or meta.get("transactionSignature")
+            or tx_obj.get("id")
+            or payload.get("webhookDeliveryIdempotencyKey")
+            or ""
+        )
+        if not tx_key:
+            raise HTTPException(status_code=400, detail="Missing tx key")
+
+        result = pool.credit_moonpay_deposit(
+            telegram_id=telegram_id,
+            amount_usd=amount,
+            tx_key=tx_key,
+            note=f"MoonPay {event}",
+        )
+        if result.get("ok"):
+            notify.send_pool_dm(
+                telegram_id,
+                f"Deposit received: ${amount:,.2f} USDC.\n"
+                f"Wallet balance: ${float(result.get('cash_usd') or 0):,.2f}.\n\n"
+                "Tap Strategies to deploy, or Portfolio for the full picture.",
+            )
+        return {"ok": True, "result": result}
 
     @app.get("/api/chart/latest")
     async def api_chart_latest() -> FileResponse:

@@ -84,8 +84,8 @@ STRATEGIES: dict[str, Strategy] = {
         risk_lines=(
             "• Contracts settle every 15 minutes — small, fast, capped "
             "per-window risk.\n"
-            "• Idea cards only for now: capital deployment to Kalshi is "
-            "coming soon, so Accept does not place an order yet."
+            "• Idea feed only for now: accepting into Kalshi with real capital "
+            "is coming soon."
         ),
         executable=False,
     ),
@@ -99,8 +99,8 @@ STRATEGIES: dict[str, Strategy] = {
         risk_lines=(
             "• One entry per 15-minute window, held to settlement — capped "
             "per-window risk.\n"
-            "• Idea cards only for now: capital deployment to Kalshi is "
-            "coming soon, so Accept does not place an order yet."
+            "• Idea feed only for now: accepting into Kalshi with real capital "
+            "is coming soon."
         ),
         executable=False,
     ),

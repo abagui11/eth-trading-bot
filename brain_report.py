@@ -80,7 +80,7 @@ def _read_line(read: dict[str, Any]) -> str:
 
 
 def ict_view_text() -> str:
-    """The conditional ICT read: arrays held, draws named, invalidations."""
+    """The conditional ICT read as a compact monospace table."""
     try:
         from intelligence import store
 
@@ -96,9 +96,62 @@ def ict_view_text() -> str:
             "ICT view: no conditional read available yet — the next cycle "
             "writes one."
         )
-    lines = ["ICT view — order blocks, breakers, and what flips them:"]
-    lines += [_read_line(r) for r in reads]
+    lines = [
+        "ICT view — order blocks, breakers, invalidations",
+        "",
+        f"{'Asset':<6} {'TF':<4} {'Bias':<10} Zone / invalidation",
+        "-" * 48,
+    ]
+    for read in reads[:12]:
+        product = str(read.get("product_id") or "?").replace("-USD", "")[:5]
+        tf = str(read.get("timeframe") or "?")[:4]
+        bias = (read.get("bias") or "—").replace("_", " ")[:10]
+        zone = ""
+        if read.get("repelling_kind"):
+            zone = _fmt_zone(read.get("repelling_lo"), read.get("repelling_hi"))
+        elif read.get("attracting_kind"):
+            zone = _fmt_zone(read.get("attracting_lo"), read.get("attracting_hi"))
+        inv = read.get("invalidation_price")
+        inv_s = ""
+        if inv is not None:
+            try:
+                inv_s = f" inv ${float(inv):,.0f}"
+            except (TypeError, ValueError):
+                pass
+        lines.append(f"{product:<6} {tf:<4} {bias:<10} {zone}{inv_s}")
     return "\n".join(lines)
+
+
+def build_report() -> dict[str, Any]:
+    """Everything /brain sends: chart view (or None) + the text body."""
+    import chart_view
+
+    view = None
+    try:
+        view = chart_view.get_latest_chart_view()
+    except Exception:  # noqa: BLE001
+        logger.exception("brain: chart view unavailable")
+
+    sections = [
+        "Eva's brain — the read as it stands.",
+        "",
+    ]
+    if view is not None and view.watch_summary:
+        summary = str(view.watch_summary).strip()
+        if len(summary) > 400:
+            summary = summary[:400].rstrip() + "…"
+        sections.append(summary)
+        sections.append("")
+    sections += [
+        ict_view_text(),
+        "",
+        cycle_text(),
+        "",
+        news_text(),
+        "",
+        _REFRESH_NOTE,
+    ]
+    return {"text": "\n".join(sections), "view": view}
 
 
 def cycle_text() -> str:
@@ -161,21 +214,3 @@ def news_text() -> str:
         tag += "]"
         lines.append(f"• {tag} {title}")
     return "\n".join(lines)
-
-
-def build_report() -> dict[str, Any]:
-    """Everything /brain sends: chart view (or None) + the text body."""
-    import chart_view
-
-    view = None
-    try:
-        view = chart_view.get_latest_chart_view()
-    except Exception:  # noqa: BLE001
-        logger.exception("brain: chart view unavailable")
-
-    sections = ["Eva's brain — the read as it stands."]
-    if view is not None and view.watch_summary:
-        sections.append(view.watch_summary)
-    sections += [ict_view_text(), cycle_text(), news_text(), _REFRESH_NOTE]
-    text = "\n\n".join(s for s in sections if s)
-    return {"view": view, "text": text[:4096]}

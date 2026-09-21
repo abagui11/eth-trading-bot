@@ -49,10 +49,12 @@ class TelegramUiTests(unittest.TestCase):
         labels = {b.text for b in self._buttons(keyboard)}
         self.assertNotIn("Open account", labels)
         self.assertNotIn("My book", labels)
+        self.assertIn("Fund", labels)
+        self.assertIn("Wallet", labels)
+        self.assertIn("Strategies", labels)
         self.assertIn("Portfolio", labels)
-        self.assertIn("Deposit", labels)
-        # The read-only journal is not a demo thing and stays.
-        self.assertIn("Agent journal", labels)
+        self.assertIn("Brain", labels)
+        self.assertIn("Help", labels)
 
     def test_format_open_account_result(self) -> None:
         success = format_open_account_result(

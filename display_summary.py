@@ -284,10 +284,12 @@ def execution_banner(
     if mark:
         gap = f" from ${mark:,.2f} ({abs(entry - mark) / mark * 100.0:.2f}% away)"
     return ExecutionNote(
-        headline=f"{add}Not filled yet — a potential entry that may never fill.",
+        headline=(
+            f"{add}Not filled yet — expires when Eva retires the idea."
+        ),
         detail=(
             f"It executes only if {product} {moves} to ${entry:,.2f}{gap}, and "
-            f"rests as a {term} until then."
+            f"rests as a {term} until then. Tap Accept to join the resting order."
         ),
     )
 

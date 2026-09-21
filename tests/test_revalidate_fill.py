@@ -77,6 +77,24 @@ class RevalidateLongTests(unittest.TestCase):
         self.assertFalse(plan["ok"])
         self.assertEqual(plan["reason"], "rr_collapsed")
 
+    def test_lenient_accept_skips_rr_floor_and_chase(self) -> None:
+        """User Accepts still fill when R:R is poor or price chased."""
+        poor = live_exec.revalidate_levels(
+            direction="long", entry=2411.5, stop_loss=2385.0,
+            take_profits=[2420.0], spot=2411.5, lenient=True,
+        )
+        self.assertTrue(poor["ok"])
+        chased = live_exec.revalidate_levels(
+            **LONG, spot=2450.0, lenient=True,
+        )
+        self.assertTrue(chased["ok"])
+        # Stop breach stays hard even when lenient.
+        dead = live_exec.revalidate_levels(
+            **LONG, spot=2380.0, lenient=True,
+        )
+        self.assertFalse(dead["ok"])
+        self.assertEqual(dead["reason"], "stop_breached")
+
     def test_reward_is_judged_on_the_whole_ladder_not_just_tp1(self) -> None:
         """A scale-out ladder puts TP1 close in on purpose; that is not a flaw."""
         plan = live_exec.revalidate_levels(**LONG, spot=2411.5)

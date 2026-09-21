@@ -276,6 +276,24 @@ CREATE TABLE IF NOT EXISTS pool_strategy_allocs (
     updated_at TEXT NOT NULL,
     PRIMARY KEY (telegram_id, strategy)
 );
+
+-- MoonPay Commerce deposit customers: one personal Base USDC address per user.
+CREATE TABLE IF NOT EXISTS pool_moonpay_customers (
+    telegram_id INTEGER PRIMARY KEY,
+    customer_id TEXT NOT NULL UNIQUE,
+    customer_token TEXT,
+    deposit_address TEXT NOT NULL,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL
+);
+
+-- Credited MoonPay deposit txs (idempotency by tx key).
+CREATE TABLE IF NOT EXISTS pool_moonpay_credits (
+    tx_key TEXT PRIMARY KEY,
+    telegram_id INTEGER NOT NULL,
+    amount_usd REAL NOT NULL,
+    created_at TEXT NOT NULL
+);
 """
 
 _FROZEN_KEY = "intents_frozen"
@@ -544,11 +562,11 @@ def strategy_subscriber_ids(strategy: str) -> set[int]:
 
 
 def set_allocation(telegram_id: int, strategy: str, amount_usd: float) -> dict[str, Any]:
-    """Set a tester's capital allocation to one strategy.
+    """Deploy capital to one strategy (soft lock of wallet cash for sizing).
 
-    The allocation is a sizing base, not a reservation — nothing moves in the
-    cash journal until an Accept reserves risk against it. It is capped at the
-    account's cash so a tester cannot allocate money they do not hold.
+    Allocations do not move cash in the journal — cash stays the claim on the
+    pooled venue — but they lock undeployed wallet balance for Accept sizing
+    and Portfolio/Wallet display. Capped so sum(allocs) cannot exceed cash.
     """
     amount = round(float(amount_usd), 2)
     if amount < 0:
@@ -557,8 +575,30 @@ def set_allocation(telegram_id: int, strategy: str, amount_usd: float) -> dict[s
     if account is None or float(account["cash_usd"]) <= 0:
         return {"ok": False, "reason": "not_funded"}
     cash = float(account["cash_usd"])
-    if amount > cash:
-        return {"ok": False, "reason": "exceeds_cash", "cash_usd": cash}
+    current = get_allocation(telegram_id, strategy)
+    others = sum(
+        v for k, v in allocations(telegram_id).items() if k != str(strategy)
+    )
+    wallet_free = max(0.0, cash - others - float(account.get("reserved_usd") or 0))
+    # User can reallocate up to (wallet_free + current) into this strategy.
+    max_for_strategy = round(wallet_free + current, 2)
+    if amount > max_for_strategy + 1e-9:
+        return {
+            "ok": False,
+            "reason": "exceeds_wallet",
+            "cash_usd": cash,
+            "wallet_usd": round(max(0.0, cash - others - current), 2),
+            "max_usd": max_for_strategy,
+        }
+    if amount > 0 and amount < float(bot_config.POOL_MIN_DEPLOY_USD) and amount != current:
+        # Allow lowering an existing allocation below the minimum; only new
+        # or increased deploys must clear the floor.
+        if amount > current or current <= 0:
+            return {
+                "ok": False,
+                "reason": "below_min_deploy",
+                "minimum_usd": float(bot_config.POOL_MIN_DEPLOY_USD),
+            }
     with _connect() as conn:
         conn.execute(
             "INSERT INTO pool_strategy_allocs "
@@ -568,7 +608,189 @@ def set_allocation(telegram_id: int, strategy: str, amount_usd: float) -> dict[s
             (int(telegram_id), str(strategy), amount, _now()),
         )
     logger.info("pool: allocation %s -> %s $%.2f", telegram_id, strategy, amount)
-    return {"ok": True, "amount_usd": amount, "cash_usd": cash}
+    return {
+        "ok": True,
+        "amount_usd": amount,
+        "cash_usd": cash,
+        "wallet_usd": round(max(0.0, cash - others - amount), 2),
+    }
+
+
+def wallet_balance(telegram_id: int) -> dict[str, float]:
+    """Undeployed wallet vs deployed totals for Portfolio / Wallet surfaces."""
+    account = get_account(telegram_id)
+    if account is None:
+        return {
+            "cash_usd": 0.0,
+            "wallet_usd": 0.0,
+            "deployed_usd": 0.0,
+            "reserved_usd": 0.0,
+            "total_usd": 0.0,
+        }
+    cash = float(account["cash_usd"])
+    reserved = float(account["reserved_usd"])
+    deployed = sum(allocations(telegram_id).values())
+    wallet = max(0.0, cash - deployed)
+    return {
+        "cash_usd": cash,
+        "wallet_usd": round(wallet, 2),
+        "deployed_usd": round(deployed, 2),
+        "reserved_usd": round(reserved, 2),
+        "total_usd": round(cash, 2),
+        "withdrawable_usd": round(min(wallet, max(0.0, cash - reserved)), 2),
+    }
+
+
+def get_moonpay_customer(telegram_id: int) -> dict[str, Any] | None:
+    with _connect() as conn:
+        row = conn.execute(
+            "SELECT * FROM pool_moonpay_customers WHERE telegram_id = ?",
+            (int(telegram_id),),
+        ).fetchone()
+    return dict(row) if row else None
+
+
+def upsert_moonpay_customer(
+    telegram_id: int,
+    *,
+    customer_id: str,
+    deposit_address: str,
+    customer_token: str | None = None,
+) -> dict[str, Any]:
+    now = _now()
+    with _connect() as conn:
+        conn.execute(
+            "INSERT INTO pool_moonpay_customers "
+            "(telegram_id, customer_id, customer_token, deposit_address, "
+            "created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?) "
+            "ON CONFLICT(telegram_id) DO UPDATE SET "
+            "customer_id = excluded.customer_id, "
+            "customer_token = COALESCE(excluded.customer_token, "
+            "pool_moonpay_customers.customer_token), "
+            "deposit_address = excluded.deposit_address, "
+            "updated_at = excluded.updated_at",
+            (
+                int(telegram_id),
+                str(customer_id),
+                customer_token,
+                str(deposit_address),
+                now,
+                now,
+            ),
+        )
+    return get_moonpay_customer(telegram_id) or {}
+
+
+def find_telegram_id_by_moonpay_customer(customer_id: str) -> int | None:
+    with _connect() as conn:
+        row = conn.execute(
+            "SELECT telegram_id FROM pool_moonpay_customers WHERE customer_id = ?",
+            (str(customer_id),),
+        ).fetchone()
+    return int(row["telegram_id"]) if row else None
+
+
+def credit_moonpay_deposit(
+    *,
+    telegram_id: int,
+    amount_usd: float,
+    tx_key: str,
+    note: str | None = None,
+) -> dict[str, Any]:
+    """Idempotent credit from a MoonPay deposit webhook / poll."""
+    amount = round(float(amount_usd), 2)
+    if amount <= 0:
+        return {"ok": False, "reason": "bad_amount"}
+    if amount < float(bot_config.POOL_MIN_DEPOSIT_USD):
+        return {
+            "ok": False,
+            "reason": "below_minimum",
+            "minimum_usd": float(bot_config.POOL_MIN_DEPOSIT_USD),
+            "amount_usd": amount,
+        }
+    ensure_account = ensure_approved_account
+    try:
+        ensure_account(telegram_id)
+    except Exception:
+        pass
+    with _write_txn() as conn:
+        try:
+            conn.execute(
+                "INSERT INTO pool_moonpay_credits "
+                "(tx_key, telegram_id, amount_usd, created_at) VALUES (?, ?, ?, ?)",
+                (str(tx_key), int(telegram_id), amount, _now()),
+            )
+        except sqlite3.IntegrityError:
+            return {"ok": False, "reason": "duplicate", "tx_key": tx_key}
+        # Ensure account row exists
+        row = conn.execute(
+            "SELECT telegram_id FROM pool_accounts WHERE telegram_id = ?",
+            (int(telegram_id),),
+        ).fetchone()
+        if row is None:
+            conn.execute(
+                "INSERT INTO pool_accounts "
+                "(telegram_id, cash_usd, reserved_usd, deposited_usd, created_at) "
+                "VALUES (?, 0, 0, 0, ?)",
+                (int(telegram_id), _now()),
+            )
+        done = _apply_event(
+            conn,
+            int(telegram_id),
+            kind="deposit",
+            amount_usd=amount,
+            ref=f"moonpay:{tx_key}",
+            note=note or "MoonPay USDC deposit",
+        )
+        if not done:
+            return {"ok": False, "reason": "duplicate_event", "tx_key": tx_key}
+    account = get_account(telegram_id) or {}
+    logger.info(
+        "pool: moonpay credited %s $%.2f key=%s", telegram_id, amount, tx_key
+    )
+    return {
+        "ok": True,
+        "amount_usd": amount,
+        "cash_usd": float(account.get("cash_usd") or 0),
+        "telegram_id": int(telegram_id),
+        "tx_key": tx_key,
+    }
+
+
+def ensure_approved_account(telegram_id: int) -> None:
+    """Create a zero-balance account row if the user is approved but unfunded."""
+    if get_account(telegram_id) is not None:
+        return
+    if not is_approved(telegram_id):
+        return
+    with _connect() as conn:
+        conn.execute(
+            "INSERT OR IGNORE INTO pool_accounts "
+            "(telegram_id, cash_usd, reserved_usd, deposited_usd, created_at) "
+            "VALUES (?, 0, 0, 0, ?)",
+            (int(telegram_id), _now()),
+        )
+
+
+def sweep_report() -> dict[str, Any]:
+    """Ops view: how much user capital is claimed vs what should move to Coinbase."""
+    testers = total_tester_cash()
+    with _connect() as conn:
+        moonpay_n = conn.execute(
+            "SELECT COUNT(*) AS n FROM pool_moonpay_customers"
+        ).fetchone()["n"]
+        credited = conn.execute(
+            "SELECT COALESCE(SUM(amount_usd), 0) AS s FROM pool_moonpay_credits"
+        ).fetchone()["s"]
+    return {
+        "tester_cash_usd": round(testers, 2),
+        "moonpay_customers": int(moonpay_n),
+        "moonpay_credited_usd": round(float(credited or 0), 2),
+        "note": (
+            "Physical MoonPay merchant wallet -> Coinbase sweep is manual. "
+            "Move at least tester_cash_usd into the pooled Coinbase account."
+        ),
+    }
 
 
 def get_allocation(telegram_id: int, strategy: str) -> float:
@@ -2078,6 +2300,13 @@ def record_intent(
             if alloc <= 0:
                 return {"ok": False, "reason": "no_allocation",
                         "strategy": strategy}
+            if alloc < float(bot_config.POOL_MIN_ACCEPT_USD):
+                return {
+                    "ok": False,
+                    "reason": "below_min_accept",
+                    "minimum_usd": float(bot_config.POOL_MIN_ACCEPT_USD),
+                    "allocation_usd": alloc,
+                }
             base = min(alloc, available)
         else:
             base = available
@@ -2516,13 +2745,20 @@ def portfolio(telegram_id: int, spots: dict[str, float] | None = None) -> dict[s
             closed_stakes_out.append(item)
 
     realized_total = sum(float(s["realized_pnl_usd"]) for s in map(dict, stake_rows))
+    cash = float(account["cash_usd"])
+    reserved = float(account["reserved_usd"])
+    deploys = allocations(telegram_id)
+    deployed = sum(deploys.values())
+    wallet = max(0.0, cash - deployed)
     return {
         "ok": True,
-        "cash_usd": float(account["cash_usd"]),
-        "reserved_usd": float(account["reserved_usd"]),
-        "available_usd": round(
-            float(account["cash_usd"]) - float(account["reserved_usd"]), 2
-        ),
+        "cash_usd": cash,
+        "reserved_usd": reserved,
+        "available_usd": round(cash - reserved, 2),
+        "wallet_usd": round(wallet, 2),
+        "deployed_usd": round(deployed, 2),
+        "total_usd": round(cash, 2),
+        "deployments": {k: round(v, 2) for k, v in deploys.items() if v > 0},
         "deposited_usd": float(account["deposited_usd"]),
         "realized_pnl_usd": round(realized_total, 2),
         "unrealized_pnl_usd": round(unrealized, 2),

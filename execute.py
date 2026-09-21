@@ -252,6 +252,7 @@ def revalidate_levels(
     stop_loss: float,
     take_profits: list[float],
     spot: float,
+    lenient: bool = False,
 ) -> dict[str, Any]:
     """Re-check an idea's plan against the price we would actually fill at.
 
@@ -263,10 +264,13 @@ def revalidate_levels(
     * price ran **against** the entry (a worse fill than planned) — the whole
       structure shifts with it, so the clip still risks the distance the plan
       called for instead of silently risking more. Past ``LIVE_MAX_CHASE_R``
-      of that distance it is chasing, and is refused.
+      of that distance it is chasing, and is refused (unless ``lenient``).
     * price came **toward** the entry (a better fill) — the structural stop
       and targets are kept, so the trade simply risks less for the same
       reward. Through the stop, the premise is dead.
+
+    ``lenient`` (user Accepts): drop the R:R floor and chase refusal so the
+    order still goes in at market. Stop-breached and targets-passed stay hard.
 
     Returns ``{"ok": False, "reason": ...}`` or the re-anchored plan.
     """
@@ -279,7 +283,7 @@ def revalidate_levels(
         return {"ok": False, "reason": "bad_levels"}
 
     chase = (spot - entry) if long else (entry - spot)
-    if chase > risk_planned * bot_config.LIVE_MAX_CHASE_R:
+    if (not lenient) and chase > risk_planned * bot_config.LIVE_MAX_CHASE_R:
         return {"ok": False, "reason": "chased", "chase_r": round(chase / risk_planned, 2)}
 
     if chase > 0:
@@ -304,7 +308,7 @@ def revalidate_levels(
 
     avg = sum(ahead) / len(ahead)
     rr = ((avg - spot) if long else (spot - avg)) / risk_now
-    if rr < bot_config.LIVE_MIN_FILL_RR:
+    if (not lenient) and rr < bot_config.LIVE_MIN_FILL_RR:
         return {"ok": False, "reason": "rr_collapsed", "risk_reward": round(rr, 2)}
 
     return {
@@ -316,6 +320,7 @@ def revalidate_levels(
         "shifted": chase > 0,
         "drift_pct": round((spot - entry) / entry * 100.0, 2) if entry else 0.0,
         "dropped_tps": [round(t, 2) for t in tps if t not in ahead],
+        "lenient": lenient,
     }
 
 
@@ -1665,6 +1670,7 @@ def _revalidated_plan(
     entry: float,
     stop_loss: float,
     take_profits: list[float],
+    lenient: bool = False,
 ) -> dict[str, Any]:
     """Fetch the live mark and re-check the plan against it.
 
@@ -1696,6 +1702,7 @@ def _revalidated_plan(
         stop_loss=stop_loss,
         take_profits=take_profits,
         spot=spot,
+        lenient=lenient,
     )
     plan["spot"] = spot
     if plan.get("ok"):
@@ -1809,12 +1816,16 @@ def execute_mill_idea(
         return _skip("sleeve_full")
 
     # The idea was priced when it was minted; this fills at the price now.
+    # Manual (user) Accepts are lenient: drop R:R floor and chase refusal so
+    # tapping Accept actually puts them in, unless the stop is already gone
+    # or targets have passed / the idea expired upstream.
     plan = _revalidated_plan(
         product_id=product_id,
         direction=direction,
         entry=entry,
         stop_loss=stop_loss,
         take_profits=list(take_profits or []),
+        lenient=(fill_type == "manual"),
     )
     if not plan.get("ok"):
         verdict["revalidation"] = plan

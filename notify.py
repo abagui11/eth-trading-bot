@@ -22,6 +22,31 @@ from models import Suggestion
 
 logger = logging.getLogger(__name__)
 
+TELEGRAM_MAX_MESSAGE = 4000
+
+
+def split_telegram_text(text: str, limit: int = TELEGRAM_MAX_MESSAGE) -> list[str]:
+    """Split long replies into Telegram-safe chunks on paragraph boundaries."""
+    body = (text or "").strip()
+    if not body:
+        return [""]
+    if len(body) <= limit:
+        return [body]
+    chunks: list[str] = []
+    remaining = body
+    while remaining:
+        if len(remaining) <= limit:
+            chunks.append(remaining)
+            break
+        cut = remaining.rfind("\n\n", 0, limit)
+        if cut < limit // 3:
+            cut = remaining.rfind("\n", 0, limit)
+        if cut < limit // 3:
+            cut = limit
+        chunks.append(remaining[:cut].rstrip())
+        remaining = remaining[cut:].lstrip()
+    return chunks or [body[:limit]]
+
 
 def forum_trades_target() -> tuple[int, int | None] | None:
     """(chat_id, thread_id) for the forum Trades topic, or None for DM mode.

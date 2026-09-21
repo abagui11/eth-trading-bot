@@ -412,7 +412,7 @@ POOL_ENABLED: bool = True
 POOL_RISK_PCT: float = LIVE_HQ_RISK_PCT
 # Cash floor to Accept into the pool. Below this a 0.7% risk budget is under
 # $3.50 and the share becomes dust that only complicates the audit trail.
-POOL_MIN_EQUITY_USD: float = 500.0
+POOL_MIN_EQUITY_USD: float = 10.0
 # Hard ceiling on how long an Accept may sit reserved before the sweep returns
 # the money and tells the tester. The normal release is ref-based — the reserve
 # comes back as soon as the order path is gone — and this only catches the case
@@ -421,8 +421,13 @@ POOL_MIN_EQUITY_USD: float = 500.0
 # still legitimately fill, so the backstop can never race a real fill and drop
 # a tester out of a trade they were promised. 0 disables.
 POOL_INTENT_TTL_MIN: int = 150
-# Smallest deposit worth the manual ops round-trip.
-POOL_MIN_DEPOSIT_USD: float = 500.0
+# Smallest MoonPay / card deposit we'll credit (USDC on Base).
+POOL_MIN_DEPOSIT_USD: float = 20.0
+# Minimum dollars a user must deploy into a strategy before Accepts size from it.
+POOL_MIN_DEPLOY_USD: float = 50.0
+# Soft floor: Accepts blocked when strategy-available balance is under this
+# (0.7% risk sizing needs enough notional for venue minimums).
+POOL_MIN_ACCEPT_USD: float = 10.0
 # Reconcile drift beyond this alerts ops and freezes NEW pool intents (house
 # trading continues; open stakes keep booking their exits).
 POOL_RECON_TOLERANCE_USD: float = 25.0
