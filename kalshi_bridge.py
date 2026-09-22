@@ -8,7 +8,7 @@ dashboard can show bot performance without importing bot code.
 Hub .env knobs:
 
 * ``KALSHI_DB=/opt/kalshi-15m-bot/ledger.db`` — required for the tab.
-* ``KALSHI_LIVE_BOTS=eva_streak`` — which bot(s) trade the real account;
+* ``KALSHI_LIVE_BOTS=eva_wick`` — which bot(s) trade the real account;
   everything else shows as PAPER. Mirrors the bot repo's env of the same name.
 * ``KALSHI_EXPERIMENT_EPOCH`` — comparison start line (default: the
   2026-09-08 multi-bot flip). All per-bot stats and the closed list count
@@ -51,10 +51,10 @@ _BOT_BLURBS = {
         "Cash out at 2× or cut at ½; cool down after consecutive stops."
     ),
     "eva_wick": (
-        "Join the move the old wick fade bet against: same session-range pop/"
-        "flush triggers and EVA stance gates, but buy the momentum side at "
-        "~67–80¢ and hold to settlement. Replaced 2026-09-16; epoch book "
-        "backfilled from the replayed inverse — treat as a forward paper test."
+        "With 4–10 minutes left in the window, buy whichever side the book "
+        "prices at 67–80¢ and hold to settlement. No directional signal — "
+        "the band and the clock are the edge. Weekdays only. Live book "
+        "since 2026-09-22."
     ),
     "eva_arb": (
         "Last 2 minutes only. If the favorite touched 90¢ then dips to 75–85¢, "
@@ -80,7 +80,7 @@ def experiment_epoch() -> str:
 
 
 def live_bots() -> tuple[str, ...]:
-    raw = (os.getenv("KALSHI_LIVE_BOTS") or "eva_streak").strip()
+    raw = (os.getenv("KALSHI_LIVE_BOTS") or "eva_wick").strip()
     return tuple(s.strip() for s in raw.split(",") if s.strip())
 
 
