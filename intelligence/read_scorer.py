@@ -27,6 +27,21 @@ Two things this deliberately does not do
   days of data there are five clusters, which cannot support one. The scorer
   reports counts and rates; inference waits for enough days to carry it, and
   `summarize` says so in its output rather than printing a false interval.
+
+Armed reads (2026-09-22)
+------------------------
+A read on an untested array stores its direction as `armed_bias` and is
+scored in two stages by `resolve_armed`:
+
+  1. arming, over `ARM_WINDOW_H` from publication: the first M5 bar that
+     trades into the array triggers it. If the draw prints first the read is
+     `armed_ran_to_draw` (price left without the retrace — not a hit, since
+     the claim was never put at risk); if neither, `armed_not_triggered`.
+  2. from the trigger, the ordinary race over `horizon_h`, with the trigger
+     bar itself checked for a close-through first (same tie rule).
+
+The geometry baseline is taken from the touched edge, not the publish-time
+spot, because that is where the thesis is actually entered.
 """
 
 from __future__ import annotations
@@ -42,6 +57,7 @@ logger = logging.getLogger(__name__)
 
 M5 = 300
 DEFAULT_HORIZON_H = 24
+ARM_WINDOW_H = 24
 
 
 def _parse_ts(value: str | None) -> datetime | None:
@@ -153,6 +169,101 @@ def resolve_read(
     return out
 
 
+def resolve_armed(
+    read: dict[str, Any],
+    bars: list[dict[str, Any]],
+    *,
+    arm_window_h: int = ARM_WINDOW_H,
+    horizon_h: int = DEFAULT_HORIZON_H,
+) -> dict[str, Any]:
+    """Two-stage resolution for an armed read. `bars` start after publication."""
+    armed = read.get("armed_bias")
+    out = {
+        "id": read.get("id"),
+        "product_id": read.get("product_id"),
+        "timeframe": read.get("timeframe"),
+        "armed_bias": armed,
+        "outcome": "armed_not_triggered",
+        "trigger_bar": None,
+        "bars_to_outcome": None,
+        "implied_prob": None,
+    }
+    array = _band(read.get("repelling_lo"), read.get("repelling_hi"))
+    draw = _band(read.get("attracting_lo"), read.get("attracting_hi"))
+    inval = read.get("invalidation_price")
+    if armed not in ("bullish", "bearish") or not array or not draw or inval is None:
+        out["outcome"] = "unscoreable"
+        return out
+
+    per_hour = 3600 // M5
+    trigger = None
+    for i, bar in enumerate(bars[: arm_window_h * per_hour]):
+        high, low = float(bar["high"]), float(bar["low"])
+        if low <= array[1] and high >= array[0]:
+            trigger = i
+            break
+        if low <= draw[1] and high >= draw[0]:
+            out["outcome"] = "armed_ran_to_draw"
+            out["bars_to_outcome"] = i
+            return out
+    if trigger is None:
+        return out
+
+    entry = array[1] if armed == "bullish" else array[0]
+    staged = {**read, "bias": armed, "spot": entry}
+    out["trigger_bar"] = trigger
+    out["implied_prob"] = barrier_implied_hit_prob(staged)
+
+    close = float(bars[trigger]["close"])
+    inv = float(inval)
+    if (close < inv) if armed == "bullish" else (close > inv):
+        out["outcome"] = "resolved_invalidated"
+        out["bars_to_outcome"] = trigger
+        return out
+
+    tail = bars[trigger + 1: trigger + 1 + horizon_h * per_hour]
+    raced = resolve_read(staged, tail)
+    out["outcome"] = raced["outcome"]
+    if raced["bars_to_outcome"] is not None:
+        out["bars_to_outcome"] = trigger + 1 + raced["bars_to_outcome"]
+    return out
+
+
+def summarize_armed(resolved: list[dict[str, Any]]) -> dict[str, Any]:
+    """Trigger rate, then accuracy vs geometry on the triggered-and-decided."""
+    n = len(resolved)
+    counts: dict[str, int] = {}
+    for r in resolved:
+        counts[r["outcome"]] = counts.get(r["outcome"], 0) + 1
+    triggered = [r for r in resolved if r.get("trigger_bar") is not None]
+    decided = [r for r in triggered if r["outcome"] in
+               ("resolved_target", "resolved_invalidated")]
+    hits = sum(1 for r in decided if r["outcome"] == "resolved_target")
+    implied = [r["implied_prob"] for r in decided if r.get("implied_prob") is not None]
+    accuracy = hits / len(decided) if decided else None
+    implied_mean = sum(implied) / len(implied) if implied else None
+    days = sorted({str(r.get("created_at"))[:10] for r in resolved})
+    return {
+        "n_armed": n,
+        "outcomes": counts,
+        "trigger_rate": len(triggered) / n if n else None,
+        "n_decided": len(decided),
+        "accuracy": accuracy,
+        "barrier_implied_accuracy": implied_mean,
+        "skill_over_geometry": (
+            accuracy - implied_mean
+            if accuracy is not None and implied_mean is not None else None
+        ),
+        "inference": (
+            f"NOT INFERENTIAL: {len(decided)} decided armed reads over "
+            f"{len(days)} day(s)."
+            if len(days) < 10 or len(decided) < 60 else
+            f"{len(decided)} decided armed reads over {len(days)} days — "
+            "compute a day-clustered CI before quoting."
+        ),
+    }
+
+
 def score_window(
     *,
     hours_back: int = 120,
@@ -164,18 +275,26 @@ def score_window(
     cutoff_new = now - timedelta(hours=horizon_h)
     cutoff_old = now - timedelta(hours=hours_back)
 
+    armed_span_h = ARM_WINDOW_H + horizon_h
+    cutoff_armed = now - timedelta(hours=armed_span_h)
+
     rows = store.read_history(limit=500)
-    eligible = []
+    eligible, armed = [], []
     for r in rows:
         ts = _parse_ts(r.get("created_at"))
         if ts and cutoff_old <= ts <= cutoff_new:
             eligible.append((ts, r))
+        if ts and r.get("armed_bias") and cutoff_old <= ts <= cutoff_armed:
+            armed.append((ts, r))
     if not eligible:
         return {"n_eligible": 0, "note": "no reads have completed their horizon yet"}
 
     # One candle fetch per product covers every read in the window.
     span_start = int(min(ts for ts, _ in eligible).timestamp())
     span_end = int(max(ts for ts, _ in eligible).timestamp()) + horizon_h * 3600
+    if armed:
+        span_end = max(span_end, int(max(ts for ts, _ in armed).timestamp())
+                       + armed_span_h * 3600)
     candles: dict[str, list[dict[str, Any]]] = {}
     for product_id in {str(r.get("product_id")) for _, r in eligible}:
         try:
@@ -203,7 +322,21 @@ def score_window(
                 "implied_prob": barrier_implied_hit_prob(read),
             }
         )
-    return summarize(resolved, eligible)
+    summary = summarize(resolved, eligible)
+
+    armed_resolved = []
+    for ts, read in armed:
+        start = int(ts.timestamp())
+        bars = [
+            b for b in candles.get(str(read.get("product_id"))) or []
+            if start < _bar_epoch(b) <= start + armed_span_h * 3600
+        ]
+        armed_resolved.append(
+            resolve_armed(read, bars, horizon_h=horizon_h)
+            | {"created_at": read["created_at"]}
+        )
+    summary["armed"] = summarize_armed(armed_resolved)
+    return summary
 
 
 def _bar_epoch(bar: dict[str, Any]) -> int:

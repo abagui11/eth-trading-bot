@@ -123,9 +123,18 @@
           </div>
           <div class="metric sleeve-jump" data-tab="trading" role="button" tabindex="0">
             <div class="label">Eva live P&amp;L</div>
+            {# ICT family: control + swing/day live mirrors (same books as Eva Trades). #}
             {% set hq = live_performance.by_source.get('hq') %}
-            <div class="value {{ 'pos' if hq and hq.pnl_usd >= 0 else ('neg' if hq else '') }}" id="sleeve-hq-pnl">
-              {% if hq %}{{ "%+.2f"|format(hq.pnl_usd) }} · {{ hq.open }} open{% else %}no fills{% endif %}
+            {% set hq_swing = live_performance.by_source.get('hq_swing') %}
+            {% set hq_day = live_performance.by_source.get('hq_day') %}
+            {% set eva_pnl = (hq.pnl_usd if hq else 0)
+                           + (hq_swing.pnl_usd if hq_swing else 0)
+                           + (hq_day.pnl_usd if hq_day else 0) %}
+            {% set eva_open = (hq.open if hq else 0)
+                           + (hq_swing.open if hq_swing else 0)
+                           + (hq_day.open if hq_day else 0) %}
+            <div class="value {{ 'pos' if (hq or hq_swing or hq_day) and eva_pnl >= 0 else ('neg' if (hq or hq_swing or hq_day) else '') }}" id="sleeve-hq-pnl">
+              {% if hq or hq_swing or hq_day %}{{ "%+.2f"|format(eva_pnl) }} · {{ eva_open }} open{% else %}no fills{% endif %}
             </div>
           </div>
           <div class="metric sleeve-jump" data-tab="mill" role="button" tabindex="0">
@@ -247,7 +256,7 @@
                 <td>
                   <span class="stance-pill stance-{{ r.bias or 'none' }}"
                         {% if r.rationale %}title="{{ r.rationale }}"{% endif %}>
-                    {{ r.bias or 'no call' }}
+                    {% if r.bias %}{{ r.bias }}{% elif r.armed_bias %}armed {{ r.armed_bias }}{% else %}no call{% endif %}
                   </span>
                 </td>
                 <td>
@@ -286,7 +295,9 @@
         <p class="sub" style="margin-top:10px">
           &ldquo;no call&rdquo; is a result, not a gap: the array is named but no
           directional bias is locked until price trades into it or a holding
-          state confirms. Invalidation is an M5 close through the level.
+          state confirms. &ldquo;armed&rdquo; means the lean applies only if
+          price comes back to an untested array. Invalidation is an M5 close
+          through the level.
         </p>
       </section>
       {% endif %}

@@ -57,6 +57,17 @@ spot (three recorded 09-18 reads carried a bullish bias drawing *down*; the
 prompt stated the rule, the programmatic path enforced it, the LLM path did
 not), and re-prints of an unchanged setup are deduplicated at write time via
 `dedup_key`, because 19 rows of one setup is one observation, not nineteen.
+
+Armed reads, 2026-09-22 (Round-2 checkpoint design review)
+----------------------------------------------------------
+27h after Round-2 the no-array bucket fell 51% -> 11%, but 86% of reads now
+named an array price had not come back to, and biases fell to 1 in 133. The
+null rule, not the generator, was the bottleneck: 63 of those reads came back
+from the model *with* a bias that code discarded. An untested array is the
+level an ICT reader waits for, so the read is now kept as `armed_bias` —
+"if price returns to the array, lean this way toward the draw". `bias` stays
+null (no consumer sees a current direction), and `read_scorer` resolves armed
+reads only once the array is touched, from the touch.
 """
 
 from __future__ import annotations
@@ -278,8 +289,12 @@ For each (product, timeframe) return:
 
 Rules:
 - bias MUST be null unless you select BOTH a repelling array whose state is
-  "holding" AND an attracting level. No array holding or no draw identified
-  means no bias. Null is a correct, expected answer — it is not a failure.
+  "holding" or "untested" AND an attracting level. No usable array or no draw
+  identified means no bias. Null is a correct, expected answer — it is not a
+  failure.
+- On a "holding" array the bias is live now. On an "untested" array it is
+  armed: it reads "if price returns to this array, lean this way toward the
+  draw", and is only scored if price actually comes back to the array.
 - The bias must point from the array toward the draw. A bullish bias needs a
   bullish array below price and a draw above it.
 - Do not pick an array whose state is "traded_through": the thesis it would
@@ -358,9 +373,10 @@ def assemble_read(
 
     price = candidate["price"]
     dropped = None
+    armed_bias = None
     if bias and not (repelling and attracting):
         dropped, bias = "bias without both anchors", None
-    elif bias and repelling["state"] != "holding":
+    elif bias and repelling["state"] not in ("holding", "untested"):
         dropped, bias = f"array state={repelling['state']}", None
     elif bias and repelling["side"] != bias:
         dropped, bias = "array side opposes the bias", None
@@ -373,12 +389,18 @@ def assemble_read(
         draw_mid = (attracting["lo"] + attracting["hi"]) / 2
         if (bias == "bullish") != (draw_mid > price):
             dropped, bias = "draw on wrong side of price", None
+    if bias and repelling["state"] == "untested":
+        # 2026-09-22: armed, not dropped. The claim is conditional on price
+        # returning to the array, so it carries no current direction: `bias`
+        # stays null for every consumer and the scorer only races it if the
+        # array is touched.
+        armed_bias, bias = bias, None
     if dropped:
         logger.info(
             "Conditional bias dropped for %s %s: %s", product_id, tf, dropped
         )
 
-    invalidation = _invalidation(repelling, bias)
+    invalidation = _invalidation(repelling, bias or armed_bias)
     # Computed here, never asked of the model: is the thesis already dead at
     # publish time? This is the stale-invalidation metric.
     stale = bool(
@@ -394,11 +416,13 @@ def assemble_read(
                 product_id, tf, bias,
                 (repelling or {}).get("lo"), (repelling or {}).get("hi"),
                 (attracting or {}).get("lo"), (attracting or {}).get("hi"),
+                f"armed:{armed_bias}" if armed_bias else "",
             )
         ),
         "product_id": product_id,
         "timeframe": tf,
         "bias": bias,
+        "armed_bias": armed_bias,
         "attracting_kind": (attracting or {}).get("kind"),
         "attracting_lo": (attracting or {}).get("lo"),
         "attracting_hi": (attracting or {}).get("hi"),
@@ -418,20 +442,21 @@ def assemble_read(
 
 
 def _programmatic_choice(candidate: dict[str, Any]) -> dict[str, Any]:
-    """Fallback selection: nearest holding array, nearest draw on its side.
+    """Fallback selection: nearest holding array (else nearest untested one,
+    which assembles as an armed read), nearest draw on its side.
 
     Keeps the artifact populated when the LLM call fails, and doubles as the
     selection baseline the model has to beat — the same control design the
     stance board should have had from the start.
     """
-    holding = [
-        (i, z) for i, z in enumerate(candidate["repelling"])
-        if z["state"] == "holding"
+    usable = [
+        (i, z) for state in ("holding", "untested")
+        for i, z in enumerate(candidate["repelling"]) if z["state"] == state
     ]
-    if not holding:
+    if not usable:
         return {"repelling_id": None, "attracting_id": None, "bias": None,
-                "rationale": "No PD array holding."}
-    i, zone = holding[0]
+                "rationale": "No PD array holding or untested."}
+    i, zone = usable[0]
     want_above = zone["side"] == "bullish"
     price = candidate["price"]
     draw = next(
@@ -446,7 +471,7 @@ def _programmatic_choice(candidate: dict[str, Any]) -> dict[str, Any]:
         "attracting_id": draw,
         "bias": zone["side"] if draw is not None else None,
         "rationale": (
-            f"Programmatic: nearest holding {zone['kind']} "
+            f"Programmatic: nearest {zone['state']} {zone['kind']} "
             f"{zone['lo']:,.2f}-{zone['hi']:,.2f}, "
             + ("draw selected nearest on side." if draw is not None
                else "no draw on that side — bias withheld.")

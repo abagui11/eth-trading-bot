@@ -118,9 +118,11 @@ def _inv_cell(read: dict[str, Any]) -> str:
 
 def _bias_cell(read: dict[str, Any]) -> str:
     bias = read.get("bias")
-    if not bias:
-        return "no call"
-    return str(bias).replace("_", " ")
+    if bias:
+        return str(bias).replace("_", " ")
+    if read.get("armed_bias"):
+        return f"armed {read['armed_bias']}"
+    return "no call"
 
 
 # ---------------------------------------------------------------------------
@@ -215,7 +217,11 @@ def _ict_waiting_paragraph(rows: list[dict[str, Any]]) -> str:
         if "untested" in str(r.get("holds") or "").lower()
     )
     no_call = sum(1 for r in rows if r.get("bias") == "no call")
-    with_bias = [r for r in rows if r.get("bias") not in ("no call", "—", "")]
+    armed = [r for r in rows if str(r.get("bias") or "").startswith("armed")]
+    with_bias = [
+        r for r in rows
+        if r.get("bias") not in ("no call", "—", "") and r not in armed
+    ]
 
     bits: list[str] = [
         "How to read this: Bias only exists while the named level in "
@@ -237,6 +243,13 @@ def _ict_waiting_paragraph(rows: list[dict[str, Any]]) -> str:
             "named the arrays but is not locking a directional bias until price "
             "trades into them or a holding state confirms."
         )
+    if armed:
+        parts = [
+            f"{r['label']} {r['bias'].split(' ', 1)[-1]} if price returns to "
+            f"{r['holds']}, drawing to {r['drawing']}"
+            for r in armed[:3]
+        ]
+        bits.append("Armed (not a lean yet): " + "; ".join(parts) + ".")
 
     if untested:
         bits.append(
@@ -266,7 +279,7 @@ def ict_view_text() -> str:
         body.append(
             [
                 r["label"][:8],
-                str(r["bias"])[:8],
+                str(r["bias"]).replace("armed ", "arm ")[:8],
                 str(r["holds"])[:28],
                 str(r["drawing"])[:22],
                 str(r["invalid"])[:10],

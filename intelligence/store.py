@@ -55,6 +55,7 @@ CREATE TABLE IF NOT EXISTS intel_reads (
     stale_invalidation INTEGER NOT NULL DEFAULT 0,
     dropped_reason TEXT,
     dedup_key TEXT,
+    armed_bias TEXT,
     created_at TEXT NOT NULL
 );
 
@@ -190,8 +191,9 @@ def _ensure_stance_columns(conn: sqlite3.Connection) -> None:
         if name not in cols:
             conn.execute(f"ALTER TABLE intel_stances ADD COLUMN {name} TEXT")
     read_cols = {row[1] for row in conn.execute("PRAGMA table_info(intel_reads)")}
-    if read_cols and "dedup_key" not in read_cols:
-        conn.execute("ALTER TABLE intel_reads ADD COLUMN dedup_key TEXT")
+    for name in ("dedup_key", "armed_bias"):
+        if read_cols and name not in read_cols:
+            conn.execute(f"ALTER TABLE intel_reads ADD COLUMN {name} TEXT")
 
 
 def init_db() -> None:
@@ -304,7 +306,7 @@ _READ_FIELDS = (
     "attracting_hi", "repelling_kind", "repelling_side", "repelling_lo",
     "repelling_hi", "repelling_state", "location", "invalidation_price",
     "invalidation_trigger", "spot", "rationale", "stale_invalidation",
-    "dropped_reason", "dedup_key",
+    "dropped_reason", "dedup_key", "armed_bias",
 )
 
 

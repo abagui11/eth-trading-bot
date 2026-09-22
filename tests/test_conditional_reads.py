@@ -142,6 +142,61 @@ class TestNullRule(unittest.TestCase):
         self.assertTrue(read["stale_invalidation"])
 
 
+class TestArmedReads(unittest.TestCase):
+    """2026-09-22: an untested array arms the read instead of dropping it."""
+
+    def _untested(self, **kw) -> dict:
+        return _candidate(state="untested", price=103.0, **kw)
+
+    def test_untested_array_arms_instead_of_dropping(self) -> None:
+        read = conditional.assemble_read(
+            "BTC-USD", "H1", self._untested(),
+            {"repelling_id": 0, "attracting_id": 0, "bias": "bullish"},
+        )
+        self.assertIsNone(read["bias"])
+        self.assertEqual(read["armed_bias"], "bullish")
+        self.assertIsNone(read["dropped_reason"])
+        self.assertEqual(read["invalidation_price"], 99.0)
+        self.assertFalse(read["stale_invalidation"])
+
+    def test_holding_array_stays_live_not_armed(self) -> None:
+        read = conditional.assemble_read(
+            "BTC-USD", "H1", _candidate(),
+            {"repelling_id": 0, "attracting_id": 0, "bias": "bullish"},
+        )
+        self.assertEqual(read["bias"], "bullish")
+        self.assertIsNone(read["armed_bias"])
+
+    def test_armed_read_still_obeys_the_side_and_draw_rules(self) -> None:
+        opposed = conditional.assemble_read(
+            "BTC-USD", "H1", self._untested(),
+            {"repelling_id": 0, "attracting_id": 0, "bias": "bearish"},
+        )
+        self.assertIsNone(opposed["armed_bias"])
+        self.assertIn("opposes", opposed["dropped_reason"])
+        wrong_side = conditional.assemble_read(
+            "BTC-USD", "H1", self._untested(draw_at=80.0),
+            {"repelling_id": 0, "attracting_id": 0, "bias": "bullish"},
+        )
+        self.assertIsNone(wrong_side["armed_bias"])
+        self.assertIn("wrong side", wrong_side["dropped_reason"])
+
+    def test_traded_through_is_still_dropped(self) -> None:
+        read = conditional.assemble_read(
+            "BTC-USD", "H1", _candidate(state="traded_through"),
+            {"repelling_id": 0, "attracting_id": 0, "bias": "bullish"},
+        )
+        self.assertIsNone(read["bias"])
+        self.assertIsNone(read["armed_bias"])
+
+    def test_arming_to_live_changes_the_dedup_key(self) -> None:
+        """Price reaching the array is a new observation, not a re-print."""
+        choice = {"repelling_id": 0, "attracting_id": 0, "bias": "bullish"}
+        armed = conditional.assemble_read("BTC-USD", "H1", self._untested(), choice)
+        live = conditional.assemble_read("BTC-USD", "H1", _candidate(), choice)
+        self.assertNotEqual(armed["dedup_key"], live["dedup_key"])
+
+
 class TestDrawSideRule(unittest.TestCase):
     """2026-09-21 fix: a bias whose draw sits on the wrong side is refused.
 
@@ -306,12 +361,28 @@ class TestProgrammaticSelection(unittest.TestCase):
         self.assertEqual(choice["repelling_id"], 0)
         self.assertEqual(choice["bias"], "bullish")
 
-    def test_withholds_bias_with_no_holding_array(self) -> None:
+    def test_falls_back_to_an_untested_array_which_assembles_armed(self) -> None:
+        candidate = _candidate(state="untested", price=103.0)
+        choice = conditional._programmatic_choice(candidate)
+        self.assertEqual(choice["repelling_id"], 0)
+        read = conditional.assemble_read("BTC-USD", "H4", candidate, choice)
+        self.assertIsNone(read["bias"])
+        self.assertEqual(read["armed_bias"], "bullish")
+
+    def test_withholds_bias_when_every_array_is_traded_through(self) -> None:
         choice = conditional._programmatic_choice(
-            _candidate(state="untested")
+            _candidate(state="traded_through")
         )
         self.assertIsNone(choice["bias"])
         self.assertIsNone(choice["repelling_id"])
+
+    def test_prefers_holding_over_a_nearer_untested_array(self) -> None:
+        candidate = _candidate(state="untested")
+        candidate["repelling"].append(
+            {"kind": "breaker", "side": "bullish", "lo": 95.0, "hi": 96.0,
+             "state": "holding"})
+        choice = conditional._programmatic_choice(candidate)
+        self.assertEqual(choice["repelling_id"], 1)
 
     def test_withholds_bias_when_no_draw_sits_on_the_array_side(self) -> None:
         """A bullish array with only downside liquidity is not a long."""
@@ -384,13 +455,39 @@ class TestPersistence(TempDbTestCase):
 
     def test_null_bias_persists_as_null(self) -> None:
         read = conditional.assemble_read(
-            "BTC-USD", "H1", _candidate(state="untested"),
+            "BTC-USD", "H1", _candidate(state="traded_through"),
             {"repelling_id": 0, "attracting_id": 0, "bias": "bullish"},
         )
         store.insert_reads("2026-09-17T12:00:00Z", [read])
         row = store.latest_reads()[0]
         self.assertIsNone(row["bias"])
+        self.assertIsNone(row["armed_bias"])
         self.assertIsNotNone(row["dropped_reason"])
+
+    def test_armed_read_persists_with_null_bias(self) -> None:
+        read = conditional.assemble_read(
+            "BTC-USD", "H1", _candidate(state="untested", price=103.0),
+            {"repelling_id": 0, "attracting_id": 0, "bias": "bullish"},
+        )
+        store.insert_reads("2026-09-17T12:00:00Z", [read])
+        row = store.latest_reads()[0]
+        self.assertIsNone(row["bias"])
+        self.assertEqual(row["armed_bias"], "bullish")
+        self.assertEqual(row["invalidation_price"], 99.0)
+
+    def test_old_books_gain_the_armed_column(self) -> None:
+        import sqlite3
+
+        with sqlite3.connect(config.LEDGER_DB) as conn:
+            conn.execute("DROP TABLE intel_reads")
+            conn.execute(
+                "CREATE TABLE intel_reads (id INTEGER PRIMARY KEY, cycle_ts TEXT, "
+                "product_id TEXT, timeframe TEXT, bias TEXT, created_at TEXT)")
+        store.init_db()
+        with sqlite3.connect(config.LEDGER_DB) as conn:
+            cols = {r[1] for r in conn.execute("PRAGMA table_info(intel_reads)")}
+        self.assertIn("armed_bias", cols)
+        self.assertIn("dedup_key", cols)
 
     def test_cycle_falls_back_to_programmatic_when_the_llm_fails(self) -> None:
         bars = _bars([100 + (4 if i % 2 else 0) for i in range(120)])
@@ -528,6 +625,81 @@ class TestReadScorer(unittest.TestCase):
         self.assertGreater(
             summary["range_when_bias_pct"], summary["range_when_null_pct"]
         )
+
+
+class TestArmedScorer(unittest.TestCase):
+    """Bullish array 99-101, draw 110-111, invalidation 99, published at 103."""
+
+    def _read(self, **kw) -> dict:
+        read = {
+            "id": 7, "product_id": "BTC-USD", "timeframe": "H1",
+            "bias": None, "armed_bias": "bullish", "spot": 103.0,
+            "repelling_lo": 99.0, "repelling_hi": 101.0,
+            "attracting_lo": 110.0, "attracting_hi": 111.0,
+            "invalidation_price": 99.0,
+        }
+        read.update(kw)
+        return read
+
+    def _resolve(self, triples, **kw):
+        from intelligence import read_scorer
+
+        return read_scorer.resolve_armed(self._read(), _m5(triples), **kw)
+
+    def test_never_returning_is_not_triggered(self) -> None:
+        out = self._resolve([(104, 102, 103), (105, 102, 104)])
+        self.assertEqual(out["outcome"], "armed_not_triggered")
+        self.assertIsNone(out["trigger_bar"])
+
+    def test_draw_before_retrace_is_ran_to_draw_not_a_hit(self) -> None:
+        out = self._resolve([(104, 102, 103), (112, 104, 110), (101, 99.5, 100)])
+        self.assertEqual(out["outcome"], "armed_ran_to_draw")
+        self.assertIsNone(out["trigger_bar"])
+
+    def test_retrace_then_draw_is_a_hit(self) -> None:
+        out = self._resolve([(104, 102, 103), (103, 100.5, 101.5), (112, 104, 110)])
+        self.assertEqual(out["outcome"], "resolved_target")
+        self.assertEqual(out["trigger_bar"], 1)
+        self.assertEqual(out["bars_to_outcome"], 2)
+
+    def test_retrace_then_close_through_is_a_miss(self) -> None:
+        out = self._resolve([(104, 102, 103), (103, 100.5, 101.5), (100, 97, 98)])
+        self.assertEqual(out["outcome"], "resolved_invalidated")
+
+    def test_trigger_bar_closing_through_is_a_miss(self) -> None:
+        out = self._resolve([(104, 102, 103), (103, 97, 98), (112, 104, 110)])
+        self.assertEqual(out["outcome"], "resolved_invalidated")
+        self.assertEqual(out["bars_to_outcome"], 1)
+
+    def test_arm_window_bounds_the_trigger(self) -> None:
+        # 13 quiet bars then a retrace; with a 1h window (12 bars) it is too late.
+        quiet = [(104, 102, 103)] * 13
+        out = self._resolve(quiet + [(103, 100.5, 101.5)], arm_window_h=1)
+        self.assertEqual(out["outcome"], "armed_not_triggered")
+
+    def test_geometry_is_measured_from_the_touched_edge(self) -> None:
+        out = self._resolve([(104, 102, 103), (103, 100.5, 101.5), (112, 104, 110)])
+        # entry 101: target 110.5 is 9.5 away, invalidation 99 is 2 away
+        self.assertAlmostEqual(out["implied_prob"], 2.0 / 11.5, places=6)
+
+    def test_summary_separates_trigger_rate_from_accuracy(self) -> None:
+        from intelligence import read_scorer
+
+        rows = [
+            {"outcome": "armed_not_triggered", "trigger_bar": None},
+            {"outcome": "armed_ran_to_draw", "trigger_bar": None},
+            {"outcome": "resolved_target", "trigger_bar": 3, "implied_prob": 0.2},
+            {"outcome": "resolved_invalidated", "trigger_bar": 1, "implied_prob": 0.2},
+        ]
+        for r in rows:
+            r["created_at"] = "2026-09-22T12:00:00Z"
+        s = read_scorer.summarize_armed(rows)
+        self.assertEqual(s["n_armed"], 4)
+        self.assertAlmostEqual(s["trigger_rate"], 0.5)
+        self.assertEqual(s["n_decided"], 2)
+        self.assertAlmostEqual(s["accuracy"], 0.5)
+        self.assertAlmostEqual(s["skill_over_geometry"], 0.3)
+        self.assertIn("NOT INFERENTIAL", s["inference"])
 
 
 class TestBarrierImpliedBaseline(unittest.TestCase):
