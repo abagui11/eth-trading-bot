@@ -405,6 +405,76 @@ def build_from_idea(idea: dict[str, Any]) -> Suggestion:
     )
 
 
+def reset_account(
+    telegram_id: int, *, admin_id: int, dry_run: bool = False
+) -> dict[str, Any]:
+    """Return a demo account to approved-but-empty, between recording takes.
+
+    What a run-through leaves behind: an open stake in a real mill trade,
+    a strategy subscription with an allocation, and leftover cash. This
+    unwinds all of it — closes every live trade the account is staked in
+    (via `execute.close_live_trade`, which books the pool share honestly),
+    zeroes allocations, unsubscribes everything, and debits the balance to
+    zero as a proper ledger event. The account stays approved, so /credit
+    and /democard work immediately on the next take.
+
+    ``dry_run`` reports what would happen and touches nothing — the caller
+    (`/resetdemo`) shows that first, because this closes real positions and
+    empties a balance, and the only thing separating "reset the demo
+    account" from "drain a tester" is the id typed after the command.
+    """
+    import execute
+    import pool
+
+    account = pool.get_account(telegram_id)
+    if account is None:
+        return {"ok": False, "reason": "no_account"}
+
+    trade_ids = pool.open_stake_trade_ids(telegram_id)
+    subs = pool.strategy_subscriptions(telegram_id)
+    allocs = {k: v for k, v in pool.allocations(telegram_id).items() if v > 0}
+
+    if dry_run:
+        return {
+            "ok": True, "dry_run": True, "trade_ids": trade_ids,
+            "subscriptions": subs, "allocations": allocs,
+            "cash_usd": float(account["cash_usd"]),
+            "reserved_usd": float(account["reserved_usd"]),
+        }
+
+    closed: list[dict[str, Any]] = []
+    for tid in trade_ids:
+        result = execute.close_live_trade(tid)
+        closed.append({"trade_id": tid, **result})
+        if not result.get("ok"):
+            # Stop before the debit: an account with a live stake still open
+            # is not empty, and pretending otherwise strands the margin.
+            return {"ok": False, "reason": "close_failed", "closed": closed}
+
+    pool.clear_allocations(telegram_id)
+    for key in subs:
+        pool.unsubscribe_strategy(telegram_id, key)
+
+    debited = 0.0
+    free = pool.withdrawable_usd(telegram_id)
+    if free > 0:
+        result = pool.debit(
+            telegram_id, free, admin_id=admin_id, note="demo account reset"
+        )
+        if not result.get("ok"):
+            return {"ok": False, "reason": f"debit_failed:{result.get('reason')}",
+                    "closed": closed}
+        debited = free
+
+    account = pool.get_account(telegram_id) or {}
+    return {
+        "ok": True, "dry_run": False, "closed": closed,
+        "unsubscribed": subs, "debited_usd": debited,
+        "cash_usd": float(account.get("cash_usd") or 0.0),
+        "reserved_usd": float(account.get("reserved_usd") or 0.0),
+    }
+
+
 def send(telegram_id: int, *, product: str = "BTC-USD",
          side: str = "buy", mirror: bool = False,
          source: str | None = None,

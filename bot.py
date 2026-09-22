@@ -2492,6 +2492,100 @@ async def cmd_democard(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
     await _reply(update, "\n".join(lines))
 
 
+async def cmd_resetdemo(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """`/resetdemo <telegram_id> [confirm]` — empty a demo account between takes.
+
+    Closes every live trade the account holds a stake in (booked honestly:
+    pool P&L share plus margin release), zeroes allocations, unsubscribes
+    from every strategy, and debits the balance to $0. The account stays
+    approved, so /credit and /democard work immediately on the next take.
+
+    Without `confirm` it only reports what would happen. That order is the
+    safety: the command closes real positions and empties a real balance, and
+    nothing but the typed id distinguishes the demo account from a tester.
+    """
+    user = update.effective_user
+    if user is None or update.message is None:
+        return
+    if not bot_config.POOL_ENABLED or not pool.is_admin(user.id):
+        return
+
+    import demo_card
+
+    args = context.args or []
+    if not args or not str(args[0]).isdigit():
+        await _reply(update, "Usage: /resetdemo <telegram_id> [confirm]")
+        return
+    target_id = int(args[0])
+    confirm = any(str(a).lower() == "confirm" for a in args[1:])
+    loop = asyncio.get_running_loop()
+
+    if not confirm:
+        report = await loop.run_in_executor(
+            None,
+            lambda: demo_card.reset_account(
+                target_id, admin_id=user.id, dry_run=True
+            ),
+        )
+        if not report.get("ok"):
+            await _reply(update, f"Cannot reset {target_id} ({report.get('reason')}).")
+            return
+        lines = [
+            f"Reset preview for {target_id} — nothing done yet:",
+            f"• cash ${report['cash_usd']:,.2f} "
+            f"(${report['reserved_usd']:,.2f} in open stakes)",
+        ]
+        if report["trade_ids"]:
+            lines.append(
+                "• would close live trade(s) "
+                + ", ".join(f"#{t}" for t in report["trade_ids"])
+                + " at market"
+            )
+        if report["subscriptions"]:
+            lines.append(
+                "• would unsubscribe from " + ", ".join(report["subscriptions"])
+            )
+        if report["allocations"]:
+            lines.append(
+                "• would zero allocations: "
+                + ", ".join(f"{k} ${v:,.2f}"
+                            for k, v in report["allocations"].items())
+            )
+        lines.append(f"\n/resetdemo {target_id} confirm to do it.")
+        await _reply(update, "\n".join(lines))
+        return
+
+    result = await loop.run_in_executor(
+        None, lambda: demo_card.reset_account(target_id, admin_id=user.id)
+    )
+    if not result.get("ok"):
+        detail = result.get("reason")
+        failed = [c for c in (result.get("closed") or []) if not c.get("ok")]
+        if failed:
+            detail = (
+                f"{detail} — trade #{failed[0]['trade_id']}: "
+                f"{failed[0].get('reason')}"
+            )
+        await _reply(update, f"Reset stopped: {detail}. Balances untouched "
+                             "beyond what the message above says was closed.")
+        return
+    lines = [f"{target_id} reset — ready for the next take."]
+    for leg in result["closed"]:
+        lines.append(
+            f"• closed #{leg['trade_id']} {leg.get('product_id')} "
+            f"{leg.get('side')} @ ${float(leg.get('exit_price') or 0):,.2f} "
+            f"({float(leg.get('pnl_usd') or 0):+,.2f})"
+        )
+    if result["unsubscribed"]:
+        lines.append("• unsubscribed from " + ", ".join(result["unsubscribed"]))
+    if result["debited_usd"] > 0:
+        lines.append(f"• debited ${result['debited_usd']:,.2f}")
+    lines.append(
+        f"Cash ${result['cash_usd']:,.2f} · reserved ${result['reserved_usd']:,.2f}"
+    )
+    await _reply(update, "\n".join(lines))
+
+
 async def cmd_wallet(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """`/wallet` shows the payout address; `/wallet 0x…` sets or changes it."""
     user = update.effective_user
@@ -3372,6 +3466,7 @@ def build_application() -> Application:
     app.add_handler(CommandHandler("deposit", cmd_deposit))
     app.add_handler(CommandHandler("wallet", cmd_wallet))
     app.add_handler(CommandHandler("democard", cmd_democard))
+    app.add_handler(CommandHandler("resetdemo", cmd_resetdemo))
     app.add_handler(CommandHandler("assign", cmd_assign))
     app.add_handler(CommandHandler("withdraw", cmd_withdraw))
     app.add_handler(CommandHandler("payouts", cmd_payouts))

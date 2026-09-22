@@ -1102,6 +1102,90 @@ def _force_close_for_priority(
         )
 
 
+def close_live_trade(
+    trade_id: int, *, reason: str = "manual_close"
+) -> dict[str, Any]:
+    """Operator close: flatten one live trade at market and book everything.
+
+    Exists for the demo-account reset (`demo_card.reset_account`), where a
+    test Accept has put a stake in a real position that must be unwound
+    between recording takes. The ordering is the same as the priority
+    force-close, with one addition — the pool exit share is booked too, so a
+    staked tester is credited their P&L rather than only getting margin back:
+
+    1. cancel THIS trade's exit orders only, and wait for the venue to
+       release them — other sleeves can share the instrument and must keep
+       their brackets;
+    2. market-flatten exactly ``qty_open`` (never ``close_position``, which
+       would flatten every sleeve netted into the contract);
+    3. book the ledger leg, then the pool stake share (`pool.book_exit`);
+    4. `_close_out` with ``refill_mill=False`` so the re-offer sweep cannot
+       put a fresh clip into the sleeve this just freed.
+    """
+    trade = live_ledger.get_trade(trade_id)
+    if not trade:
+        return {"ok": False, "reason": "unknown_trade"}
+    if str(trade.get("status")) != "open":
+        return {"ok": False, "reason": "not_open", "status": trade.get("status")}
+
+    gw = get_gateway()
+    instrument = str(trade["instrument"])
+    qty_open = _qty_open(trade)
+    entry = float(trade["entry"])
+    side = str(trade["side"])
+    direction = 1.0 if side == "long" else -1.0
+
+    for oid in _exit_order_ids(trade):
+        try:
+            gw.cancel_orders([oid])
+        except GatewayError:
+            logger.exception(
+                "close_live_trade #%s: cancel of exit %s failed — aborting",
+                trade_id, oid,
+            )
+            return {"ok": False, "reason": "cancel_failed", "order_id": oid}
+        settled = _await_cancel(gw, oid)
+        if settled not in ("CANCELLED", "EXPIRED", "FILLED"):
+            logger.warning(
+                "close_live_trade #%s: exit %s cancel unconfirmed (%s) — "
+                "closing anyway", trade_id, oid, settled,
+            )
+
+    try:
+        order = gw.place_market_order(
+            instrument=instrument,
+            side="sell" if side == "long" else "buy",
+            amount=qty_open,
+            label=f"ops-close:{trade_id}",
+        )
+    except GatewayError as exc:
+        logger.error("close_live_trade #%s: flatten rejected: %s", trade_id, exc)
+        return {"ok": False, "reason": "flatten_rejected"}
+
+    info = (order or {}).get("order") or {}
+    fill_qty = float(info.get("filled_qty") or qty_open)
+    fill_price = float(info.get("average_price") or entry)
+    order_id = str(info.get("order_id") or f"ops-close:{trade_id}")
+    pnl = (fill_price - entry) * fill_qty * direction
+
+    live_ledger.record_partial_exit(
+        trade_id, exit_qty=fill_qty, exit_price=fill_price, pnl_usd=pnl,
+        order_id=order_id, reason=reason,
+    )
+    _pool_book_exit(
+        trade_id, exit_qty=fill_qty, exit_price=fill_price, pnl_usd=pnl,
+        order_id=order_id, reason=reason, qty_total=float(trade["qty"]),
+    )
+    row = live_ledger.get_trade(trade_id) or {}
+    _close_out(gw, trade_id, row, reason=reason, refill_mill=False)
+    return {
+        "ok": True, "trade_id": int(trade_id),
+        "product_id": trade.get("product_id"), "side": side,
+        "qty": fill_qty, "exit_price": fill_price,
+        "pnl_usd": round(pnl, 2),
+    }
+
+
 # ---------------------------------------------------------------------------
 # Tester pool hooks — stakes ride the house fill; every failure is contained
 # ---------------------------------------------------------------------------

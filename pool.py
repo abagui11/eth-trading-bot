@@ -790,6 +790,22 @@ def allocations(telegram_id: int) -> dict[str, float]:
     return {str(r["strategy"]): float(r["amount_usd"]) for r in rows}
 
 
+def clear_allocations(telegram_id: int) -> None:
+    """Zero every strategy allocation, regardless of cash.
+
+    `set_allocation(…, 0)` refuses on an unfunded account, which is right for
+    a tester but wrong for a reset — a stale allocation row left behind on an
+    emptied account would quote a size on the next credit. Direct write, same
+    as the clamp's zero branch.
+    """
+    with _connect() as conn:
+        conn.execute(
+            "UPDATE pool_strategy_allocs SET amount_usd = 0, updated_at = ? "
+            "WHERE telegram_id = ?",
+            (_now(), int(telegram_id)),
+        )
+
+
 def clamp_allocations_to_cash(telegram_id: int) -> dict[str, float]:
     """Keep per-user deployments ≤ that user's cash claim.
 
@@ -2631,6 +2647,17 @@ def open_stakes_for(trade_id: int) -> list[dict[str, Any]]:
             (trade_id,),
         ).fetchall()
     return [dict(r) for r in rows]
+
+
+def open_stake_trade_ids(telegram_id: int) -> list[int]:
+    """Live trades this tester currently holds an open stake in."""
+    with _connect() as conn:
+        rows = conn.execute(
+            "SELECT DISTINCT live_trade_id FROM pool_stakes "
+            "WHERE telegram_id = ? AND status = 'open' ORDER BY live_trade_id",
+            (int(telegram_id),),
+        ).fetchall()
+    return [int(r["live_trade_id"]) for r in rows]
 
 
 def join_open_trade(
