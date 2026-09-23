@@ -108,6 +108,18 @@ class AccessTests(PoolTestCase):
         self.assertEqual(pool.request_access(BOB), "denied")
         self.assertFalse(pool.is_approved(BOB))
 
+    def test_list_access_roster_orders_pending_first_with_cash(self) -> None:
+        pool.request_access(ALICE, "alice")
+        pool.approve_user(ALICE, admin_id=ADMIN, username="alice")
+        pool.credit(ALICE, 250.0, admin_id=ADMIN, note="t")
+        pool.request_access(BOB, "bob")
+        roster = pool.list_access_roster()
+        self.assertEqual([r["telegram_id"] for r in roster], [BOB, ALICE])
+        self.assertEqual(roster[0]["status"], "pending")
+        self.assertEqual(roster[0]["username"], "bob")
+        self.assertEqual(roster[1]["status"], "approved")
+        self.assertEqual(float(roster[1]["cash_usd"]), 250.0)
+
     def test_is_allowed_gates_unknown_users_when_pool_is_on(self) -> None:
         with patch.object(config, "PAYWALL_ENABLED", False):
             self.assertFalse(access.is_allowed(999999))

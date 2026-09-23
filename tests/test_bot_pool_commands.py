@@ -371,6 +371,49 @@ class PoolCommandTests(unittest.TestCase):
             update, _ = self._run(bot.cmd_portfolio)
         self.assertIn("1,000.00", self._texts(update))
 
+    def test_users_and_admin_are_admin_only(self) -> None:
+        update, _ = self._run(bot.cmd_users)
+        self.assertIn("restricted to pool admins", self._texts(update))
+        update, _ = self._run(bot.cmd_admin)
+        self.assertIn("restricted to pool admins", self._texts(update))
+
+    def test_users_lists_ids_usernames_and_cash(self) -> None:
+        pool.request_access(UID, "tester")
+        pool.approve_user(UID, admin_id=ADMIN, username="tester")
+        pool.credit(UID, 500.0, admin_id=ADMIN, note="demo")
+        pending = 888002
+        pool.request_access(pending, "waiting")
+
+        update, context = self._admin_update()
+        asyncio.run(bot.cmd_users(update, context))
+        text = self._texts(update)
+
+        self.assertIn("pending", text)
+        self.assertIn(str(pending), text)
+        self.assertIn("@waiting", text)
+        self.assertIn("approved", text)
+        self.assertIn(str(UID), text)
+        self.assertIn("@tester", text)
+        self.assertIn("$500.00", text)
+        self.assertIn("/credit", text)
+        # Pending before approved so the Admit queue is what you see first.
+        self.assertLess(text.index("pending"), text.index("approved"))
+
+    def test_users_empty_roster_says_so(self) -> None:
+        update, context = self._admin_update()
+        asyncio.run(bot.cmd_users(update, context))
+        self.assertIn("No access requests", self._texts(update))
+
+    def test_admin_lists_onboarding_commands(self) -> None:
+        update, context = self._admin_update()
+        asyncio.run(bot.cmd_admin(update, context))
+        text = self._texts(update)
+        for needle in (
+            "/users", "/credit", "/democard", "/resetdemo", "/unsubscribe",
+            "/assign", "/payouts", "/sweep",
+        ):
+            self.assertIn(needle, text)
+
 
 class DemoCardTests(unittest.TestCase):
     """The demo card, whose whole value depends on Accept being both real and

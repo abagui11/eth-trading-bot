@@ -87,6 +87,32 @@ HELP_MESSAGE = (
     "Use the buttons below — Fund, Wallet, Strategies, Portfolio, Brain."
 )
 
+# Pool-admin cheatsheet for /admin. Kept here so a demo operator can read it
+# without opening CLOUD.md mid-recording.
+ADMIN_HELP_MESSAGE = (
+    "Admin commands (pool operators only):\n\n"
+    "Onboarding\n"
+    "/users — roster of telegram ids + usernames + cash\n"
+    "  (Admit/Deny also arrives as a card when someone new messages)\n"
+    "/credit <id> <usd> [note] — fund an approved account\n"
+    "/debit <id> <usd> [note] — pull cash back\n"
+    "/resetdemo <id> [confirm] — wipe between demo takes\n"
+    "/unsubscribe <id> — remove an account entirely\n\n"
+    "Live product demo\n"
+    "/democard scan — which mill ideas would fill right now\n"
+    "/democard real [id] — send a fillable live mill card\n"
+    "/democard mint [id] — mint a fresh idea and send it live\n"
+    "/democard [id] [btc|eth] [long|short] — demo card "
+    "(does not trade)\n\n"
+    "Money ops\n"
+    "/assign <coinbase_tx_id> <id> — claim an orphan deposit\n"
+    "/payouts [resume] — payout queue / halt switch\n"
+    "/sweep — MoonPay-credited capital on Coinbase\n\n"
+    "Button flows (arrive as cards, not commands)\n"
+    "Admit/Deny · deposit Credit/Reject · withdrawal Approve/Deny · "
+    "wallet-change review"
+)
+
 
 def main_keyboard() -> InlineKeyboardMarkup:
     """Primary button-first home keyboard (pool or demo)."""

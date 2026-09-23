@@ -217,7 +217,9 @@ edit, no restart:
 4. From then on their Accepts in the Trades topic join live fills with
    pooled sizing; `/portfolio` shows their real book. `/credit <id> <usd>`
    and `/debit <id> <usd>` are the admin escape hatches (a debit can never
-   touch margin reserved in open trades).
+   touch margin reserved in open trades). `/users` prints every telegram
+   id + username + cash so you can copy an id into `/credit` without SSH;
+   `/admin` lists the full operator command set.
 
 #### One-time forum setup
 
@@ -496,6 +498,11 @@ the admin command **`/democard`**, or with `deploy/_send_demo_card.py` if you
 want it scripted. Either way it is labelled as a demo and built by the **live**
 card renderer with the **live** sizing rule, so the size it quotes is the size
 a real card would quote for that account.
+
+Typical onboarding mid-recording: Admit the new user from the access card →
+`/users` to confirm their id → `/credit <id> 500` → `/democard real <id>` (or
+`mint` if the book is empty). `/admin` lists every operator command in one
+place.
 
 `/democard` takes its arguments in any order, because it gets typed live:
 

@@ -3099,6 +3099,55 @@ async def cmd_debit(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     await _admin_cash_command(update, context, kind="debit")
 
 
+async def cmd_users(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Admin: /users — roster of telegram ids for /credit and Admit follow-up."""
+    user = update.effective_user
+    if user is None or update.message is None:
+        return
+    if not bot_config.POOL_ENABLED or not pool.is_admin(user.id):
+        await _reply(update, "/users is restricted to pool admins.")
+        return
+
+    rows = pool.list_access_roster()
+    if not rows:
+        await _reply(update, "No access requests yet — nobody has messaged the bot.")
+        return
+
+    lines = [f"Pool roster ({len(rows)}):", ""]
+    current_status: str | None = None
+    for row in rows:
+        status = str(row.get("status") or "?")
+        if status != current_status:
+            current_status = status
+            lines.append(status)
+        handle = row.get("username")
+        handle_s = f"@{handle}" if handle else "—"
+        tid = int(row["telegram_id"])
+        if status == "approved":
+            cash = float(row.get("cash_usd") or 0)
+            reserved = float(row.get("reserved_usd") or 0)
+            lines.append(
+                f"  {tid}  {handle_s}  cash ${cash:,.2f}"
+                + (f"  reserved ${reserved:,.2f}" if reserved else "")
+            )
+        else:
+            lines.append(f"  {tid}  {handle_s}")
+    lines.append("")
+    lines.append("/credit <id> <usd> funds an approved row.")
+    await _reply(update, "\n".join(lines)[:4096])
+
+
+async def cmd_admin(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Admin: /admin — cheatsheet of onboarding and demo commands."""
+    user = update.effective_user
+    if user is None or update.message is None:
+        return
+    if not bot_config.POOL_ENABLED or not pool.is_admin(user.id):
+        await _reply(update, "/admin is restricted to pool admins.")
+        return
+    await _reply(update, telegram_ui.ADMIN_HELP_MESSAGE)
+
+
 async def _admin_cash_command(
     update: Update, context: ContextTypes.DEFAULT_TYPE, *, kind: str
 ) -> None:
@@ -3472,6 +3521,8 @@ def build_application() -> Application:
     app.add_handler(CommandHandler("payouts", cmd_payouts))
     app.add_handler(CommandHandler("credit", cmd_credit))
     app.add_handler(CommandHandler("debit", cmd_debit))
+    app.add_handler(CommandHandler("users", cmd_users))
+    app.add_handler(CommandHandler("admin", cmd_admin))
     app.add_handler(CommandHandler("unsubscribe", cmd_unsubscribe))
     app.add_handler(CommandHandler("chart", cmd_chart))
     app.add_handler(CommandHandler("research", cmd_research))

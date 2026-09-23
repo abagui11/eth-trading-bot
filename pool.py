@@ -993,6 +993,34 @@ def list_accounts() -> list[dict[str, Any]]:
     return [dict(r) for r in rows]
 
 
+def list_access_roster() -> list[dict[str, Any]]:
+    """Every access-request row, with cash if they have a pool account.
+
+    Ordered pending first (needs Admit), then approved, then denied — so an
+    admin typing /users mid-demo sees who still needs a tap at the top.
+    """
+    with _connect() as conn:
+        rows = conn.execute(
+            """
+            SELECT au.telegram_id, au.username, au.status, au.requested_at,
+                   au.decided_at,
+                   COALESCE(pa.cash_usd, 0) AS cash_usd,
+                   COALESCE(pa.reserved_usd, 0) AS reserved_usd,
+                   pa.status AS account_status
+            FROM approved_users au
+            LEFT JOIN pool_accounts pa ON pa.telegram_id = au.telegram_id
+            ORDER BY
+                CASE au.status
+                    WHEN 'pending' THEN 0
+                    WHEN 'approved' THEN 1
+                    ELSE 2
+                END,
+                au.telegram_id
+            """
+        ).fetchall()
+    return [dict(r) for r in rows]
+
+
 def _apply_event(
     conn: sqlite3.Connection,
     telegram_id: int,
