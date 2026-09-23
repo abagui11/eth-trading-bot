@@ -109,10 +109,16 @@ _ME_QUERY = re.compile(
 
 
 def _username(update: Update) -> str | None:
+    """The @handle, or the display name when the account never set one.
+
+    A handle is optional in Telegram. An account without one used to be
+    recorded as NULL everywhere, which made it an anonymous bare id in
+    /users and the Admit card — the eva test account was invisible this way.
+    """
     user = update.effective_user
     if user is None:
         return None
-    return user.username
+    return user.username or (user.full_name or None)
 
 
 def _is_chart_query(text: str) -> bool:
@@ -3121,14 +3127,21 @@ async def cmd_users(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
             current_status = status
             lines.append(status)
         handle = row.get("username")
-        handle_s = f"@{handle}" if handle else "—"
+        # A recorded name with a space is a display name, not an @handle —
+        # accounts without a handle fall back to their profile name.
+        if not handle:
+            handle_s = "—"
+        elif " " in str(handle):
+            handle_s = str(handle)
+        else:
+            handle_s = f"@{handle}"
         tid = int(row["telegram_id"])
         if status == "approved":
             cash = float(row.get("cash_usd") or 0)
             reserved = float(row.get("reserved_usd") or 0)
             lines.append(
                 f"  {tid}  {handle_s}  cash ${cash:,.2f}"
-                + (f"  reserved ${reserved:,.2f}" if reserved else "")
+                + (f"  reserved ${reserved:,.2f}" if reserved >= 0.01 else "")
             )
         else:
             lines.append(f"  {tid}  {handle_s}")

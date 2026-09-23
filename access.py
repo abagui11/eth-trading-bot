@@ -167,6 +167,18 @@ def register_user(user_id: int, username: str | None = None) -> None:
         )
         conn.commit()
 
+    # Heal the pool roster too: an account admitted before it had a name on
+    # record stays a bare id in /users until its next message lands here.
+    import bot_config
+
+    if username and bot_config.POOL_ENABLED:
+        try:
+            import pool
+
+            pool.update_username(user_id, username)
+        except Exception:
+            pass
+
 
 def list_subscribers() -> list[dict]:
     init_db()

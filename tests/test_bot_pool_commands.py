@@ -399,6 +399,25 @@ class PoolCommandTests(unittest.TestCase):
         # Pending before approved so the Admit queue is what you see first.
         self.assertLess(text.index("pending"), text.index("approved"))
 
+    def test_users_shows_the_display_name_when_there_is_no_handle(self) -> None:
+        """An account with no @username used to be an anonymous bare id in
+        /users — that is how the eva test account went unrecognised. Its next
+        message must heal the roster with the profile name."""
+        pool.request_access(UID)  # admitted before any name was on record
+        pool.approve_user(UID, admin_id=ADMIN)
+
+        update, context = self._update()
+        update.effective_user.username = None
+        update.effective_user.full_name = "Eva Ecnanif"
+        with patch.object(bot, "_handle_chart", new=AsyncMock()):
+            asyncio.run(bot.cmd_chart(update, context))  # any registered message
+
+        update, context = self._admin_update()
+        asyncio.run(bot.cmd_users(update, context))
+        text = self._texts(update)
+        self.assertIn("Eva Ecnanif", text)
+        self.assertNotIn("@Eva", text)  # display name, not a fake handle
+
     def test_users_empty_roster_says_so(self) -> None:
         update, context = self._admin_update()
         asyncio.run(bot.cmd_users(update, context))

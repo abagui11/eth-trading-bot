@@ -467,6 +467,27 @@ def deny_user(telegram_id: int, *, admin_id: int) -> bool:
     return True
 
 
+def update_username(telegram_id: int, username: str | None) -> None:
+    """Refresh the recorded name on the access and account rows.
+
+    The name is captured at first contact, so an account admitted before it
+    had one (or before the display-name fallback existed) stays NULL forever
+    without this — /users then shows a bare id nobody can recognise. Called
+    on every registered message; the newest non-empty name wins.
+    """
+    if not username:
+        return
+    with _connect() as conn:
+        conn.execute(
+            "UPDATE approved_users SET username = ? WHERE telegram_id = ?",
+            (str(username), int(telegram_id)),
+        )
+        conn.execute(
+            "UPDATE pool_accounts SET username = ? WHERE telegram_id = ?",
+            (str(username), int(telegram_id)),
+        )
+
+
 def is_approved(telegram_id: int) -> bool:
     with _connect() as conn:
         row = conn.execute(

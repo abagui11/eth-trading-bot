@@ -120,6 +120,21 @@ class AccessTests(PoolTestCase):
         self.assertEqual(roster[1]["status"], "approved")
         self.assertEqual(float(roster[1]["cash_usd"]), 250.0)
 
+    def test_update_username_fills_a_nameless_admitted_account(self) -> None:
+        pool.request_access(ALICE)          # no name captured at first contact
+        pool.approve_user(ALICE, admin_id=ADMIN)
+        self.assertIsNone(pool.list_access_roster()[0]["username"])
+
+        pool.update_username(ALICE, "Eva Ecnanif")
+        row = pool.list_access_roster()[0]
+        self.assertEqual(row["username"], "Eva Ecnanif")
+        self.assertEqual(pool.get_account(ALICE)["username"], "Eva Ecnanif")
+
+        pool.update_username(ALICE, None)   # a nameless later message
+        self.assertEqual(
+            pool.list_access_roster()[0]["username"], "Eva Ecnanif"
+        )
+
     def test_is_allowed_gates_unknown_users_when_pool_is_on(self) -> None:
         with patch.object(config, "PAYWALL_ENABLED", False):
             self.assertFalse(access.is_allowed(999999))
