@@ -1365,7 +1365,12 @@
           <h2>Equity by book</h2>
           <p class="sub">Cumulative realized P&amp;L per book, from each book's own ledger.
             Click legend entries to isolate; drag to zoom.</p>
-          <div id="analytics-equity" style="height:440px"></div>
+          <h3 class="analytics-chart-title">HQ strategies &mdash; live, mirrors, paper control, lab</h3>
+          <div id="analytics-equity-hq" style="height:340px"></div>
+          <h3 class="analytics-chart-title">Product books &mdash; Trade Mill &amp; YieldGen</h3>
+          <div id="analytics-equity-products" style="height:300px"></div>
+          <h3 class="analytics-chart-title">Kalshi books</h3>
+          <div id="analytics-equity-kalshi" style="height:300px"></div>
           <p class="sub" id="analytics-asof"></p>
         </section>
         <section class="card">
@@ -2486,8 +2491,8 @@
       var GROUP_COLORS = {
         hub: ['#0E7A52', '#04291B', '#4C8C6F', '#7FB39A', '#2B5F47'],
         lab: ['#B4503C', '#D98B7B', '#8A2E2E', '#E3B0A6'],
-        kalshi: ['#1F5673', '#5B8DA8', '#93BAD1'],
-        yield: ['#8C7A2B'],
+        kalshi: ['#1F5673', '#B4503C', '#0E7A52'],
+        product: ['#8C7A2B', '#1F5673'],
       };
       var seen = {};
       function colorFor(book) {
@@ -2523,9 +2528,17 @@
         return sign + '$' + Math.abs(v).toFixed(2);
       }
 
+      var EQUITY_PANELS = [
+        { el: 'analytics-equity-hq', groups: ['hub', 'lab'] },
+        { el: 'analytics-equity-products', groups: ['product'] },
+        { el: 'analytics-equity-kalshi', groups: ['kalshi'] },
+      ];
+
       function renderEquity(books) {
-        var traces = books.filter(function (b) { return (b.equity || []).length; })
-          .map(function (b) {
+        EQUITY_PANELS.forEach(function (panel) {
+          var traces = books.filter(function (b) {
+            return panel.groups.indexOf(b.group) !== -1 && (b.equity || []).length;
+          }).map(function (b) {
             return {
               name: b.label + ' (' + fmtUsd(b.total) + ')',
               x: b.equity.map(function (p) { return new Date(p[0]); }),
@@ -2535,11 +2548,13 @@
               hovertemplate: b.label + '<br>%{x|%b %d %H:%M} · $%{y:.2f}<extra></extra>',
             };
           });
-        var layout = Object.assign({}, LAYOUT_BASE, {
-          yaxis: { title: 'cumulative realized P&L ($)', zeroline: true, zerolinecolor: '#C9CFCC', gridcolor: '#ECEFEE' },
-          xaxis: { gridcolor: '#ECEFEE' },
+          var layout = Object.assign({}, LAYOUT_BASE, {
+            yaxis: { title: 'realized P&L ($)', zeroline: true, zerolinecolor: '#C9CFCC', gridcolor: '#ECEFEE' },
+            xaxis: { gridcolor: '#ECEFEE' },
+            margin: { l: 56, r: 16, t: 4, b: 36 },
+          });
+          Plotly.newPlot(panel.el, traces, layout, { displaylogo: false, responsive: true });
         });
-        Plotly.newPlot('analytics-equity', traces, layout, { displaylogo: false, responsive: true });
       }
 
       function renderTable(books) {

@@ -911,6 +911,14 @@ body.lightbox-open {
   animation: analytics-spin 0.8s linear infinite;
 }
 @keyframes analytics-spin { to { transform: rotate(360deg); } }
+.analytics-chart-title {
+  font-family: var(--data);
+  font-size: 11px;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+  color: var(--soft);
+  margin: 18px 0 4px;
+}
 #analytics-table td.pos { color: var(--m600); }
 #analytics-table td.neg { color: var(--bad); }
 #analytics-table td:first-child { font-weight: 600; }
