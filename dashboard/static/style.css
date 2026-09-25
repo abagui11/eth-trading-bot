@@ -926,6 +926,9 @@ body.lightbox-open {
   gap: 12px;
   padding: 28px 6px;
 }
+.analytics-loading[hidden] {
+  display: none !important;
+}
 .analytics-spinner {
   width: 16px;
   height: 16px;
