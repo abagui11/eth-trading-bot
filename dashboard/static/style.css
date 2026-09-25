@@ -140,6 +140,22 @@ h1 {
   -webkit-line-clamp: 4;
   overflow: hidden;
 }
+.kalshi-market {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  font-family: var(--data);
+  font-size: 0.85em;
+}
+.kalshi-asset-dot {
+  display: inline-block;
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  flex-shrink: 0;
+}
+.kalshi-asset-dot--btc { background: #E8871E; }
+.kalshi-asset-dot--eth { background: #3B7BB5; }
 
 .card {
   background: var(--card);

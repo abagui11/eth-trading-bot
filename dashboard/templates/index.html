@@ -1184,9 +1184,11 @@
             </thead>
             <tbody id="kalshi-open">
               {% for p in kalshi.open %}
+              {% set ticker = p.market_ticker or '' %}
+              {% set asset = 'btc' if 'BTC' in ticker else ('eth' if 'ETH' in ticker else '') %}
               <tr>
                 <td>{{ p.opened_at }}</td>
-                <td>{{ p.market_ticker }}</td>
+                <td><span class="kalshi-market">{% if asset %}<span class="kalshi-asset-dot kalshi-asset-dot--{{ asset }}" aria-hidden="true"></span>{% endif %}{{ ticker }}</span></td>
                 <td>{{ p.side }}</td>
                 <td>{{ p.contracts }}</td>
                 <td>{{ "%.1f"|format(p.entry_cents) }}¢</td>
@@ -1206,9 +1208,11 @@
             </thead>
             <tbody id="kalshi-closed">
               {% for p in kalshi.closed %}
+              {% set ticker = p.market_ticker or '' %}
+              {% set asset = 'btc' if 'BTC' in ticker else ('eth' if 'ETH' in ticker else '') %}
               <tr>
                 <td>{{ p.closed_at }}</td>
-                <td>{{ p.market_ticker }}</td>
+                <td><span class="kalshi-market">{% if asset %}<span class="kalshi-asset-dot kalshi-asset-dot--{{ asset }}" aria-hidden="true"></span>{% endif %}{{ ticker }}</span></td>
                 <td>{{ p.side }}</td>
                 <td>{{ p.contracts }}</td>
                 <td>{{ "%.1f"|format(p.entry_cents) }}¢</td>
@@ -1962,8 +1966,16 @@
       var botCell = function (p) {
         return esc(p.bot_id) + (p.mode === 'live' ? ' · LIVE' : '');
       };
+      var marketCell = function (ticker) {
+        var t = String(ticker || '');
+        var asset = t.indexOf('BTC') >= 0 ? 'btc' : (t.indexOf('ETH') >= 0 ? 'eth' : '');
+        var dot = asset
+          ? '<span class="kalshi-asset-dot kalshi-asset-dot--' + asset + '" aria-hidden="true"></span>'
+          : '';
+        return '<span class="kalshi-market">' + dot + esc(t) + '</span>';
+      };
       var openHtml = (data.open || []).map(function (p) {
-        return '<tr><td>' + esc(p.opened_at) + '</td><td>' + esc(p.market_ticker) +
+        return '<tr><td>' + esc(p.opened_at) + '</td><td>' + marketCell(p.market_ticker) +
           '</td><td>' + esc(p.side) + '</td><td>' + p.contracts +
           '</td><td>' + Number(p.entry_cents).toFixed(1) + '¢</td><td>$' +
           Number(p.cost_usd).toFixed(2) + '</td><td>' + botCell(p) + '</td></tr>';
@@ -1973,7 +1985,7 @@
         var pnl = p.pnl_usd == null ? '—' : (p.pnl_usd >= 0 ? '+' : '') + Number(p.pnl_usd).toFixed(2);
         var cls = p.pnl_usd != null && p.pnl_usd >= 0 ? 'pos' : 'neg';
         var result = p.result === 'flat' ? 'early exit' : p.result;
-        return '<tr><td>' + esc(p.closed_at) + '</td><td>' + esc(p.market_ticker) +
+        return '<tr><td>' + esc(p.closed_at) + '</td><td>' + marketCell(p.market_ticker) +
           '</td><td>' + esc(p.side) + '</td><td>' + p.contracts +
           '</td><td>' + Number(p.entry_cents).toFixed(1) + '¢</td><td>' + esc(result) +
           '</td><td class="' + cls + '">' + pnl + '</td><td>' + botCell(p) + '</td></tr>';
