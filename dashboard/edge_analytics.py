@@ -171,12 +171,17 @@ def _pct_equity_from_levels(
 
 def _hub_books(
     conn: sqlite3.Connection,
-) -> tuple[dict[str, list[tuple[str, float]]], dict[str, list[tuple[str, float]]]]:
-    """Trade P&L books plus YieldGen absolute level series for % equity.
+) -> tuple[
+    dict[str, list[tuple[str, float]]],
+    dict[str, list[tuple[str, float]]],
+    dict[str, float],
+]:
+    """Trade P&L books plus YieldGen series for % equity.
 
-    YieldGen returns daily $ (and ETH-NAV) deltas in ``books`` for bootstrap
-    stats, and absolute level marks in ``yield_levels`` so the chart can
-    start at 0% and track NAV / NAV₀ (USD) and (NAV/ETH) / (NAV₀/ETH₀).
+    YieldGen contributes daily $ deltas in ``books`` for bootstrap stats,
+    NAV level marks in ``yield_levels`` (chart starts at 0%, tracks
+    NAV/NAV₀), and ``yield_bases`` carrying the NAV₀ base for the carry
+    book, whose rows are deltas rather than levels.
 
     Trade Mill's live clips are omitted here — Investor Analytics uses the
     full sized-idea book via ``_mill_paper_book`` (live fills are a capital-
@@ -184,6 +189,7 @@ def _hub_books(
     """
     books: dict[str, list[tuple[str, float]]] = defaultdict(list)
     yield_levels: dict[str, list[tuple[str, float]]] = {}
+    yield_bases: dict[str, float] = {}
     for src, closed_at, pnl in conn.execute(
         "SELECT source, closed_at, COALESCE(realized_pnl_usd, pnl_usd) "
         "FROM live_trades WHERE closed_at IS NOT NULL "
@@ -223,35 +229,74 @@ def _hub_books(
         (close_t[pid], round(v, 4)) for pid, v in legs.items() if pid in close_t
     ]
 
-    # YieldGen: USD NAV and ETH-denominated NAV (USD NAV / ETH price).
+    # YieldGen: USD NAV (total, deliberately ETH-long) + carry ex-ETH (what
+    # the strategy earns on top of the ride). ETH-denominated NAV was dropped:
+    # it benchmarks against beta=1, and the book runs ~0.7 net ETH exposure
+    # on purpose, so that line is mechanically down in a rally.
     navs = [
-        (str(r[0]), float(r[1]), float(r[2]))
+        (str(r[0]), float(r[1]), float(r[2]), float(r[3]), float(r[4]))
         for r in conn.execute(
-            "SELECT snapshot_date, nav_usd, eth_price_usd "
-            "FROM yield_nav_snapshots "
+            "SELECT snapshot_date, nav_usd, eth_price_usd, "
+            "collateral_usd, debt_usd FROM yield_nav_snapshots "
             "WHERE eth_price_usd IS NOT NULL AND eth_price_usd > 0 "
             "ORDER BY 1"
         )
     ]
     if len(navs) >= 2:
-        usd_levels = [(f"{d}T23:59:00Z", nav) for d, nav, _ in navs]
-        eth_levels = [
-            (f"{d}T23:59:00Z", nav / eth) for d, nav, eth in navs
-        ]
+        usd_levels = [(f"{d}T23:59:00Z", nav) for d, nav, _, _, _ in navs]
         yield_levels["yield:nav"] = usd_levels
-        yield_levels["yield:nav_eth"] = eth_levels
         books["yield:nav"] = [
             (usd_levels[i][0], round(usd_levels[i][1] - usd_levels[i - 1][1], 4))
             for i in range(1, len(usd_levels))
         ]
-        books["yield:nav_eth"] = [
-            (
-                eth_levels[i][0],
-                round(eth_levels[i][1] - eth_levels[i - 1][1], 8),
-            )
-            for i in range(1, len(eth_levels))
-        ]
-    return books, yield_levels
+        carry = _yield_carry(navs)
+        if carry:
+            books["yield:carry"] = carry
+            yield_bases["yield:carry"] = navs[0][1]  # NAV at first snapshot
+    return books, yield_levels, yield_bases
+
+
+def _yield_carry(
+    navs: list[tuple[str, float, float, float, float]],
+) -> list[tuple[str, float]]:
+    """Daily ex-ETH carry: ΔNAV minus (net ETH exposure × ETH move).
+
+    navs = [(date, nav_usd, eth_price, collateral_usd, debt_usd)].
+
+    Net exposure per day = collateral ETH units − borrowed ETH units. The
+    snapshots don't store the debt split, but the recorded debt decomposes as
+    ``stables + units×eth_price`` almost exactly (fit residual < $2 on ~$1.7k
+    over the 09-25 window), so the borrowed units come from that fit. If the
+    debt structure stops fitting (residual > 1% of median debt), the carry
+    book is dropped rather than published wrong.
+    """
+    if len(navs) < 3:
+        return []
+    es = [r[2] for r in navs]
+    ds = [r[4] for r in navs]
+    n = len(navs)
+    me = sum(es) / n
+    md = sum(ds) / n
+    var = sum((e - me) ** 2 for e in es)
+    if var <= 1e-9:  # ETH price flat across window: split is unidentifiable
+        return []
+    b = sum((e - me) * (d - md) for e, d in zip(es, ds)) / var
+    resid = max(abs(d - (md + b * (e - me))) for e, d in zip(es, ds))
+    med_debt = sorted(ds)[n // 2]
+    if med_debt > 0 and resid > 0.01 * med_debt:
+        logger.warning(
+            "yield carry: debt no longer fits stables+ETH split "
+            "(resid %.1f); omitting carry book", resid,
+        )
+        return []
+    out: list[tuple[str, float]] = []
+    for i in range(1, n):
+        day, nav1, e1 = navs[i][0], navs[i][1], navs[i][2]
+        nav0, e0, col0 = navs[i - 1][1], navs[i - 1][2], navs[i - 1][3]
+        units = col0 / e0 - b  # net ETH exposure held into day i
+        carry = (nav1 - nav0) - units * (e1 - e0)
+        out.append((f"{day}T23:59:00Z", round(carry, 4)))
+    return out
 
 
 _MILL_PAPER_CLOSED = frozenset({"hit_tp", "hit_sl"})
@@ -382,8 +427,8 @@ _LABELS = {
     "lab:eva_swing_mech": ("Lab swing (mech exits)", "lab"),
     "lab:eva_day": ("Lab day", "lab"),
     "lab:eva_geom": ("Lab geometry", "lab"),
-    "yield:nav": ("YieldGen (USD)", "product"),
-    "yield:nav_eth": ("YieldGen (ETH)", "product"),
+    "yield:nav": ("YieldGen (USD, incl. ETH ride)", "product"),
+    "yield:carry": ("YieldGen carry (ex-ETH)", "product"),
     "kalshi:eva_wick": ("Kalshi wick (LIVE)", "kalshi"),
     "kalshi:eva_streak": ("Kalshi reversal (paper)", "kalshi"),
     "kalshi:eva_arb": ("Kalshi arb (paper)", "kalshi"),
@@ -399,7 +444,7 @@ def build_edge_payload() -> dict[str, Any]:
     rng = random.Random(20260925)
     conn = sqlite3.connect(f"file:{config.LEDGER_DB}?mode=ro", uri=True)
     try:
-        books, yield_levels = _hub_books(conn)
+        books, yield_levels, yield_bases = _hub_books(conn)
     finally:
         conn.close()
 
@@ -436,9 +481,9 @@ def build_edge_payload() -> dict[str, Any]:
             stat = _stats(rows, base_usd=base, rng=rng)
             stat["equity"] = equity
             stat["total"] = total
-            stat["base_usd"] = (
-                round(base, 6) if key.endswith("_eth") else round(base, 2)
-            )
+            stat["base_usd"] = round(base, 2)
+        elif key in yield_bases:
+            stat = _stats(rows, base_usd=yield_bases[key], rng=rng)
         else:
             base = _base_usd(key)
             if base is None or base <= 0:
@@ -462,8 +507,13 @@ def build_edge_payload() -> dict[str, Any]:
             f"{bot_config.MILL_PAPER_EPOCH_START} (sum of per-idea pnl_pct — "
             "same unit as the daily digest); live fills are a capital-limited "
             "subset of that book. "
-            "YieldGen USD is NAV/NAV₀; YieldGen ETH is (NAV/ETH)/(NAV₀/ETH₀) "
-            "— nearly flat when the book tracks ETH. "
+            "YieldGen USD is NAV/NAV₀ — the book deliberately runs ~0.7 net "
+            "ETH exposure, so this line includes the intended ETH ride. "
+            "YieldGen carry strips it: ΔNAV − (net ETH exposure × ETH move), "
+            "cumulated daily as % of NAV₀ — the yield the strategy earns "
+            "regardless of ETH direction. Net exposure = collateral ETH "
+            "units − borrowed ETH units (debt fits stables+ETH almost "
+            "exactly; carry is omitted if that split stops fitting). "
             "P(edge>0): day-clustered bootstrap, 20k resamples of daily P&L. "
             "Sharpe: annualized from daily P&L, quoted only at >=5 trading "
             "days. Kalshi ledgers are pre-fee. Small day-cluster counts — "

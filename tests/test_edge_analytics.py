@@ -57,17 +57,35 @@ class TestStats(unittest.TestCase):
         fee = edge_analytics._kalshi_fee_per_ct(67.0) * 8
         self.assertAlmostEqual(fee, 0.1239, places=3)
 
-    def test_yield_eth_growth_from_levels(self) -> None:
-        # Flat ETH NAV → near-zero growth (the "straight line" case).
-        levels = [
-            ("2026-09-01T23:59:00Z", 1.60),
-            ("2026-09-02T23:59:00Z", 1.59),
-            ("2026-09-03T23:59:00Z", 1.605),
+    def test_yield_carry_strips_the_eth_ride(self) -> None:
+        # Book: 1.6 ETH collateral, debt = $400 stables + 0.5 borrowed ETH,
+        # so net exposure = 1.1 ETH. NAV moves only with ETH price plus a
+        # fixed $10/day of carry. The carry series must recover the $10s.
+        def nav(eth: float, extra: float) -> tuple[float, float, float]:
+            col = 1.6 * eth
+            debt = 400.0 + 0.5 * eth
+            pt = 1600.0 + extra
+            return col - debt + pt, col, debt
+
+        rows = []
+        for i, eth in enumerate([2500.0, 2600.0, 2450.0, 2700.0]):
+            n, col, debt = nav(eth, extra=10.0 * i)
+            rows.append((f"2026-09-{i+1:02d}", n, eth, col, debt))
+        carry = edge_analytics._yield_carry(rows)
+        self.assertEqual(len(carry), 3)
+        for _, c in carry:
+            self.assertAlmostEqual(c, 10.0, places=4)
+
+    def test_yield_carry_refuses_a_debt_that_does_not_split(self) -> None:
+        # Debt uncorrelated with ETH in a way that breaks the stables+ETH
+        # fit by more than 1% of median debt → publish nothing, not noise.
+        rows = [
+            ("2026-09-01", 4000.0, 2500.0, 4000.0, 1600.0),
+            ("2026-09-02", 4010.0, 2600.0, 4160.0, 1200.0),
+            ("2026-09-03", 4020.0, 2450.0, 3920.0, 1900.0),
+            ("2026-09-04", 4030.0, 2700.0, 4320.0, 1000.0),
         ]
-        equity, total, base = edge_analytics._pct_equity_from_levels(levels)
-        self.assertAlmostEqual(base, 1.60)
-        self.assertEqual(equity[0][1], 0.0)
-        self.assertAlmostEqual(total, 100.0 * (1.605 / 1.60 - 1.0), places=2)
+        self.assertEqual(edge_analytics._yield_carry(rows), [])
 
     def test_mill_paper_book_keeps_closed_pct_only(self) -> None:
         trades = [
