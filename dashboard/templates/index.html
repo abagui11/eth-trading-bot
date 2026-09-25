@@ -111,6 +111,7 @@
       <button type="button" class="hub-tab" data-tab="mill" role="tab" aria-selected="false">Trade mill</button>
       <button type="button" class="hub-tab" data-tab="kalshi" role="tab" aria-selected="false">Kalshi 15m</button>
       <button type="button" class="hub-tab" data-tab="evalab" role="tab" aria-selected="false">Eva Lab</button>
+      <button type="button" class="hub-tab hub-tab--right" data-tab="analytics" role="tab" aria-selected="false">Investor Analytics</button>
     </nav>
 
     <div id="tab-brain" class="hub-panel" role="tabpanel">
@@ -1338,6 +1339,59 @@
       </section>
     </div><!-- /tab-evalab -->
 
+    <div id="tab-analytics" class="hub-panel" role="tabpanel" hidden>
+      <section class="card" id="analytics-gate">
+        <h2>Investor analytics</h2>
+        <p class="sub">
+          Equity, edge probability and scaling for every book Eva runs —
+          computed from the live ledgers when you unlock. Access is
+          password-gated for investors and the team.
+        </p>
+        <form id="analytics-form" class="analytics-form" autocomplete="off">
+          <input type="password" id="analytics-pass" placeholder="Password"
+                 aria-label="Analytics password" required>
+          <button type="submit">Unlock</button>
+        </form>
+        <p class="sub analytics-error" id="analytics-error" hidden>Wrong password.</p>
+      </section>
+
+      <div id="analytics-loading" class="analytics-loading" hidden>
+        <span class="analytics-spinner" aria-hidden="true"></span>
+        <span class="sub">Fetching ledgers and resampling every book&hellip;</span>
+      </div>
+
+      <div id="analytics-content" hidden>
+        <section class="card">
+          <h2>Equity by book</h2>
+          <p class="sub">Cumulative realized P&amp;L per book, from each book's own ledger.
+            Click legend entries to isolate; drag to zoom.</p>
+          <div id="analytics-equity" style="height:440px"></div>
+          <p class="sub" id="analytics-asof"></p>
+        </section>
+        <section class="card">
+          <h2>Edge table</h2>
+          <div class="table-scroll">
+            <table id="analytics-table">
+              <thead>
+                <tr><th>Book</th><th>n</th><th>Days</th><th>Total</th>
+                    <th>Win%</th><th>P(edge&gt;0)</th><th>Sharpe (ann.)</th></tr>
+              </thead>
+              <tbody></tbody>
+            </table>
+          </div>
+          <p class="sub" id="analytics-method"></p>
+        </section>
+        <section class="card">
+          <h2>Scaling &mdash; expected $/day vs contracts per trade</h2>
+          <p class="sub">Kalshi books only; perps scale linearly with risk until
+            market impact. Arb is excluded on purpose &mdash; its window fails
+            the fill-reality study.</p>
+          <div id="analytics-scaling" style="height:400px"></div>
+          <p class="sub" id="analytics-capnote"></p>
+        </section>
+      </div>
+    </div><!-- /tab-analytics -->
+
     <footer>
       Not financial advice. Brain + tape refresh every 60s. Consumer votes live on <a href="/feed">/feed</a>.
     </footer>
@@ -1388,6 +1442,7 @@
         mill: document.getElementById('tab-mill'),
         kalshi: document.getElementById('tab-kalshi'),
         evalab: document.getElementById('tab-evalab'),
+        analytics: document.getElementById('tab-analytics'),
       };
       function activate(name, pushHash) {
         if (name === 'eva') name = 'trading';
@@ -1409,6 +1464,10 @@
         if (name === 'mill') refreshMill();
         if (name === 'kalshi') refreshKalshi();
         if (name === 'evalab') refreshEvaLab();
+        if (name === 'analytics') {
+          var pw = document.getElementById('analytics-pass');
+          if (pw && !document.getElementById('analytics-content').dataset.loaded) pw.focus();
+        }
       }
       tabs.forEach(function (btn) {
         btn.addEventListener('click', function () {
@@ -2414,6 +2473,172 @@
         closedBtn.dataset.offset = String(offset + trades.length);
       });
     }
+
+    (function initInvestorAnalytics() {
+      var form = document.getElementById('analytics-form');
+      if (!form) return;
+      var gate = document.getElementById('analytics-gate');
+      var loading = document.getElementById('analytics-loading');
+      var content = document.getElementById('analytics-content');
+      var errEl = document.getElementById('analytics-error');
+      var passEl = document.getElementById('analytics-pass');
+
+      var GROUP_COLORS = {
+        hub: ['#0E7A52', '#04291B', '#4C8C6F', '#7FB39A', '#2B5F47'],
+        lab: ['#B4503C', '#D98B7B', '#8A2E2E', '#E3B0A6'],
+        kalshi: ['#1F5673', '#5B8DA8', '#93BAD1'],
+        yield: ['#8C7A2B'],
+      };
+      var seen = {};
+      function colorFor(book) {
+        var g = book.group || 'hub';
+        var i = (seen[g] = (seen[g] || 0));
+        seen[g] += 1;
+        var pal = GROUP_COLORS[g] || GROUP_COLORS.hub;
+        return pal[i % pal.length];
+      }
+      var FONT = { family: 'IBM Plex Mono, ui-monospace, monospace', size: 11, color: '#0D1112' };
+      var LAYOUT_BASE = {
+        paper_bgcolor: 'rgba(0,0,0,0)',
+        plot_bgcolor: 'rgba(0,0,0,0)',
+        font: FONT,
+        margin: { l: 56, r: 16, t: 8, b: 44 },
+        hovermode: 'closest',
+        legend: { orientation: 'h', y: -0.14, font: { size: 10 } },
+      };
+
+      function whenPlotly(fn) {
+        if (window.Plotly) return fn();
+        var tries = 0;
+        var timer = setInterval(function () {
+          if (window.Plotly || tries++ > 100) {
+            clearInterval(timer);
+            if (window.Plotly) fn();
+          }
+        }, 100);
+      }
+
+      function fmtUsd(v) {
+        var sign = v < 0 ? '\u2212' : '+';
+        return sign + '$' + Math.abs(v).toFixed(2);
+      }
+
+      function renderEquity(books) {
+        var traces = books.filter(function (b) { return (b.equity || []).length; })
+          .map(function (b) {
+            return {
+              name: b.label + ' (' + fmtUsd(b.total) + ')',
+              x: b.equity.map(function (p) { return new Date(p[0]); }),
+              y: b.equity.map(function (p) { return p[1]; }),
+              mode: 'lines',
+              line: { shape: 'hv', width: 1.6, color: colorFor(b) },
+              hovertemplate: b.label + '<br>%{x|%b %d %H:%M} · $%{y:.2f}<extra></extra>',
+            };
+          });
+        var layout = Object.assign({}, LAYOUT_BASE, {
+          yaxis: { title: 'cumulative realized P&L ($)', zeroline: true, zerolinecolor: '#C9CFCC', gridcolor: '#ECEFEE' },
+          xaxis: { gridcolor: '#ECEFEE' },
+        });
+        Plotly.newPlot('analytics-equity', traces, layout, { displaylogo: false, responsive: true });
+      }
+
+      function renderTable(books) {
+        var tbody = document.querySelector('#analytics-table tbody');
+        tbody.innerHTML = '';
+        books.forEach(function (b) {
+          var tr = document.createElement('tr');
+          function td(text, cls) {
+            var el = document.createElement('td');
+            el.textContent = text;
+            if (cls) el.className = cls;
+            tr.appendChild(el);
+          }
+          td(b.label);
+          td(String(b.n));
+          td(String(b.days));
+          td(fmtUsd(b.total), b.total >= 0 ? 'pos' : 'neg');
+          td(b.win_pct == null ? '—' : b.win_pct + '%');
+          td(b.p_edge == null ? '—' : b.p_edge.toFixed(2));
+          td(b.sharpe == null ? 'n/a' : (b.sharpe > 0 ? '+' : '') + b.sharpe.toFixed(1));
+          tbody.appendChild(tr);
+        });
+      }
+
+      function renderScaling(scaling) {
+        if (!scaling || !(scaling.books || []).length) return;
+        var palette = ['#1F5673', '#0E7A52', '#B4503C'];
+        var traces = scaling.books.map(function (b, i) {
+          return {
+            name: b.label + ' (' + (b.net_usd_per_ct * 100).toFixed(1) + '\u00a2/ct net)',
+            x: b.sizes,
+            y: b.usd_per_day,
+            mode: 'lines+markers',
+            line: { width: 1.6, color: palette[i % palette.length] },
+            marker: { size: 5 },
+            hovertemplate: b.label + '<br>%{x} ct/trade → $%{y:.0f}/day<extra></extra>',
+          };
+        });
+        var layout = Object.assign({}, LAYOUT_BASE, {
+          xaxis: { type: 'log', title: 'contracts per trade', gridcolor: '#ECEFEE' },
+          yaxis: { title: 'expected $ / day', gridcolor: '#ECEFEE', zeroline: true, zerolinecolor: '#C9CFCC' },
+          shapes: [{
+            type: 'line', x0: scaling.cap_ct, x1: scaling.cap_ct,
+            y0: 0, y1: 1, yref: 'paper',
+            line: { color: '#8A2E2E', width: 1.2, dash: 'dash' },
+          }],
+          annotations: [{
+            x: Math.log10(scaling.cap_ct), y: 1, yref: 'paper',
+            text: 'participation cap ≈ ' + scaling.cap_ct.toLocaleString() + ' ct/trade',
+            showarrow: false, xanchor: 'right', font: { size: 10, color: '#8A2E2E' },
+          }],
+        });
+        Plotly.newPlot('analytics-scaling', traces, layout, { displaylogo: false, responsive: true });
+      }
+
+      function render(data) {
+        seen = {};
+        whenPlotly(function () {
+          renderEquity(data.books || []);
+          renderScaling(data.scaling);
+        });
+        renderTable(data.books || []);
+        document.getElementById('analytics-asof').textContent =
+          'Generated ' + data.generated_at + ' from the live ledgers · cached ' +
+          Math.round((data.cache_ttl_sec || 0) / 60) + ' min';
+        document.getElementById('analytics-method').textContent = data.method || '';
+        if (data.scaling) {
+          document.getElementById('analytics-capnote').textContent = data.scaling.cap_note || '';
+        }
+        gate.hidden = true;
+        loading.hidden = true;
+        content.hidden = false;
+        content.dataset.loaded = '1';
+      }
+
+      form.addEventListener('submit', function (ev) {
+        ev.preventDefault();
+        errEl.hidden = true;
+        gate.hidden = true;
+        loading.hidden = false;
+        fetch('/api/analytics/edge', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ password: passEl.value }),
+        }).then(function (r) {
+          if (r.status === 401) throw new Error('auth');
+          if (!r.ok) throw new Error('server');
+          return r.json();
+        }).then(render).catch(function (e) {
+          loading.hidden = true;
+          gate.hidden = false;
+          errEl.textContent = e.message === 'auth'
+            ? 'Wrong password.'
+            : 'Could not load analytics — try again.';
+          errEl.hidden = false;
+          passEl.select();
+        });
+      });
+    })();
   </script>
 </body>
 </html>

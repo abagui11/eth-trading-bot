@@ -75,6 +75,10 @@ class IdeaDecisionBody(BaseModel):
     decision: str
 
 
+class AnalyticsEdgeBody(BaseModel):
+    password: str
+
+
 def _resolve_telegram_id(request: Request) -> int | None:
     token = request.query_params.get("t")
     if token:
@@ -345,6 +349,21 @@ def create_app() -> FastAPI:
         if not _investor_authorized(request):
             raise HTTPException(status_code=404, detail="Not Found")
         return build_investor_payload()
+
+    @app.post("/api/analytics/edge")
+    def api_analytics_edge(body: AnalyticsEdgeBody) -> dict:
+        """Investor Analytics tab: password-gated edge/equity/scaling payload.
+
+        Blocking on purpose (bootstrap over every book); results are cached
+        inside the builder so bursts of investor refreshes stay cheap.
+        """
+        if not secrets.compare_digest(
+            str(body.password or ""), config.ANALYTICS_PASSWORD
+        ):
+            raise HTTPException(status_code=401, detail="Wrong password")
+        from dashboard.edge_analytics import build_edge_payload
+
+        return build_edge_payload()
 
     @app.get("/feed", response_class=HTMLResponse)
     async def idea_feed(request: Request) -> HTMLResponse:

@@ -223,6 +223,10 @@ INVESTOR_SESSION_TTL_SEC: int = int(
     os.getenv("INVESTOR_SESSION_TTL_SEC", "2592000") or "2592000"
 )
 
+# Password for the hub's Investor Analytics tab (equity curves, edge table,
+# scaling). Shared with investors by hand; env-overridable for rotation.
+ANALYTICS_PASSWORD: str = _optional("ANALYTICS_PASSWORD") or "evatradesforyou"
+
 # --- Tester pool (hybrid Telegram UX) ----------------------------------------
 # Private forum supergroup that carries the Trades and Research topics. When
 # set, HQ/mill trade cards and research pushes post ONCE into the topic instead

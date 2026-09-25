@@ -869,6 +869,51 @@ body.lightbox-open {
   font-weight: 500;
 }
 .hub-tab:hover { color: var(--ink); }
+.hub-tab--right { margin-left: auto; }
+.analytics-form { display: flex; gap: 8px; margin-top: 12px; max-width: 380px; }
+.analytics-form input {
+  flex: 1;
+  font-family: var(--data);
+  font-size: 12px;
+  padding: 9px 12px;
+  border: 1px solid var(--ink);
+  border-radius: 0;
+  background: transparent;
+  color: var(--ink);
+}
+.analytics-form input:focus { outline: 2px solid var(--m600); outline-offset: -1px; }
+.analytics-form button {
+  font-family: var(--data);
+  font-size: 11px;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+  padding: 9px 18px;
+  border: 1px solid var(--ink);
+  border-radius: 0;
+  background: var(--ink);
+  color: #fff;
+  cursor: pointer;
+}
+.analytics-form button:hover { background: var(--m600); border-color: var(--m600); }
+.analytics-error { color: var(--bad); }
+.analytics-loading {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 28px 6px;
+}
+.analytics-spinner {
+  width: 16px;
+  height: 16px;
+  border: 2px solid var(--border);
+  border-top-color: var(--m600);
+  border-radius: 50%;
+  animation: analytics-spin 0.8s linear infinite;
+}
+@keyframes analytics-spin { to { transform: rotate(360deg); } }
+#analytics-table td.pos { color: var(--m600); }
+#analytics-table td.neg { color: var(--bad); }
+#analytics-table td:first-child { font-weight: 600; }
 .hub-tab.is-active {
   color: var(--ink);
   border-bottom-color: var(--m600);
