@@ -253,6 +253,55 @@ Optional Research topic (z-moves / digests), if you want a shared channel:
    approved subscribers (same audience as HQ). Set it only if you want mill
    cards in a shared topic *without* per-user size lines.
 
+#### Phase 1: test wallet, treasury, Kalshi execution (all optional)
+
+Everything below is inert until its keys exist. Full pending-item list in
+`deploy/PENDING_ITEMS.md`.
+
+```env
+# Shared deposit/routing wallet (operator-held EOA; key NEVER on this box).
+# When set and MoonPay is not configured, the Fund surface shows this address
+# and deposits credit by SENDER against the user's registered /wallet.
+TEST_WALLET_ADDRESS=0x...
+# Chain the wallet lives on: 8453 = Base (default), 1 = Ethereum mainnet.
+TEST_WALLET_CHAIN_ID=8453
+# Card on-ramp widget for the test wallet (any provider that pins the
+# destination and echoes an external id). Dark until a provider account
+# exists; {telegram_id} is substituted.
+#ONRAMP_WIDGET_URL_TEMPLATE=https://buy.example.com/?address=0x...&externalCustomerId=tg_{telegram_id}
+
+# Kalshi execution for the two Kalshi lanes. Key id + RSA PEM from the Kalshi
+# account settings page. Unset = lanes stay feed-only. Also needs KALSHI_DB
+# (the colocated bots' ledger) so Accepts resolve cards against it.
+KALSHI_API_KEY_ID=...
+KALSHI_PRIVATE_KEY_PATH=/opt/eth-trading-agent/secrets/kalshi.pem
+
+# Full-window quote log recorded by the kalshi-lastmin service. Feeds the
+# wick pairing-variant shadow table on the Kalshi tab (exit/add variants are
+# priced on the recorded book). Unset = those rows show "quote log
+# unavailable"; the ledger-only variants still render.
+KALSHI_LASTMIN_DB=/opt/kalshi-15m-bot/lastmin.db
+#KALSHI_API_BASE=https://api.elections.kalshi.com/trade-api/v2
+```
+
+Operator flow for moving client capital (the bot never moves funds itself —
+it journals, watches, and refuses):
+
+1. `/treasury` — balances by location (test wallet / Coinbase / Kalshi),
+   per-venue allocation demand, open transfers, and the claims-vs-assets
+   invariant.
+2. `/transfer test_wallet coinbase 500` — journal the intention first.
+3. Move the funds by hand (wallet app / venue UI), then
+   `/transfer_sent <id> <txid>`. Chain-visible legs auto-confirm from the
+   watchdog sweep; the Kalshi leg needs `/transfer_confirm <id>` after the
+   venue shows the deposit. `/transfer_cancel <id>` only works before "sent".
+4. Reconcile (every ~10 min) now checks user claims against **all** configured
+   locations + in-flight; a shortfall freezes new Accepts and pages you, and
+   an unreadable leg skips the check rather than guessing.
+
+Unmatched test-wallet arrivals (unregistered sender, below minimum) page the
+admins once; credit them with `/assign <0x-hash> <telegram_id>`.
+
 #### Turning the pool on (done 2026-09-15 — kept as the runbook)
 
 Two things must be in place **before** the flag flips, because both fail

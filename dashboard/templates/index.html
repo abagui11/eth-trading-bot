@@ -1227,6 +1227,26 @@
         {% else %}
         <p class="sub">Kalshi ledger not mounted on this host (set <code>KALSHI_DB</code>).</p>
         {% endif %}
+
+        <div id="kalshi-variants-card" hidden>
+          <p class="sub news-section">Wick pairing variants — shadow book</p>
+          <p class="sub">What the wick book would have made under each pairing
+            rule, derived from the recorded ledger and full-window quote log
+            (fees charged on every added or exiting clip). The 09-25 studies
+            found all of these inside noise at 9 day-clusters; this table is
+            the forward test.</p>
+          <div class="table-scroll">
+            <table id="kalshi-variants-table">
+              <thead>
+                <tr><th>Variant</th><th>Rule</th><th>Windows</th>
+                    <th>Days</th><th>&Delta; P&amp;L</th><th>Neg. days</th>
+                    <th>P(&Delta;&gt;0)</th></tr>
+              </thead>
+              <tbody id="kalshi-variants"></tbody>
+            </table>
+          </div>
+          <p class="sub" id="kalshi-variants-note"></p>
+        </div>
         <p class="sub feed-status" id="kalshi-status"></p>
       </section>
     </div><!-- /tab-kalshi -->
@@ -1991,6 +2011,37 @@
           '</td><td class="' + cls + '">' + pnl + '</td><td>' + botCell(p) + '</td></tr>';
       }).join('');
       kalshiSetTable('kalshi-closed', 'kalshi-closed-table', 'kalshi-closed-empty', closedHtml, (data.closed || []).length > 0);
+      renderWickVariants(data.wick_variants);
+    }
+    function renderWickVariants(wv) {
+      var card = document.getElementById('kalshi-variants-card');
+      if (!card) return;
+      if (!wv || !wv.available || !(wv.variants || []).length) {
+        card.hidden = true;
+        return;
+      }
+      var body = document.getElementById('kalshi-variants');
+      body.innerHTML = wv.variants.map(function (v) {
+        if (!v.available) {
+          return '<tr><td>' + esc(v.label) + '</td><td class="sub">' + esc(v.rule) +
+            '</td><td colspan="5">' + esc(v.reason || 'unavailable') + '</td></tr>';
+        }
+        var d = Number(v.delta_usd || 0);
+        var cls = d >= 0 ? 'pos' : 'neg';
+        var pb = v.p_better == null ? '—' : Number(v.p_better).toFixed(2);
+        var skip = v.skipped_no_quote ? ' (' + v.skipped_no_quote + ' skipped)' : '';
+        return '<tr><td>' + esc(v.label) + '</td><td class="sub">' + esc(v.rule) +
+          '</td><td>' + v.n_windows + skip + '</td><td>' + v.n_days +
+          '</td><td class="' + cls + '">' + (d >= 0 ? '+' : '') + d.toFixed(2) +
+          '</td><td>' + v.neg_days + '/' + v.n_days + '</td><td>' + pb + '</td></tr>';
+      }).join('');
+      var note = document.getElementById('kalshi-variants-note');
+      if (note) {
+        note.textContent = (wv.note || '') + ' Epoch ' + (wv.epoch || '') + ' · ' +
+          (wv.opposite_windows || 0) + ' opposite / ' + (wv.aligned_windows || 0) +
+          ' aligned windows so far.';
+      }
+      card.hidden = false;
     }
     async function refreshKalshi() {
       try {

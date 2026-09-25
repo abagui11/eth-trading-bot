@@ -254,7 +254,18 @@ def create_app() -> FastAPI:
         import kalshi_bridge
 
         payload = kalshi_bridge.performance_payload(limit=min(max(limit, 1), 100))
-        return payload or {"available": False}
+        if not payload:
+            return {"available": False}
+        try:
+            from dashboard import kalshi_variants
+
+            payload["wick_variants"] = kalshi_variants.build_variants_payload(
+                kalshi_bridge.kalshi_db_path(), kalshi_bridge.lastmin_db_path()
+            )
+        except Exception:
+            logger.exception("wick variants payload failed")
+            payload["wick_variants"] = {"available": False, "reason": "error"}
+        return payload
 
     @app.get("/api/brain")
     async def api_brain() -> dict:
