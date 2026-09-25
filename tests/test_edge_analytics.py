@@ -11,8 +11,8 @@ from dashboard import edge_analytics
 
 
 class TestStats(unittest.TestCase):
-    def _stats(self, rows):
-        return edge_analytics._stats(rows, rng=random.Random(7))
+    def _stats(self, rows, *, base_usd: float = 100.0):
+        return edge_analytics._stats(rows, base_usd=base_usd, rng=random.Random(7))
 
     def test_empty_book_is_all_nulls(self) -> None:
         s = self._stats([])
@@ -20,13 +20,13 @@ class TestStats(unittest.TestCase):
         self.assertIsNone(s["p_edge"])
         self.assertEqual(s["equity"], [])
 
-    def test_totals_and_equity_accumulate_in_close_order(self) -> None:
+    def test_totals_and_equity_are_percent_of_base(self) -> None:
         rows = [
             ("2026-09-02T10:00:00Z", 5.0),
             ("2026-09-01T10:00:00Z", -2.0),
             ("2026-09-03T10:00:00Z", 1.0),
         ]
-        s = self._stats(rows)
+        s = self._stats(rows, base_usd=100.0)
         self.assertEqual(s["n"], 3)
         self.assertEqual(s["days"], 3)
         self.assertAlmostEqual(s["total"], 4.0)
@@ -56,6 +56,34 @@ class TestStats(unittest.TestCase):
         # 8 contracts at 67c cost $0.1239 on the exchange (2026-09-22 fill)
         fee = edge_analytics._kalshi_fee_per_ct(67.0) * 8
         self.assertAlmostEqual(fee, 0.1239, places=3)
+
+    def test_yield_eth_growth_from_levels(self) -> None:
+        # Flat ETH NAV → near-zero growth (the "straight line" case).
+        levels = [
+            ("2026-09-01T23:59:00Z", 1.60),
+            ("2026-09-02T23:59:00Z", 1.59),
+            ("2026-09-03T23:59:00Z", 1.605),
+        ]
+        equity, total, base = edge_analytics._pct_equity_from_levels(levels)
+        self.assertAlmostEqual(base, 1.60)
+        self.assertEqual(equity[0][1], 0.0)
+        self.assertAlmostEqual(total, 100.0 * (1.605 / 1.60 - 1.0), places=2)
+
+    def test_mill_paper_book_keeps_closed_pct_only(self) -> None:
+        trades = [
+            {"status": "hit_tp", "closed_at": "2026-09-13T10:00:00Z", "pnl_pct": 1.2},
+            {"status": "hit_sl", "closed_at": "2026-09-14T10:00:00Z", "pnl_pct": -0.8},
+            {"status": "open", "closed_at": None, "pnl_pct": None},
+            {"status": "hit_tp", "closed_at": None, "pnl_pct": 0.5},  # no close ts
+        ]
+        with mock.patch(
+            "trade_ideas_bridge.mill_paper_trades_since", return_value=trades
+        ):
+            rows = edge_analytics._mill_paper_book()
+        self.assertEqual(rows, [
+            ("2026-09-13T10:00:00Z", 1.2),
+            ("2026-09-14T10:00:00Z", -0.8),
+        ])
 
 
 class TestPasswordGate(unittest.TestCase):

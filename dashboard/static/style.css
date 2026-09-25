@@ -848,6 +848,7 @@ body.lightbox-open {
 .hub-tabs {
   display: flex;
   flex-wrap: wrap;
+  align-items: center;
   gap: 0;
   margin: 0 0 16px;
   border-bottom: 1px solid var(--ink);
@@ -869,7 +870,30 @@ body.lightbox-open {
   font-weight: 500;
 }
 .hub-tab:hover { color: var(--ink); }
-.hub-tab--right { margin-left: auto; }
+/* Investor Analytics: pin to the right edge, filled CTA (not a underline tab). */
+.hub-tab--right {
+  margin-left: auto;
+  margin-bottom: 6px;
+  align-self: center;
+  border: 1px solid var(--ink);
+  border-bottom: 1px solid var(--ink);
+  background: var(--ink);
+  color: #fff;
+  padding: 8px 16px;
+  letter-spacing: 0.1em;
+  white-space: nowrap;
+}
+.hub-tab--right:hover {
+  background: var(--m600);
+  border-color: var(--m600);
+  color: #fff;
+}
+.hub-tab--right.is-active {
+  background: var(--m600);
+  border-color: var(--m600);
+  color: #fff;
+  border-bottom-color: var(--m600);
+}
 .analytics-form { display: flex; gap: 8px; margin-top: 12px; max-width: 380px; }
 .analytics-form input {
   flex: 1;
@@ -926,6 +950,12 @@ body.lightbox-open {
   color: var(--ink);
   border-bottom-color: var(--m600);
   background: transparent;
+}
+.hub-tab.hub-tab--right.is-active {
+  background: var(--m600);
+  border-color: var(--m600);
+  color: #fff;
+  border-bottom-color: var(--m600);
 }
 .sleeve-jump { cursor: pointer; }
 .sleeve-jump:hover { outline: 1px solid var(--border); }

@@ -1362,12 +1362,13 @@
 
       <div id="analytics-content" hidden>
         <section class="card">
-          <h2>Equity by book</h2>
-          <p class="sub">Cumulative realized P&amp;L per book, from each book's own ledger.
-            Click legend entries to isolate; drag to zoom.</p>
+          <h2>Growth by book</h2>
+          <p class="sub">Percent growth of each book's sleeve or seed. YieldGen
+            shows USD NAV growth and ETH-denominated NAV (nearly flat when the
+            book tracks ETH). Click legend entries to isolate; drag to zoom.</p>
           <h3 class="analytics-chart-title">HQ strategies &mdash; live, mirrors, paper control, lab</h3>
           <div id="analytics-equity-hq" style="height:340px"></div>
-          <h3 class="analytics-chart-title">Product books &mdash; Trade Mill &amp; YieldGen</h3>
+          <h3 class="analytics-chart-title">Product books &mdash; Trade Mill &amp; YieldGen (USD + ETH)</h3>
           <div id="analytics-equity-products" style="height:300px"></div>
           <h3 class="analytics-chart-title">Kalshi books</h3>
           <div id="analytics-equity-kalshi" style="height:300px"></div>
@@ -1378,7 +1379,7 @@
           <div class="table-scroll">
             <table id="analytics-table">
               <thead>
-                <tr><th>Book</th><th>n</th><th>Days</th><th>Total</th>
+                <tr><th>Book</th><th>n</th><th>Days</th><th>Return %</th>
                     <th>Win%</th><th>P(edge&gt;0)</th><th>Sharpe (ann.)</th></tr>
               </thead>
               <tbody></tbody>
@@ -2492,7 +2493,7 @@
         hub: ['#0E7A52', '#04291B', '#4C8C6F', '#7FB39A', '#2B5F47'],
         lab: ['#B4503C', '#D98B7B', '#8A2E2E', '#E3B0A6'],
         kalshi: ['#1F5673', '#B4503C', '#0E7A52'],
-        product: ['#8C7A2B', '#1F5673'],
+        product: ['#8C7A2B', '#1F5673', '#5A6B4A'],
       };
       var seen = {};
       function colorFor(book) {
@@ -2523,9 +2524,9 @@
         }, 100);
       }
 
-      function fmtUsd(v) {
+      function fmtPct(v) {
         var sign = v < 0 ? '\u2212' : '+';
-        return sign + '$' + Math.abs(v).toFixed(2);
+        return sign + Math.abs(v).toFixed(2) + '%';
       }
 
       var EQUITY_PANELS = [
@@ -2539,17 +2540,19 @@
           var traces = books.filter(function (b) {
             return panel.groups.indexOf(b.group) !== -1 && (b.equity || []).length;
           }).map(function (b) {
+            var isYield = (b.key || '').indexOf('yield:') === 0;
             return {
-              name: b.label + ' (' + fmtUsd(b.total) + ')',
+              name: b.label + ' (' + fmtPct(b.total) + ')',
               x: b.equity.map(function (p) { return new Date(p[0]); }),
               y: b.equity.map(function (p) { return p[1]; }),
               mode: 'lines',
-              line: { shape: 'hv', width: 1.6, color: colorFor(b) },
-              hovertemplate: b.label + '<br>%{x|%b %d %H:%M} · $%{y:.2f}<extra></extra>',
+              // YieldGen is daily NAV marks — linear; trade books are step P&L.
+              line: { shape: isYield ? 'linear' : 'hv', width: 1.6, color: colorFor(b) },
+              hovertemplate: b.label + '<br>%{x|%b %d %H:%M} · %{y:.2f}%<extra></extra>',
             };
           });
           var layout = Object.assign({}, LAYOUT_BASE, {
-            yaxis: { title: 'realized P&L ($)', zeroline: true, zerolinecolor: '#C9CFCC', gridcolor: '#ECEFEE' },
+            yaxis: { title: 'growth (%)', zeroline: true, zerolinecolor: '#C9CFCC', gridcolor: '#ECEFEE', ticksuffix: '%' },
             xaxis: { gridcolor: '#ECEFEE' },
             margin: { l: 56, r: 16, t: 4, b: 36 },
           });
@@ -2571,7 +2574,7 @@
           td(b.label);
           td(String(b.n));
           td(String(b.days));
-          td(fmtUsd(b.total), b.total >= 0 ? 'pos' : 'neg');
+          td(fmtPct(b.total), b.total >= 0 ? 'pos' : 'neg');
           td(b.win_pct == null ? '—' : b.win_pct + '%');
           td(b.p_edge == null ? '—' : b.p_edge.toFixed(2));
           td(b.sharpe == null ? 'n/a' : (b.sharpe > 0 ? '+' : '') + b.sharpe.toFixed(1));

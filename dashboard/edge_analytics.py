@@ -25,6 +25,7 @@ from math import sqrt
 from pathlib import Path
 from typing import Any
 
+import bot_config
 import config
 
 logger = logging.getLogger(__name__)
@@ -43,7 +44,35 @@ KALSHI_PARTICIPATION_CAP_CT = 7257
 SPREAD_HAIRCUT_USD = 0.005
 SCALING_SIZES = (1, 2, 5, 10, 25, 50, 100, 200, 500, 1000, 2000)
 
+# Sleeve / seed used to turn $ P&L into percent growth. Lab has no formal
+# sleeve — $1k notional so the curve is readable as book %. Kalshi seeds
+# match paper_state cash_start on the live wick / paper streak / arb books.
+# Mill house paper is already stored as pnl_pct (same unit as the daily
+# "you'd be up X%" digest); base 100 makes cum/base*100 = cum of those %.
+HQ_PAPER_BASE_USD = 5000.0
+KALSHI_SEED_USD = 246.75
+LAB_NOTIONAL_USD = 1000.0
+MILL_PAPER_PCT_BASE = 100.0
+
 _cache: dict[str, Any] = {"at": 0.0, "payload": None}
+
+
+def _base_usd(key: str) -> float | None:
+    """Capital base for percent growth. Yield bases come from the first NAV."""
+    return {
+        "paper:hq_control": HQ_PAPER_BASE_USD,
+        "live:hq": float(bot_config.LIVE_HQ_EQUITY_USD),
+        "live:hq_swing": float(bot_config.LIVE_HQ_EQUITY_USD),
+        "live:hq_day": float(bot_config.LIVE_HQ_EQUITY_USD),
+        "paper:mill": MILL_PAPER_PCT_BASE,
+        "lab:eva_swing_llm": LAB_NOTIONAL_USD,
+        "lab:eva_swing_mech": LAB_NOTIONAL_USD,
+        "lab:eva_day": LAB_NOTIONAL_USD,
+        "lab:eva_geom": LAB_NOTIONAL_USD,
+        "kalshi:eva_wick": KALSHI_SEED_USD,
+        "kalshi:eva_streak": KALSHI_SEED_USD,
+        "kalshi:eva_arb": KALSHI_SEED_USD,
+    }.get(key)
 
 
 def _iso(ts: Any) -> str:
@@ -62,14 +91,25 @@ def _day(ts: Any) -> str:
     return str(ts)[:10]
 
 
-def _stats(rows: list[tuple[Any, float]], *, rng: random.Random) -> dict[str, Any]:
-    """rows = [(closed_at, pnl)] -> table row + equity series."""
+def _stats(
+    rows: list[tuple[Any, float]],
+    *,
+    base_usd: float,
+    rng: random.Random,
+) -> dict[str, Any]:
+    """rows = [(closed_at, pnl_usd)] -> table row + percent-growth equity.
+
+    Equity and total are percent of ``base_usd`` (sleeve / seed / notional).
+    Bootstrap and Sharpe still run on daily $ P&L — the sign of edge is
+    unchanged; only the display unit is percent growth.
+    """
     rows = sorted(rows, key=lambda r: str(r[0]))
     pnls = [float(p) for _, p in rows]
     n = len(pnls)
-    if n == 0:
-        return {"n": 0, "days": 0, "total": 0.0, "win_pct": None,
-                "p_edge": None, "sharpe": None, "equity": []}
+    base = float(base_usd)
+    if n == 0 or base <= 0:
+        return {"n": 0, "days": 0, "total": 0.0, "base_usd": round(base, 2),
+                "win_pct": None, "p_edge": None, "sharpe": None, "equity": []}
     by_day: dict[str, float] = defaultdict(float)
     for t, p in rows:
         by_day[_day(t)] += float(p)
@@ -95,11 +135,13 @@ def _stats(rows: list[tuple[Any, float]], *, rng: random.Random) -> dict[str, An
     equity = []
     for t, p in rows:
         cum += float(p)
-        equity.append([_epoch_ms(t), round(cum, 2)])
+        equity.append([_epoch_ms(t), round(100.0 * cum / base, 2)])
+    total_usd = sum(pnls)
     return {
         "n": n,
         "days": k,
-        "total": round(sum(pnls), 2),
+        "total": round(100.0 * total_usd / base, 2),
+        "base_usd": round(base, 2),
         "win_pct": round(100 * sum(1 for p in pnls if p > 0) / n),
         "p_edge": p_edge,
         "sharpe": sharpe,
@@ -107,12 +149,45 @@ def _stats(rows: list[tuple[Any, float]], *, rng: random.Random) -> dict[str, An
     }
 
 
-def _hub_books(conn: sqlite3.Connection) -> dict[str, list[tuple[str, float]]]:
+def _pct_equity_from_levels(
+    levels: list[tuple[str, float]],
+) -> tuple[list[list[float]], float, float]:
+    """Absolute level marks -> percent-growth equity starting at 0.
+
+    Returns (equity, total_pct, base_level).
+    """
+    if not levels:
+        return [], 0.0, 0.0
+    base = float(levels[0][1])
+    if base <= 0:
+        return [], 0.0, 0.0
+    equity = [
+        [_epoch_ms(t), round(100.0 * (float(v) / base - 1.0), 2)]
+        for t, v in levels
+    ]
+    total = round(100.0 * (float(levels[-1][1]) / base - 1.0), 2)
+    return equity, total, base
+
+
+def _hub_books(
+    conn: sqlite3.Connection,
+) -> tuple[dict[str, list[tuple[str, float]]], dict[str, list[tuple[str, float]]]]:
+    """Trade P&L books plus YieldGen absolute level series for % equity.
+
+    YieldGen returns daily $ (and ETH-NAV) deltas in ``books`` for bootstrap
+    stats, and absolute level marks in ``yield_levels`` so the chart can
+    start at 0% and track NAV / NAV₀ (USD) and (NAV/ETH) / (NAV₀/ETH₀).
+
+    Trade Mill's live clips are omitted here — Investor Analytics uses the
+    full sized-idea book via ``_mill_paper_book`` (live fills are a capital-
+    limited subset of that book).
+    """
     books: dict[str, list[tuple[str, float]]] = defaultdict(list)
+    yield_levels: dict[str, list[tuple[str, float]]] = {}
     for src, closed_at, pnl in conn.execute(
         "SELECT source, closed_at, COALESCE(realized_pnl_usd, pnl_usd) "
         "FROM live_trades WHERE closed_at IS NOT NULL "
-        "AND (source LIKE 'hq%' OR source = 'mill')"
+        "AND source LIKE 'hq%'"
     ):
         books[f"live:{src}"].append((_iso(closed_at), float(pnl or 0.0)))
 
@@ -148,18 +223,67 @@ def _hub_books(conn: sqlite3.Connection) -> dict[str, list[tuple[str, float]]]:
         (close_t[pid], round(v, 4)) for pid, v in legs.items() if pid in close_t
     ]
 
-    # YieldGen: daily NAV marks -> daily $ deltas.
+    # YieldGen: USD NAV and ETH-denominated NAV (USD NAV / ETH price).
     navs = [
-        (str(r[0]), float(r[1]))
+        (str(r[0]), float(r[1]), float(r[2]))
         for r in conn.execute(
-            "SELECT snapshot_date, nav_usd FROM yield_nav_snapshots ORDER BY 1"
+            "SELECT snapshot_date, nav_usd, eth_price_usd "
+            "FROM yield_nav_snapshots "
+            "WHERE eth_price_usd IS NOT NULL AND eth_price_usd > 0 "
+            "ORDER BY 1"
         )
     ]
-    books["yield:nav"] = [
-        (f"{navs[i][0]}T23:59:00Z", round(navs[i][1] - navs[i - 1][1], 2))
-        for i in range(1, len(navs))
-    ]
-    return books
+    if len(navs) >= 2:
+        usd_levels = [(f"{d}T23:59:00Z", nav) for d, nav, _ in navs]
+        eth_levels = [
+            (f"{d}T23:59:00Z", nav / eth) for d, nav, eth in navs
+        ]
+        yield_levels["yield:nav"] = usd_levels
+        yield_levels["yield:nav_eth"] = eth_levels
+        books["yield:nav"] = [
+            (usd_levels[i][0], round(usd_levels[i][1] - usd_levels[i - 1][1], 4))
+            for i in range(1, len(usd_levels))
+        ]
+        books["yield:nav_eth"] = [
+            (
+                eth_levels[i][0],
+                round(eth_levels[i][1] - eth_levels[i - 1][1], 8),
+            )
+            for i in range(1, len(eth_levels))
+        ]
+    return books, yield_levels
+
+
+_MILL_PAPER_CLOSED = frozenset({"hit_tp", "hit_sl"})
+
+
+def _mill_paper_book() -> list[tuple[str, float]]:
+    """Trade Mill closes since ``MILL_PAPER_EPOCH_START`` (every sized idea).
+
+    Each row's ``pnl_pct`` is already a percent-of-notional return (same unit
+    as the daily digest). Live fills are a capital-limited subset of this book.
+    """
+    try:
+        import trade_ideas_bridge
+    except Exception:
+        logger.exception("edge analytics: trade_ideas_bridge unavailable")
+        return []
+    since = str(bot_config.MILL_PAPER_EPOCH_START or "").strip()
+    if not since:
+        return []
+    trades = trade_ideas_bridge.mill_paper_trades_since(since)
+    out: list[tuple[str, float]] = []
+    for t in trades:
+        if str(t.get("status") or "") not in _MILL_PAPER_CLOSED:
+            continue
+        closed_at = t.get("closed_at")
+        if not closed_at:
+            continue
+        pnl = t.get("pnl_pct")
+        if pnl is None:
+            continue
+        out.append((_iso(closed_at), float(pnl)))
+    return out
 
 
 def _kalshi_books(path: Path) -> dict[str, Any]:
@@ -253,12 +377,13 @@ _LABELS = {
     "live:hq": ("HQ Live", "hub"),
     "live:hq_swing": ("HQ Swing mirror (live)", "hub"),
     "live:hq_day": ("HQ Day mirror (live)", "hub"),
-    "live:mill": ("Trade Mill (live)", "product"),
+    "paper:mill": ("Trade Mill", "product"),
     "lab:eva_swing_llm": ("Lab swing (LLM exits)", "lab"),
     "lab:eva_swing_mech": ("Lab swing (mech exits)", "lab"),
     "lab:eva_day": ("Lab day", "lab"),
     "lab:eva_geom": ("Lab geometry", "lab"),
-    "yield:nav": ("YieldGen (NAV, live)", "product"),
+    "yield:nav": ("YieldGen (USD)", "product"),
+    "yield:nav_eth": ("YieldGen (ETH)", "product"),
     "kalshi:eva_wick": ("Kalshi wick (LIVE)", "kalshi"),
     "kalshi:eva_streak": ("Kalshi reversal (paper)", "kalshi"),
     "kalshi:eva_arb": ("Kalshi arb (paper)", "kalshi"),
@@ -274,9 +399,16 @@ def build_edge_payload() -> dict[str, Any]:
     rng = random.Random(20260925)
     conn = sqlite3.connect(f"file:{config.LEDGER_DB}?mode=ro", uri=True)
     try:
-        books = _hub_books(conn)
+        books, yield_levels = _hub_books(conn)
     finally:
         conn.close()
+
+    try:
+        mill_rows = _mill_paper_book()
+        if mill_rows:
+            books["paper:mill"] = mill_rows
+    except Exception:
+        logger.exception("edge analytics: mill paper book unavailable")
 
     scaling: dict[str, Any] | None = None
     try:
@@ -296,7 +428,23 @@ def build_edge_payload() -> dict[str, Any]:
         if not rows:
             continue
         label, group = _LABELS[key]
-        stat = _stats(rows, rng=rng)
+        if key in yield_levels:
+            levels = yield_levels[key]
+            equity, total, base = _pct_equity_from_levels(levels)
+            # Bootstrap / Sharpe still need the day-to-day deltas; pass the
+            # level-derived base so total matches the absolute growth series.
+            stat = _stats(rows, base_usd=base, rng=rng)
+            stat["equity"] = equity
+            stat["total"] = total
+            stat["base_usd"] = (
+                round(base, 6) if key.endswith("_eth") else round(base, 2)
+            )
+        else:
+            base = _base_usd(key)
+            if base is None or base <= 0:
+                continue
+            # Mill paper rows are already pnl_pct; base 100 → cum displays as %.
+            stat = _stats(rows, base_usd=base, rng=rng)
         table.append({"key": key, "label": label, "group": group, **stat})
 
     payload = {
@@ -306,6 +454,16 @@ def build_edge_payload() -> dict[str, Any]:
         "scaling": scaling,
         "method": (
             "One position = one observation (HQ paper ladder legs collapsed). "
+            "Charts and Return % are percent growth of each book's sleeve/seed "
+            f"(HQ paper ${HQ_PAPER_BASE_USD:.0f}, HQ live "
+            f"${float(bot_config.LIVE_HQ_EQUITY_USD):.0f}, Kalshi "
+            f"${KALSHI_SEED_USD:.2f}, lab ${LAB_NOTIONAL_USD:.0f} notional). "
+            "Trade Mill is every sized idea since "
+            f"{bot_config.MILL_PAPER_EPOCH_START} (sum of per-idea pnl_pct — "
+            "same unit as the daily digest); live fills are a capital-limited "
+            "subset of that book. "
+            "YieldGen USD is NAV/NAV₀; YieldGen ETH is (NAV/ETH)/(NAV₀/ETH₀) "
+            "— nearly flat when the book tracks ETH. "
             "P(edge>0): day-clustered bootstrap, 20k resamples of daily P&L. "
             "Sharpe: annualized from daily P&L, quoted only at >=5 trading "
             "days. Kalshi ledgers are pre-fee. Small day-cluster counts — "
