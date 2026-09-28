@@ -380,6 +380,52 @@ def _maybe_mirror_live(
         )
 
 
+def _maybe_close_live_mirror(
+    variant: str, position_id: int, close_reason: str
+) -> None:
+    """When the paper position closes, flatten its live mirror. Fail-soft.
+
+    Mirror-pair study 2026-09-28: the live mirrors copied the variants'
+    entries but not their exits — eva_day time-exited two positions at
+    +$2.21 / −$4.14 while the live clips, holding only static brackets, rode
+    the same trades to full stops (−$9.70 / −$9.60). The mirror is only the
+    same book at live fills if it also follows the closes. A close the live
+    brackets already handled is a no-op here (the trade is no longer open);
+    everything else exits at market with the paper reason on the row.
+    """
+    try:
+        import config as app_config
+        import execute
+        import live_ledger
+
+        if app_config.EXECUTION_MODE != "live":
+            return
+        cycle_id = f"var_{variant}_{position_id}"
+        trade = next(
+            (
+                t
+                for src in ("hq_swing", "hq_day")
+                for t in live_ledger.get_open_trades(source=src)
+                if str(t.get("cycle_id")) == cycle_id
+            ),
+            None,
+        )
+        if trade is None:
+            return
+        result = execute.close_live_trade(
+            int(trade["id"]), reason=f"paper_{close_reason}"
+        )
+        logger.info(
+            "%s live mirror #%s closed with paper (%s) -> %s",
+            variant, position_id, close_reason, result.get("ok"),
+        )
+    except Exception:
+        logger.exception(
+            "%s live mirror close failed for #%s — paper book unaffected",
+            variant, position_id,
+        )
+
+
 # --------------------------------------------------------------- resolution
 
 @dataclass
@@ -571,6 +617,9 @@ def mark_to_market(now: datetime | None = None) -> int:
         logger.info(
             "variant %s closed #%s %s %.3fR (%s)",
             pos["variant"], pos["id"], pos["product_id"], res["r"], res["reason"],
+        )
+        _maybe_close_live_mirror(
+            str(pos["variant"]), int(pos["id"]), str(res["reason"])
         )
     return closed
 

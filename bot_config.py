@@ -149,7 +149,13 @@ EVA_DAY_LIVE_ENABLED = True           # mirrors entry_source == "vision_rebracke
 # swing stops; the ceiling below bounds how much more before the clip is
 # skipped instead.
 LIVE_VARIANT_RISK_USD = 12.0
-LIVE_VARIANT_MAX_RISK_USD = 40.0
+# Tightened 40 → 18 on 2026-09-28 (mirror-pair study): at 40, a single BTC
+# nano against a swing-width stop filled $28.95 of risk on a $12 plan — the
+# live book quietly ran ~2.4× its paper twin's size and ate ~$22 of the
+# paper/live gap on 6 closed pairs. 1.5× budget is the honesty line: a venue
+# that cannot express the planned size within that gets a logged skip, and
+# the cost of skipping is measured instead of guessed.
+LIVE_VARIANT_MAX_RISK_USD = 18.0
 # eva_day re-brackets control's own entries, so control-live + day-live can
 # stack the same idea. Allowed, but combined open risk per (product, side)
 # across the hq family (hq + hq_swing + hq_day) is capped here — chosen over

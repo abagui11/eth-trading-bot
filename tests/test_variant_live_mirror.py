@@ -114,15 +114,82 @@ class TestVariantClip(unittest.TestCase):
         self.assertAlmostEqual(clip[0], 0.08)
 
     def test_wide_stop_takes_one_contract_up_to_the_ceiling(self) -> None:
-        # One ETH contract (0.1) at a $300 stop risks $30 <= $40 cap -> taken
-        clip = execute._variant_clip("ETH-USD", 2500.0, 2200.0)
+        # One ETH contract (0.1) at a $170 stop risks $17 <= $18 cap -> taken
+        clip = execute._variant_clip("ETH-USD", 2500.0, 2330.0)
         assert clip is not None
         self.assertAlmostEqual(clip[0], 0.1)
-        self.assertAlmostEqual(clip[2], 30.0)
+        self.assertAlmostEqual(clip[2], 17.0)
 
     def test_past_the_ceiling_is_skipped_not_silently_oversized(self) -> None:
-        # One ETH contract at a $500 stop risks $50 > $40 cap
-        self.assertIsNone(execute._variant_clip("ETH-USD", 2500.0, 2000.0))
+        # One ETH contract at a $300 stop risks $30 > $18 cap
+        self.assertIsNone(execute._variant_clip("ETH-USD", 2500.0, 2200.0))
+
+    def test_the_2895_dollar_btc_swing_stop_is_now_a_skip(self) -> None:
+        # Regression, mirror-pair study 2026-09-28: live#106 filled one BTC
+        # nano at 86095 against an 83200 swing stop = $28.95 of risk on a
+        # $12 plan (paper lost $10, live lost $28.95). Under the tightened
+        # ceiling that clip is refused.
+        self.assertIsNone(execute._variant_clip("BTC-USD", 86095.0, 83200.0))
+
+    def test_ceiling_is_1_5x_the_risk_budget(self) -> None:
+        self.assertAlmostEqual(
+            bot_config.LIVE_VARIANT_MAX_RISK_USD,
+            1.5 * bot_config.LIVE_VARIANT_RISK_USD,
+        )
+
+
+class TestExitFollow(TempDbTestCase):
+    """Paper close flattens the live mirror (mirror-pair study 2026-09-28)."""
+
+    def _mirror_trade(self, cycle_id: str) -> dict:
+        return {"id": 77, "cycle_id": cycle_id, "source": "hq_day"}
+
+    def test_paper_close_flattens_the_open_mirror(self) -> None:
+        trade = self._mirror_trade("var_eva_day_47")
+        with mock.patch.object(config, "EXECUTION_MODE", "live"), \
+                mock.patch("live_ledger.get_open_trades",
+                           side_effect=lambda source=None:
+                           [trade] if source == "hq_day" else []), \
+                mock.patch.object(execute, "close_live_trade",
+                                  return_value={"ok": True}) as close:
+            eva_variants._maybe_close_live_mirror("eva_day", 47, "time_exit")
+        close.assert_called_once_with(77, reason="paper_time_exit")
+
+    def test_no_open_mirror_is_a_noop(self) -> None:
+        # The usual case for stop/target closes: live brackets already filled.
+        with mock.patch.object(config, "EXECUTION_MODE", "live"), \
+                mock.patch("live_ledger.get_open_trades", return_value=[]), \
+                mock.patch.object(execute, "close_live_trade") as close:
+            eva_variants._maybe_close_live_mirror("eva_day", 47, "stop")
+        close.assert_not_called()
+
+    def test_non_live_mode_never_touches_the_gateway(self) -> None:
+        with mock.patch.object(config, "EXECUTION_MODE", "shadow"), \
+                mock.patch.object(execute, "close_live_trade") as close:
+            eva_variants._maybe_close_live_mirror("eva_day", 47, "time_exit")
+        close.assert_not_called()
+
+    def test_close_failure_cannot_break_the_paper_close(self) -> None:
+        trade = self._mirror_trade("var_eva_day_47")
+        with mock.patch.object(config, "EXECUTION_MODE", "live"), \
+                mock.patch("live_ledger.get_open_trades",
+                           side_effect=lambda source=None:
+                           [trade] if source == "hq_day" else []), \
+                mock.patch.object(execute, "close_live_trade",
+                                  side_effect=RuntimeError("venue down")):
+            # must not raise
+            eva_variants._maybe_close_live_mirror("eva_day", 47, "time_exit")
+
+    def test_mark_to_market_fires_the_exit_follow(self) -> None:
+        pid = _open("eva_day", "m1_trigger")  # paper-only arm, no entry mirror
+        bar = mock.Mock(ts=1_800_000_000, high=79000.0, low=78000.0,
+                        close=78500.0)
+        with mock.patch.object(eva_variants, "_m5_path", return_value=[bar]), \
+                mock.patch.object(
+                    eva_variants, "_maybe_close_live_mirror") as follow:
+            closed = eva_variants.mark_to_market()
+        self.assertEqual(closed, 1)
+        follow.assert_called_once_with("eva_day", pid, "stop")
 
 
 class TestFamilyCaps(unittest.TestCase):
