@@ -310,6 +310,15 @@ LIVE_PRODUCT_QTY_FLOORS: dict[str, float] = {
 # notional and cannot ladder, so BTC's risk granularity is coarser than a
 # $2,000 sleeve can express. See section 10 of PROJECT_STATE.
 LIVE_HQ_RISK_PCT: float = 0.007
+# Control retired from live 2026-09-28 (operator call). Its live record:
+# 16 closed, -$67.15, 13/16 full stop-outs, the family's worst win% — while
+# paper control on the same 16 cycles was +$12.72 with near-identical entries
+# (median fill drift 0.048%), so the bleed is live exit mechanics, not
+# selection. The swing/day mirrors stay live; control keeps proposing and
+# keeps its paper book (it still feeds the mirrors and the prereg experiment)
+# — this flag only blocks source="hq" live entries. Open positions run out
+# their exchange brackets; nothing is force-closed by flipping this.
+LIVE_HQ_CONTROL_ENABLED: bool = False
 # Watchdog live execution is gated separately from paper execute.
 WATCHDOG_LIVE_ENABLED = False
 WATCHDOG_LIVE_META_KEY = "watchdog_live_enabled"
@@ -435,6 +444,24 @@ POOL_MIN_ACCEPT_USD: float = 10.0
 # Reconcile drift beyond this alerts ops and freezes NEW pool intents (house
 # trading continues; open stakes keep booking their exits).
 POOL_RECON_TOLERANCE_USD: float = 25.0
+# -- Kalshi lanes (per-window event contracts) --------------------------------
+# Cost cap per Accept = this fraction of the user's Kalshi-lane allocation.
+# Structural, not tuned: a binary contract's entire cost is at risk, so this
+# is "how much of the sleeve one 15-minute window may burn", set so the $50
+# minimum deploy still affords 2-3 contracts. NOT validated against recorded
+# outcomes — it is a cap, and lowering it only ever risks less.
+POOL_KALSHI_RISK_PCT: float = 0.05
+# Refuse an Accept when the current ask has moved more than this many cents
+# above the entry the card was minted at — the Kalshi equivalent of the HQ
+# revalidation gate (a stale setup is refused rather than filled worse).
+KALSHI_ACCEPT_SLIP_CENTS: int = 3
+# Refuse an Accept on a card older than this. The markets settle every 15
+# minutes, so a card near the window's end is a different trade than the one
+# the bot took.
+KALSHI_ACCEPT_MAX_AGE_MIN: float = 10.0
+# Blast-radius cap per Accept, in contracts, regardless of allocation size.
+KALSHI_MAX_CONTRACTS_PER_ACCEPT: int = 100
+
 # Telegram ids allowed to Admit users, credit deposits, and run /credit //debit.
 # Merged with POOL_ADMIN_TELEGRAM_IDS from .env (set it there so an operator can
 # be added without a deploy). If both are empty this falls back to

@@ -1358,6 +1358,14 @@ def _execute(
         logger.warning("Live skip: suggestion has no stop_loss (%s)", cycle_id)
         return None
 
+    # Control is retired from live entries (2026-09-28): its live book bled
+    # -$67 on cycles where its own paper book was positive — an exit-mechanics
+    # gap, not selection — so only the swing/day mirrors trade live now.
+    # Paper control and the mirrors' feed are untouched by this gate.
+    if source == "hq" and not bot_config.LIVE_HQ_CONTROL_ENABLED:
+        logger.info("Live skip: control retired from live (%s)", cycle_id)
+        return None
+
     reason = is_halted()
     if reason:
         logger.warning("Live skip: halted (%s)", reason)

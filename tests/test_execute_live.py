@@ -42,6 +42,9 @@ class ExecuteLiveTests(unittest.TestCase):
             patch.object(config, "LEDGER_DB", db),
             patch.object(config, "EXECUTION_MODE", "shadow"),
             patch.object(bot_config, "CASE_STUDY_ENABLED", False),
+            # Control retired from live 2026-09-28; the shared-path fixtures
+            # run with the gate held open (dedicated retirement tests exist).
+            patch.object(bot_config, "LIVE_HQ_CONTROL_ENABLED", True),
             # halt_live notifies ops (Telegram/email) — keep unit tests offline.
             patch.object(execute, "_notify_ops"),
             # Instrument resolution hits the products API — keep tests offline.
@@ -74,6 +77,30 @@ class ExecuteLiveTests(unittest.TestCase):
                 _hq_suggestion(), 2000.0, cycle_id="c1", source="hq"
             )
         self.assertIsNone(result)
+
+    # -- control retirement (2026-09-28) ---------------------------------------
+
+    def test_retired_control_places_no_live_entry(self) -> None:
+        with patch.object(bot_config, "LIVE_HQ_CONTROL_ENABLED", False):
+            result = execute.maybe_execute_live(
+                _hq_suggestion(), 2000.0, cycle_id="c1", source="hq"
+            )
+        self.assertIsNone(result)
+
+    def test_mirrors_still_trade_with_control_retired(self) -> None:
+        with patch.object(bot_config, "LIVE_HQ_CONTROL_ENABLED", False):
+            result = execute.maybe_execute_live(
+                _hq_suggestion(), 2000.0, cycle_id="var_x_1", source="hq_day"
+            )
+        self.assertIsNotNone(result)
+        self.assertEqual(result["source"], "hq_day")
+
+    def test_mill_still_trades_with_control_retired(self) -> None:
+        with patch.object(bot_config, "LIVE_HQ_CONTROL_ENABLED", False):
+            result = execute.maybe_execute_live(
+                _hq_suggestion(), 2000.0, cycle_id="mill_1", source="mill"
+            )
+        self.assertIsNotNone(result)
 
     def test_no_trade_actions_skipped(self) -> None:
         result = execute.maybe_execute_live(
@@ -313,6 +340,13 @@ class ExecuteLiveTests(unittest.TestCase):
         self.assertIsNotNone(execute.is_halted())
 
 
+class ControlRetirementDefaultTests(unittest.TestCase):
+    """Unpatched: the shipped default keeps control out of the live book."""
+
+    def test_control_is_retired_from_live_by_default(self) -> None:
+        self.assertFalse(bot_config.LIVE_HQ_CONTROL_ENABLED)
+
+
 class MillSleeveTests(unittest.TestCase):
     """The two mill entry paths: auto FIFO self-fill and operator Accept."""
 
@@ -325,6 +359,9 @@ class MillSleeveTests(unittest.TestCase):
             patch.object(config, "LEDGER_DB", db),
             patch.object(config, "EXECUTION_MODE", "shadow"),
             patch.object(bot_config, "CASE_STUDY_ENABLED", False),
+            # Control retired from live 2026-09-28; the shared-path fixtures
+            # run with the gate held open (dedicated retirement tests exist).
+            patch.object(bot_config, "LIVE_HQ_CONTROL_ENABLED", True),
             patch.object(execute, "_notify_ops"),
             patch.object(
                 execute,
@@ -639,6 +676,9 @@ class HqClearsMillTests(unittest.TestCase):
             patch.object(config, "LEDGER_DB", db),
             patch.object(config, "EXECUTION_MODE", "live"),
             patch.object(bot_config, "CASE_STUDY_ENABLED", False),
+            # Control retired from live 2026-09-28; the shared-path fixtures
+            # run with the gate held open (dedicated retirement tests exist).
+            patch.object(bot_config, "LIVE_HQ_CONTROL_ENABLED", True),
             patch.object(bot_config, "LIVE_HQ_CLEARS_MILL", True),
             patch.object(bot_config, "LIVE_FILL_ALERTS_ENABLED", False),
             patch.object(execute, "_notify_ops"),
@@ -966,6 +1006,9 @@ class PooledFillTests(unittest.TestCase):
             patch.object(config, "LEDGER_DB", db),
             patch.object(config, "EXECUTION_MODE", "live"),
             patch.object(bot_config, "CASE_STUDY_ENABLED", False),
+            # Control retired from live 2026-09-28; the shared-path fixtures
+            # run with the gate held open (dedicated retirement tests exist).
+            patch.object(bot_config, "LIVE_HQ_CONTROL_ENABLED", True),
             patch.object(bot_config, "LIVE_FILL_ALERTS_ENABLED", False),
             patch.object(bot_config, "LIVE_HQ_CLEARS_MILL", False),
             patch.object(bot_config, "POOL_ENABLED", True),
