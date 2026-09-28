@@ -34,9 +34,13 @@ class Strategy:
     pitch: str
     # Risk copy shown on the allocation prompt.
     risk_lines: str
-    # Whether Accept on this lane can reach an executor today. The Kalshi
-    # lanes publish cards only — capital does not route to them yet.
+    # Whether Accept on this lane can reach an executor today. For the Kalshi
+    # lanes this is the *static* answer (False); `is_executable` upgrades it
+    # at runtime once the Kalshi gateway is configured.
     executable: bool
+    # Which venue an Accept's capital reaches — drives the treasury demand
+    # view and the routing of pooled funds.
+    venue: str = "coinbase"
 
 
 STRATEGIES: dict[str, Strategy] = {
@@ -84,10 +88,12 @@ STRATEGIES: dict[str, Strategy] = {
         risk_lines=(
             "• Contracts settle every 15 minutes — small, fast, capped "
             "per-window risk.\n"
-            "• Idea feed only for now: accepting into Kalshi with real capital "
-            "is coming soon."
+            "• Each Accept spends at most "
+            f"{bot_config.POOL_KALSHI_RISK_PCT * 100:.0f}% of your allocation "
+            "on one window's contracts — the cost is the entire risk."
         ),
         executable=False,
+        venue="kalshi",
     ),
     KALSHI_WICK: Strategy(
         key=KALSHI_WICK,
@@ -99,10 +105,12 @@ STRATEGIES: dict[str, Strategy] = {
         risk_lines=(
             "• One entry per 15-minute window, held to settlement — capped "
             "per-window risk.\n"
-            "• Idea feed only for now: accepting into Kalshi with real capital "
-            "is coming soon."
+            "• Each Accept spends at most "
+            f"{bot_config.POOL_KALSHI_RISK_PCT * 100:.0f}% of your allocation "
+            "on one window's contracts — the cost is the entire risk."
         ),
         executable=False,
+        venue="kalshi",
     ),
 }
 
@@ -116,6 +124,29 @@ def get(key: str) -> Strategy | None:
 
 def is_valid(key: str) -> bool:
     return key in STRATEGIES
+
+
+def is_executable(key: str) -> bool:
+    """Can an Accept on this lane reach real capital *right now*?
+
+    The Kalshi lanes flip on when the hub-side gateway has credentials and
+    the bots' ledger is mounted — config, not a deploy. Everything else keeps
+    its static answer.
+    """
+    strat = STRATEGIES.get(key)
+    if strat is None:
+        return False
+    if strat.executable:
+        return True
+    if strat.venue == "kalshi":
+        try:
+            import kalshi_execute
+
+            return kalshi_execute.enabled()
+        except Exception:  # noqa: BLE001 — a broken import is "not executable"
+            logger.exception("is_executable: kalshi check failed")
+            return False
+    return False
 
 
 # ---------------------------------------------------------------------------
@@ -238,7 +269,7 @@ def allocation_prompt(key: str, portfolio: dict[str, Any],
     live = live_pnl_line(key)
     if live:
         lines.append(live)
-    if not strat.executable:
+    if not is_executable(key):
         lines += [
             "",
             "Note: this lane publishes idea cards only for now — allocation "

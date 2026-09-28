@@ -166,6 +166,30 @@ MOONPAY_API_BASE: str = (
 # Optional hosted deposit / on-ramp URL template. {deposit_id}, {customer_token},
 # {customer_id} are substituted when present.
 MOONPAY_WIDGET_URL_TEMPLATE: str | None = _optional("MOONPAY_WIDGET_URL_TEMPLATE")
+
+# --- Phase 1 test wallet — shared deposit/routing wallet, pre-MoonPay-approval.
+# One operator-controlled EOA that (a) receives user USDC deposits directly,
+# attributed by sender address, and (b) funds the venues (Coinbase / Kalshi)
+# through operator-approved treasury transfers. The private key never lives on
+# this box: the bot only *reads* the address on-chain.
+TEST_WALLET_ADDRESS: str | None = _optional("TEST_WALLET_ADDRESS")
+# Chain the test wallet lives on. 8453 = Base (default), 1 = Ethereum mainnet.
+TEST_WALLET_CHAIN_ID: int = int(_optional("TEST_WALLET_CHAIN_ID") or "8453")
+# Card on-ramp widget for the test wallet (any provider that can pin the
+# destination address and echo an external customer id back on its webhook).
+# Unset until a provider account exists — the Fund surface then offers the
+# direct USDC transfer path only. {telegram_id} is substituted when present.
+ONRAMP_WIDGET_URL_TEMPLATE: str | None = _optional("ONRAMP_WIDGET_URL_TEMPLATE")
+
+# --- Kalshi execution (hub-side gateway for the two Kalshi lanes) -----------
+# API key id + RSA private key from the Kalshi account settings page. Unset
+# means the Kalshi lanes stay feed-only, exactly as before.
+KALSHI_API_KEY_ID: str | None = _optional("KALSHI_API_KEY_ID")
+KALSHI_PRIVATE_KEY_PATH: str | None = _optional("KALSHI_PRIVATE_KEY_PATH")
+KALSHI_API_BASE: str = (
+    _optional("KALSHI_API_BASE") or "https://api.elections.kalshi.com/trade-api/v2"
+).rstrip("/")
+
 EVA_WEBSITE_URL: str = _optional("EVA_WEBSITE_URL") or "https://eva.finance/"
 EVA_SUPPORT_EMAIL: str = _optional("EVA_SUPPORT_EMAIL") or "info@republictech.io"
 

@@ -51,8 +51,9 @@ _CB_IDEA_PREFIX = "idea:"
 # Personal idea-portfolio closes from /me (uportfolio:close:<user_paper_id>).
 _CB_UPORTFOLIO_PREFIX = "uportfolio:"
 # Kalshi lane cards relayed through this bot (kalshi:accept:<key>:<token>).
-# Cards only for now — capital does not route to Kalshi yet, so Accept
-# acknowledges instead of reserving.
+# With the Kalshi gateway configured, Accept places real contracts sized from
+# the user's lane allocation (kalshi_execute); unconfigured, it acknowledges
+# the feed-only state exactly as before.
 _CB_KALSHI_PREFIX = "kalshi:"
 # Deep-link payload from the website deploy buttons:
 # t.me/<bot>?start=subscribe_<strategy>.
@@ -401,6 +402,79 @@ def _pool_demo_accept(token: str, user_id: int) -> str:
     return _pool_intent_reply(
         pool.record_intent(f"{DEMO_REF_PREFIX}{token}", user_id)
     )
+
+
+def _pool_kalshi_accept(
+    strategy_key: str, token: str, user_id: int
+) -> tuple[str, object | None]:
+    """A funded user's Accept on a Kalshi lane card → real contracts.
+
+    The whole venue round-trip lives in `kalshi_execute.accept`; this maps
+    its outcomes to the user's language. Money-wise it mirrors the mill path:
+    reserve first, book what actually filled, release what did not.
+    """
+    import kalshi_execute
+
+    result = kalshi_execute.accept(user_id, strategy_key, token)
+    if result.get("ok"):
+        return (
+            f"You're in — {int(result['contracts'])} × "
+            f"{str(result['side']).upper()} on {result['market_ticker']} at "
+            f"an average {float(result['avg_cents']):.0f}¢ "
+            f"(${float(result['cost_usd']):,.2f} all-in, fee included).\n\n"
+            "The window settles on the quarter hour — you'll get the result "
+            "here either way. Portfolio any time."
+        ), None
+
+    reason = result.get("reason")
+    if reason == "no_allocation":
+        return _deploy_prompt_reply(strategy_key, user_id)
+    if reason in ("stale_card", "no_open_entry", "market_closed"):
+        return (
+            "This window has moved on — the card is older than the market "
+            "it named, so nothing was placed and nothing was risked. "
+            "The next window is minutes away."
+        ), None
+    if reason == "slipped":
+        return (
+            "The price moved before your Accept landed — it's now "
+            f"{float(result.get('ask_cents') or 0):.0f}¢ against the card's "
+            f"{float(result.get('entry_cents') or 0):.0f}¢, past the "
+            "re-check tolerance. Refused rather than filled worse; nothing "
+            "was risked."
+        ), None
+    if reason == "budget_too_small":
+        return (
+            "Your deployment to this lane can't cover one contract at the "
+            f"current price (budget ${float(result.get('budget_usd') or 0):,.2f} "
+            f"per window). Deploy more with /allocate {strategy_key} <amount> "
+            "and Accept the next card."
+        ), None
+    if reason == "unfilled":
+        return (
+            "The order didn't fill before the quote moved — nothing was "
+            "risked and your money is free again. The next window is "
+            "minutes away."
+        ), None
+    if reason == "fill_unknown":
+        return (
+            "The venue accepted the order but hasn't confirmed the fill yet — "
+            "your reservation is held while we check. You'll hear back here "
+            "shortly; nothing further to do."
+        ), None
+    if reason in ("not_enabled", "ledger_unavailable"):
+        return (
+            "Kalshi ideas are feed-only for now — accepting into this lane "
+            "with real capital is coming soon.\n\n"
+            "You're still subscribed to the stream. Tap Strategies for ICT "
+            "or Trade Mill to deploy."
+        ), None
+    if reason in ("quote_failed", "no_quote", "order_refused", "booking_failed"):
+        return (
+            "Couldn't reach the market cleanly just now — nothing was placed "
+            "and nothing was risked. Try the next card."
+        ), None
+    return _pool_intent_reply(result), None
 
 
 def _pool_mill_accept(idea_id: int, user_id: int) -> tuple[str, object | None]:
@@ -775,7 +849,7 @@ async def _handle_menu_callback(
             text, keyboard = await loop.run_in_executor(
                 None, menu.strategy_detail, user_id, key
             )
-            if strategy_catalog.is_valid(key) and strategy_catalog.STRATEGIES[key].executable:
+            if strategy_catalog.is_valid(key) and strategy_catalog.is_executable(key):
                 context.user_data[menu.AWAITING_DEPLOY] = key
             await bot.send_message(user_id, text, reply_markup=keyboard)
             return
@@ -990,7 +1064,7 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
                     f"({bot_config.POOL_RISK_PCT * 100:.1f}% of the "
                     "deployment) at the stop."
                 )
-                if not strat.executable:
+                if not strategy_catalog.is_executable(key):
                     text += (
                         "\n\nIdea feed only for now — accepting into this "
                         "lane with real capital is coming soon."
@@ -1019,16 +1093,43 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
             logger.exception("subscribe reply DM failed for %s", user_id)
         return
 
-    # --- Kalshi lane cards (relayed; feed only — accepting coming soon) ---
+    # --- Kalshi lane cards (relayed) — real execution once the gateway is
+    # configured, the old feed-only acknowledgement otherwise ---
     if data.startswith(_CB_KALSHI_PREFIX):
-        reply = (
-            "Kalshi ideas are feed-only for now — accepting into this lane "
-            "with real capital is coming soon.\n\n"
-            "You're still subscribed to the stream. Tap Strategies for ICT "
-            "or Trade Mill to deploy."
+        parts = data.split(":", 3)
+        action = parts[1] if len(parts) > 1 else ""
+        strategy_key = parts[2] if len(parts) > 2 else ""
+        token = parts[3] if len(parts) > 3 else ""
+
+        executable = (
+            action == "accept"
+            and strategy_catalog.is_valid(strategy_key)
+            and strategy_catalog.is_executable(strategy_key)
+            and _pool_live(user_id)
         )
+        if executable:
+            loop = asyncio.get_running_loop()
+            try:
+                reply, keyboard = await loop.run_in_executor(
+                    None, _pool_kalshi_accept, strategy_key, token, user_id
+                )
+            except Exception:
+                logger.exception("kalshi accept failed for %s", user_id)
+                reply, keyboard = (
+                    "Couldn't place that cleanly — nothing was risked. "
+                    "Try the next card.", None,
+                )
+        else:
+            reply, keyboard = (
+                "Kalshi ideas are feed-only for now — accepting into this "
+                "lane with real capital is coming soon.\n\n"
+                "You're still subscribed to the stream. Tap Strategies for "
+                "ICT or Trade Mill to deploy.", None,
+            )
         try:
-            await context.bot.send_message(user_id, reply)
+            await context.bot.send_message(
+                user_id, reply, reply_markup=keyboard
+            )
         except Exception:
             logger.exception("kalshi reply DM failed for %s", user_id)
         return
@@ -1921,7 +2022,7 @@ async def cmd_allocate(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
             f"({bot_config.POOL_RISK_PCT * 100:.1f}% of the allocation) at "
             "the stop.",
         ]
-        if not strat.executable:
+        if not strategy_catalog.is_executable(key):
             lines.append(
                 "This lane publishes idea cards only for now — the allocation "
                 "activates once Kalshi execution ships."
@@ -2938,7 +3039,8 @@ async def cmd_assign(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
     args = context.args or []
     if len(args) < 2:
         pending = pool.unmatched_chain_deposits()
-        if not pending:
+        pending_tw = pool.unmatched_testwallet_deposits()
+        if not pending and not pending_tw:
             await _reply(update, "No unclaimed deposits.")
             return
         lines = ["Unclaimed deposits:\n"]
@@ -2947,17 +3049,29 @@ async def cmd_assign(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
                 f"${float(row['amount_usd']):,.2f} — {row['cb_tx_id']}\n"
                 f"   hash {row['txid']}  seen {row['first_seen_at']}"
             )
-        lines.append("\n/assign <coinbase_tx_id> <telegram_id>")
+        for row in pending_tw:
+            lines.append(
+                f"${float(row['amount_usd']):,.2f} — test wallet\n"
+                f"   hash {row['txid']}  from {row['sender']}  "
+                f"seen {row['first_seen_at']}"
+            )
+        lines.append("\n/assign <coinbase_tx_id | 0x-hash> <telegram_id>")
         await _reply(update, "\n".join(lines))
         return
 
     try:
         target = int(args[1])
     except ValueError:
-        await _reply(update, "Usage: /assign <coinbase_tx_id> <telegram_id>")
+        await _reply(update, "Usage: /assign <coinbase_tx_id | 0x-hash> <telegram_id>")
         return
 
-    result = pool.assign_chain_deposit(str(args[0]), target, admin_id=user.id)
+    key = str(args[0])
+    # A 66-char 0x hash names a test-wallet arrival; anything else is a
+    # Coinbase transaction id.
+    if key.lower().startswith("0x") and len(key) == 66:
+        result = pool.assign_testwallet_deposit(key, target, admin_id=user.id)
+    else:
+        result = pool.assign_chain_deposit(key, target, admin_id=user.id)
     if not result.get("ok"):
         await _reply(update, f"Could not assign it ({result.get('reason')}).")
         return
@@ -2973,6 +3087,109 @@ async def cmd_assign(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
         )
     except Exception:
         logger.exception("Assign DM failed for %s", target)
+
+
+async def cmd_treasury(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Admin: /treasury — balances by location, demand, open transfers."""
+    user = update.effective_user
+    if user is None or update.message is None or not pool.is_admin(user.id):
+        return
+    import treasury
+
+    loop = asyncio.get_running_loop()
+    try:
+        text = await loop.run_in_executor(None, treasury.report)
+    except Exception:
+        logger.exception("treasury report failed")
+        text = "Could not assemble the treasury view — check the logs."
+    await _reply(update, text)
+
+
+async def cmd_transfer(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Admin: /transfer <from> <to> <amount> — journal an intended move.
+
+    The bot never moves funds; the operator does, from the wallet or venue UI.
+    This records the intention first so a movement without a journal row is
+    impossible to do by the book — then /transfer_sent with the hash, and the
+    chain sweep (or /transfer_confirm for Kalshi) closes it out.
+    """
+    user = update.effective_user
+    if user is None or update.message is None or not pool.is_admin(user.id):
+        return
+    import treasury
+
+    args = context.args or []
+    if len(args) != 3:
+        await _reply(
+            update,
+            "Usage: /transfer <from> <to> <amount>\n"
+            f"Locations: {', '.join(treasury.LOCATIONS)}",
+        )
+        return
+    try:
+        amount = float(str(args[2]).replace("$", "").replace(",", ""))
+    except ValueError:
+        await _reply(update, "Amount must be a number.")
+        return
+    result = treasury.request_transfer(
+        str(args[0]).lower(), str(args[1]).lower(), amount,
+        admin_id=user.id,
+    )
+    if not result.get("ok"):
+        await _reply(update, f"Refused ({result.get('reason')}).")
+        return
+    await _reply(
+        update,
+        f"Transfer #{result['transfer_id']} journaled: {args[0]} → {args[1]} "
+        f"${amount:,.2f}.\nMove the funds, then /transfer_sent "
+        f"{result['transfer_id']} <txid> (txid optional for Kalshi legs).",
+    )
+
+
+async def _transfer_state_cmd(
+    update: Update, context: ContextTypes.DEFAULT_TYPE, action: str
+) -> None:
+    """Shared body for /transfer_sent, /transfer_confirm, /transfer_cancel."""
+    user = update.effective_user
+    if user is None or update.message is None or not pool.is_admin(user.id):
+        return
+    import treasury
+
+    args = context.args or []
+    if not args:
+        await _reply(update, f"Usage: /transfer_{action} <id>"
+                             + (" [txid]" if action == "sent" else ""))
+        return
+    try:
+        transfer_id = int(args[0])
+    except ValueError:
+        await _reply(update, "Transfer id must be a number.")
+        return
+    if action == "sent":
+        txid = str(args[1]) if len(args) > 1 else None
+        result = treasury.mark_sent(transfer_id, txid=txid, admin_id=user.id)
+    elif action == "confirm":
+        result = treasury.confirm_transfer(
+            transfer_id, admin_id=user.id, note=f"confirmed by {user.id}"
+        )
+    else:
+        result = treasury.cancel_transfer(transfer_id, admin_id=user.id)
+    if not result.get("ok"):
+        await _reply(update, f"Refused ({result.get('reason')}).")
+        return
+    await _reply(update, f"Transfer #{transfer_id}: {action} recorded.")
+
+
+async def cmd_transfer_sent(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    await _transfer_state_cmd(update, context, "sent")
+
+
+async def cmd_transfer_confirm(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    await _transfer_state_cmd(update, context, "confirm")
+
+
+async def cmd_transfer_cancel(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    await _transfer_state_cmd(update, context, "cancel")
 
 
 async def cmd_unsubscribe(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -3530,6 +3747,11 @@ def build_application() -> Application:
     app.add_handler(CommandHandler("democard", cmd_democard))
     app.add_handler(CommandHandler("resetdemo", cmd_resetdemo))
     app.add_handler(CommandHandler("assign", cmd_assign))
+    app.add_handler(CommandHandler("treasury", cmd_treasury))
+    app.add_handler(CommandHandler("transfer", cmd_transfer))
+    app.add_handler(CommandHandler("transfer_sent", cmd_transfer_sent))
+    app.add_handler(CommandHandler("transfer_confirm", cmd_transfer_confirm))
+    app.add_handler(CommandHandler("transfer_cancel", cmd_transfer_cancel))
     app.add_handler(CommandHandler("withdraw", cmd_withdraw))
     app.add_handler(CommandHandler("payouts", cmd_payouts))
     app.add_handler(CommandHandler("credit", cmd_credit))

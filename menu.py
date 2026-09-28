@@ -79,12 +79,34 @@ def home_text(user_id: int) -> str:
 
 
 def fund_surface(user_id: int) -> tuple[str, object]:
+    # MoonPay per-user addresses when live; the shared Phase 1 test wallet
+    # (sender-attributed) until then; the not-configured copy failing both.
     prov = ensure_deposit_address(user_id)
-    text = telegram_ui.format_fund_moonpay(
-        address=prov.get("address"),
-        widget_url=prov.get("widget_url"),
-        configured=bool(prov.get("configured")) and bool(prov.get("address")),
-    )
+    if prov.get("ok") and prov.get("address"):
+        text = telegram_ui.format_fund_moonpay(
+            address=prov.get("address"),
+            widget_url=prov.get("widget_url"),
+            configured=True,
+        )
+    elif config.TEST_WALLET_ADDRESS:
+        wallet = pool.get_wallet(user_id)
+        widget = None
+        if config.ONRAMP_WIDGET_URL_TEMPLATE:
+            try:
+                widget = config.ONRAMP_WIDGET_URL_TEMPLATE.format(
+                    telegram_id=int(user_id)
+                )
+            except (KeyError, IndexError, ValueError):
+                logger.exception("onramp widget template is malformed")
+        text = telegram_ui.format_fund_testwallet(
+            address=str(config.TEST_WALLET_ADDRESS),
+            registered_wallet=(wallet or {}).get("address"),
+            widget_url=widget,
+        )
+    else:
+        text = telegram_ui.format_fund_moonpay(
+            address=None, widget_url=None, configured=False,
+        )
     return text, telegram_ui.back_home_keyboard()
 
 
@@ -125,7 +147,7 @@ def strategies_surface(user_id: int) -> tuple[str, object]:
         amt = float(allocs.get(key) or 0)
         if amt > 0:
             flags.append(f"${amt:,.0f} deployed")
-        if not strat.executable:
+        if not strategy_catalog.is_executable(key):
             flags.append("feed only")
         tag = f" ({', '.join(flags)})" if flags else ""
         lines.append(f"• {strat.label}{tag}")
@@ -138,7 +160,7 @@ def strategy_detail(user_id: int, key: str) -> tuple[str, object | None]:
         return "Unknown strategy.", telegram_ui.strategies_keyboard()
     strat = strategy_catalog.STRATEGIES[key]
     pool.subscribe_strategy(user_id, key)
-    if not strat.executable:
+    if not strategy_catalog.is_executable(key):
         text = (
             f"{strat.label}\n\n"
             f"{strat.pitch}\n\n"

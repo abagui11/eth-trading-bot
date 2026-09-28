@@ -31,12 +31,23 @@ logger = logging.getLogger(__name__)
 API_URL = "https://api.etherscan.io/v2/api"
 CHAIN_ID = 1
 
-# USDC on Ethereum mainnet. Pinned rather than configurable: a wrong token
-# address here would verify deposits against a token nobody sent, and an
-# attacker-issued token is trivially mintable. Validated against our own
-# historical deposits in deploy/_verify_chain.py.
-USDC_CONTRACT = "0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48"
+# USDC per chain. Pinned rather than configurable: a wrong token address here
+# would verify deposits against a token nobody sent, and an attacker-issued
+# token is trivially mintable. Mainnet validated against our own historical
+# deposits in deploy/_verify_chain.py; Base is Circle's canonical native USDC.
+USDC_CONTRACT = "0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48"   # Ethereum mainnet
+USDC_CONTRACTS: dict[int, str] = {
+    1: USDC_CONTRACT,
+    8453: "0x833589fcd6edb6e08f4c7c32d4f71b54bda02913",         # Base
+}
 USDC_DECIMALS = 6
+
+
+def usdc_contract(chain_id: int) -> str:
+    contract = USDC_CONTRACTS.get(int(chain_id))
+    if not contract:
+        raise ChainError(f"no pinned USDC contract for chain {chain_id}")
+    return contract
 
 _TIMEOUT = 20
 _RETRIES = 3
@@ -55,11 +66,11 @@ def configured() -> bool:
     return bool(getattr(config, "ETHERSCAN_API_KEY", None))
 
 
-def _request(params: dict[str, Any]) -> Any:
+def _request(params: dict[str, Any], *, chain_id: int = CHAIN_ID) -> Any:
     if not configured():
         raise ChainError("ETHERSCAN_API_KEY unset — add it to .env")
 
-    params = {**params, "chainid": CHAIN_ID, "apikey": config.ETHERSCAN_API_KEY}
+    params = {**params, "chainid": int(chain_id), "apikey": config.ETHERSCAN_API_KEY}
     last: Exception | None = None
     for attempt in range(_RETRIES):
         try:
@@ -116,7 +127,9 @@ def _row(entry: dict[str, Any]) -> dict[str, Any]:
     }
 
 
-def usdc_transfers(address: str, *, limit: int = 100) -> list[dict[str, Any]]:
+def usdc_transfers(
+    address: str, *, limit: int = 100, chain_id: int = CHAIN_ID
+) -> list[dict[str, Any]]:
     """Recent USDC transfers touching `address`, newest first.
 
     Filtered to the USDC contract at the API, so a worthless token airdropped
@@ -126,24 +139,52 @@ def usdc_transfers(address: str, *, limit: int = 100) -> list[dict[str, Any]]:
     result = _request({
         "module": "account",
         "action": "tokentx",
-        "contractaddress": USDC_CONTRACT,
+        "contractaddress": usdc_contract(chain_id),
         "address": address,
         "page": 1,
         "offset": limit,
         "sort": "desc",
-    })
+    }, chain_id=chain_id)
     if not isinstance(result, list):
         raise ChainError(f"unexpected tokentx payload: {str(result)[:200]}")
     return [_row(e) for e in result]
 
 
-def inbound_usdc(address: str, *, limit: int = 100) -> list[dict[str, Any]]:
+def inbound_usdc(
+    address: str, *, limit: int = 100, chain_id: int = CHAIN_ID
+) -> list[dict[str, Any]]:
     """Transfers INTO `address`. Direction is decided by `to`, not by sign."""
     want = address.strip().lower()
-    return [t for t in usdc_transfers(address, limit=limit) if t["to"] == want]
+    return [
+        t for t in usdc_transfers(address, limit=limit, chain_id=chain_id)
+        if t["to"] == want
+    ]
 
 
-def find_transfer(txid: str, *, to_address: str | None = None) -> dict[str, Any] | None:
+def usdc_balance(address: str, *, chain_id: int = CHAIN_ID) -> float:
+    """Current USDC balance of `address`, in dollars.
+
+    Read for the treasury view and the reconcile total. A lookup failure
+    raises rather than returning 0: "the wallet is empty" and "we could not
+    read the wallet" must never collapse into the same answer, because the
+    reconciler would treat the second as missing client money.
+    """
+    result = _request({
+        "module": "account",
+        "action": "tokenbalance",
+        "contractaddress": usdc_contract(chain_id),
+        "address": address,
+        "tag": "latest",
+    }, chain_id=chain_id)
+    try:
+        return int(str(result)) / (10 ** USDC_DECIMALS)
+    except (TypeError, ValueError) as exc:
+        raise ChainError(f"unexpected tokenbalance payload: {str(result)[:200]}") from exc
+
+
+def find_transfer(
+    txid: str, *, to_address: str | None = None, chain_id: int = CHAIN_ID
+) -> dict[str, Any] | None:
     """The USDC transfer inside one transaction, or None if there isn't one.
 
     Looks the hash up against the destination's transfer list rather than
@@ -154,17 +195,17 @@ def find_transfer(txid: str, *, to_address: str | None = None) -> dict[str, Any]
     if not clean.startswith("0x") or len(clean) != 66:
         return None
     if to_address:
-        for transfer in usdc_transfers(to_address, limit=100):
+        for transfer in usdc_transfers(to_address, limit=100, chain_id=chain_id):
             if transfer["txid"] == clean:
                 return transfer
         return None
 
     receipt = _request({
         "module": "proxy", "action": "eth_getTransactionReceipt", "txhash": clean,
-    })
+    }, chain_id=chain_id)
     if not isinstance(receipt, dict):
         return None
-    return _from_receipt(receipt, clean)
+    return _from_receipt(receipt, clean, chain_id=chain_id)
 
 
 # Transfer(address,address,uint256)
@@ -173,7 +214,9 @@ _TRANSFER_TOPIC = (
 )
 
 
-def _from_receipt(receipt: dict[str, Any], txid: str) -> dict[str, Any] | None:
+def _from_receipt(
+    receipt: dict[str, Any], txid: str, *, chain_id: int = CHAIN_ID
+) -> dict[str, Any] | None:
     """Pull the USDC Transfer event out of a receipt.
 
     The event log, not the transaction's `from`: if a tester funds from a
@@ -182,7 +225,7 @@ def _from_receipt(receipt: dict[str, Any], txid: str) -> dict[str, Any] | None:
     honest users and could credit the wrong one.
     """
     for log in receipt.get("logs") or []:
-        if str(log.get("address", "")).lower() != USDC_CONTRACT:
+        if str(log.get("address", "")).lower() != usdc_contract(chain_id):
             continue
         topics = log.get("topics") or []
         if len(topics) < 3 or str(topics[0]).lower() != _TRANSFER_TOPIC:
@@ -204,7 +247,11 @@ def _from_receipt(receipt: dict[str, Any], txid: str) -> dict[str, Any] | None:
 
 
 def verify_deposit(
-    txid: str, *, to_address: str, min_confirmations: int = MIN_CONFIRMATIONS
+    txid: str,
+    *,
+    to_address: str,
+    min_confirmations: int = MIN_CONFIRMATIONS,
+    chain_id: int = CHAIN_ID,
 ) -> dict[str, Any]:
     """Who sent this deposit, how much, and is it deep enough to trust?
 
@@ -215,7 +262,7 @@ def verify_deposit(
     would silently refuse an honest tester's proof.
     """
     try:
-        transfer = find_transfer(txid, to_address=to_address)
+        transfer = find_transfer(txid, to_address=to_address, chain_id=chain_id)
     except ChainError as exc:
         return {"ok": False, "reason": "lookup_failed", "detail": str(exc)}
 

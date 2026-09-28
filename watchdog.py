@@ -1178,6 +1178,175 @@ def _deposit_sweep() -> None:
                 logger.exception("unmatched deposit alert failed")
 
 
+def _testwallet_deposit_sweep() -> None:
+    """Credit USDC arriving at the shared Phase 1 test wallet, by sender.
+
+    Same contract as `_deposit_sweep`: the user hears the moment the money is
+    real, admins are FYI, and an arrival nobody can be matched to is flagged
+    once and never apportioned. Never raises — a deposit watcher must not be
+    able to take down stop-loss monitoring.
+    """
+    import chain
+    import notify
+    import pool
+
+    if (
+        not bot_config.POOL_ENABLED
+        or not config.TEST_WALLET_ADDRESS
+        or not chain.configured()
+    ):
+        return
+
+    try:
+        transfers = chain.inbound_usdc(
+            str(config.TEST_WALLET_ADDRESS),
+            limit=50,
+            chain_id=int(config.TEST_WALLET_CHAIN_ID),
+        )
+    except Exception:
+        logger.exception("test-wallet sweep: chain read failed — skipped")
+        return
+    settled = [
+        t for t in transfers if t["confirmations"] >= chain.MIN_CONFIRMATIONS
+    ]
+
+    try:
+        events = pool.observe_testwallet_deposits(settled)
+    except Exception:
+        logger.exception("test-wallet sweep: crediting failed")
+        return
+
+    for event in events:
+        if event["kind"] == "credited":
+            amount = float(event["amount_usd"])
+            try:
+                notify.send_pool_dm(
+                    int(event["telegram_id"]),
+                    f"Deposit received: ${amount:,.2f} USDC.\n"
+                    f"Cash balance: ${float(event['cash_usd']):,.2f}.\n\n"
+                    "Matched to you by the wallet it came from and confirmed "
+                    "on-chain. You can Accept trade cards now — /portfolio "
+                    "any time.",
+                )
+            except Exception:
+                logger.exception(
+                    "test-wallet deposit DM failed for %s", event["telegram_id"]
+                )
+            try:
+                notify.send_pool_admin_alert(
+                    f"Test wallet: auto-credited ${amount:,.2f} to "
+                    f"{event['telegram_id']} (tx {event['txid']})."
+                )
+            except Exception:
+                logger.exception("test-wallet admin FYI failed")
+        elif event["kind"] == "unmatched" and not event.get("alerted"):
+            try:
+                notify.send_pool_admin_alert(
+                    f"UNCLAIMED test-wallet deposit: "
+                    f"${float(event['amount_usd']):,.2f} USDC "
+                    f"({event.get('reason')}).\n"
+                    f"tx {event['txid']}\nfrom {event.get('sender')}\n\n"
+                    "Nobody has been credited. If you know whose it is:\n"
+                    f"/assign {event['txid']} <telegram_id>"
+                )
+                pool.mark_testwallet_deposit_alerted(str(event["txid"]))
+            except Exception:
+                logger.exception("unmatched test-wallet alert failed")
+
+
+# Kalshi 'placing' rows already alerted this process lifetime — the row has
+# no alerted column because the state should be rare and short-lived; a
+# restart re-alerting is the right failure direction.
+_kalshi_placing_alerted: set[int] = set()
+
+
+def _kalshi_settle_sweep() -> None:
+    """Book settled Kalshi windows to their owners, and page on stuck rows."""
+    import kalshi_execute
+    import notify
+    import pool
+
+    if not bot_config.POOL_ENABLED:
+        return
+
+    try:
+        settled = kalshi_execute.settle_sweep()
+    except Exception:
+        logger.exception("kalshi settle sweep failed")
+        settled = []
+    for result in settled:
+        pnl = float(result["pnl_usd"])
+        won = pnl > 0
+        try:
+            notify.send_pool_dm(
+                int(result["telegram_id"]),
+                (
+                    f"Kalshi window settled {str(result.get('side', '')).upper()}"
+                    f" — {result['market_ticker']}.\n"
+                    + (
+                        f"You won ${pnl:,.2f} on {result['contracts']} contracts."
+                        if won else
+                        f"Contracts settled worthless: −${abs(pnl):,.2f}."
+                        if pnl < 0 else
+                        "Voided — refunded in full, exactly flat."
+                    )
+                    + "\n/portfolio any time."
+                ),
+            )
+        except Exception:
+            logger.exception(
+                "kalshi settle DM failed for %s", result["telegram_id"]
+            )
+
+    try:
+        stuck = pool.stale_kalshi_placing(
+            minutes=float(bot_config.KALSHI_ACCEPT_MAX_AGE_MIN)
+        )
+    except Exception:
+        logger.exception("kalshi stale-placing check failed")
+        return
+    for row in stuck:
+        row_id = int(row["id"])
+        if row_id in _kalshi_placing_alerted:
+            continue
+        _kalshi_placing_alerted.add(row_id)
+        try:
+            notify.send_pool_admin_alert(
+                f"KALSHI POSITION STUCK IN 'placing': #{row_id} user "
+                f"{row['telegram_id']} {row['market_ticker']} "
+                f"{row['side']} x{row['contracts']} "
+                f"(${float(row['cost_usd']):,.2f} reserved, order "
+                f"{row.get('order_id') or 'unknown'}).\n"
+                "An order may exist at the venue unbooked. Check Kalshi, then "
+                "book it via pool.finish_kalshi_open(...) or release with "
+                "filled_contracts=0. The reserve is deliberately NOT "
+                "auto-released."
+            )
+        except Exception:
+            logger.exception("kalshi stuck-placing alert failed")
+
+
+def _treasury_confirm_sweep() -> None:
+    """Close out 'sent' treasury transfers the chain can prove arrived."""
+    import notify
+    import treasury
+
+    try:
+        confirmed = treasury.confirm_sweep()
+    except Exception:
+        logger.exception("treasury confirm sweep failed")
+        return
+    for transfer in confirmed:
+        try:
+            notify.send_pool_admin_alert(
+                f"Treasury transfer #{transfer['id']} confirmed on-chain: "
+                f"{transfer['from_loc']} → {transfer['to_loc']} "
+                f"${float(transfer['amount_usd']):,.2f}."
+            )
+        except Exception:
+            logger.exception("treasury confirm FYI failed")
+
+
 def _pool_sweep(spots: dict[str, float] | None = None) -> None:
     """Tester-pool upkeep on the scan cadence.
 
@@ -1216,9 +1385,12 @@ def _pool_sweep(spots: dict[str, float] | None = None) -> None:
         )
 
     _deposit_sweep()
+    _testwallet_deposit_sweep()
     _wallet_verify_sweep()
     _payout_sweep()
     _settle_sweep()
+    _kalshi_settle_sweep()
+    _treasury_confirm_sweep()
 
     global _pool_last_recon
     if config.EXECUTION_MODE != "live":
@@ -1227,46 +1399,37 @@ def _pool_sweep(spots: dict[str, float] | None = None) -> None:
     if now - _pool_last_recon < _POOL_RECON_INTERVAL_SEC:
         return
     _pool_last_recon = now
-    from coinbase_deriv import get_gateway
+    import treasury
 
     was_frozen = bool(pool.intents_frozen())
-    # Whole-account cash, not the futures sleeve: deposits land in the spot
-    # wallet, so reconciling against futures equity alone reported a shortfall
-    # the moment a deposit was credited.
-    try:
-        assets = get_gateway().get_cash_assets()
-        total = float(assets.get("total_usd") or 0.0)
-    except Exception:
-        logger.exception("pool reconcile: balance read failed — check skipped")
-        return
-    # A failed or implausible read must not be mistaken for an empty account.
-    # Freezing the pool on a transient API hiccup is the one outcome here that
-    # is worse than checking late.
-    if total <= 0 or assets.get("truncated"):
+    # All locations client money can sit: Coinbase whole-account cash, the
+    # test wallet on-chain, the Kalshi account, and transfers in flight.
+    # One unreadable configured leg refuses the whole total — freezing the
+    # pool on a transient API hiccup is the one outcome here that is worse
+    # than checking late, and so is judging claims against a sum with a hole.
+    total_info = treasury.reconcile_total()
+    if not total_info.get("ok"):
         logger.error(
-            "pool reconcile: refusing to judge claims against assets=%.2f "
-            "truncated=%s — check skipped",
-            total, assets.get("truncated"),
+            "pool reconcile: %s (%s) — check skipped",
+            total_info.get("reason"), total_info.get("detail"),
         )
         return
 
     snapshot = pool.reconcile(
-        total,
-        breakdown={
-            "spot_usd": round(float(assets.get("spot_usd") or 0.0), 2),
-            "futures_usd": round(float(assets.get("futures_usd") or 0.0), 2),
-            "collateral_usd": round(float(assets.get("collateral_usd") or 0.0), 2),
-            "buying_power_usd": round(float(assets.get("buying_power_usd") or 0.0), 2),
-        },
+        float(total_info["total_usd"]),
+        breakdown=dict(total_info.get("breakdown") or {}),
     )
     if not snapshot["ok"] and not was_frozen:
+        legs = " + ".join(
+            f"{k.removesuffix('_usd')} ${v:,.2f}"
+            for k, v in (snapshot.get("breakdown") or {}).items()
+        )
         notify.send_pool_admin_alert(
             "POOL RECONCILE FAILED — new intents frozen.\n"
-            f"Venue assets ${snapshot['venue_assets_usd']:,.2f} "
-            f"(spot ${snapshot['breakdown'].get('spot_usd', 0):,.2f} + futures "
-            f"${snapshot['breakdown'].get('futures_usd', 0):,.2f}) vs tester claims "
-            f"${snapshot['tester_cash_usd']:,.2f}.\n"
-            "Audit pool_events against Coinbase, then unfreeze via pool.unfreeze_intents()."
+            f"Assets ${snapshot['venue_assets_usd']:,.2f} ({legs}) vs tester "
+            f"claims ${snapshot['tester_cash_usd']:,.2f}.\n"
+            "Audit pool_events / treasury_transfers against the venues, then "
+            "unfreeze via pool.unfreeze_intents()."
         )
 
 

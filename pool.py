@@ -294,6 +294,65 @@ CREATE TABLE IF NOT EXISTS pool_moonpay_credits (
     amount_usd REAL NOT NULL,
     created_at TEXT NOT NULL
 );
+
+-- Phase 1 test wallet: USDC arriving at the shared TEST_WALLET_ADDRESS.
+-- Everyone funds the same address, so attribution is by SENDER -- the wallet
+-- a user registered with /wallet -- never by destination or by what anyone
+-- typed. Keyed on txid so a restart mid-sweep cannot credit the same
+-- transfer twice.
+CREATE TABLE IF NOT EXISTS pool_testwallet_deposits (
+    txid TEXT PRIMARY KEY,
+    sender TEXT,
+    amount_usd REAL NOT NULL,
+    status TEXT NOT NULL,          -- unmatched | credited | baseline
+    telegram_id INTEGER,
+    first_seen_at TEXT NOT NULL,
+    credited_at TEXT,
+    alerted_at TEXT,
+    note TEXT
+);
+
+-- Card on-ramp sessions (provider account still pending). One row per widget
+-- hand-off so a provider webhook echoing the external id credits exactly one
+-- user. Inert until ONRAMP_WIDGET_URL_TEMPLATE is configured.
+CREATE TABLE IF NOT EXISTS onramp_sessions (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    telegram_id INTEGER NOT NULL,
+    provider TEXT,
+    external_id TEXT UNIQUE,
+    status TEXT NOT NULL DEFAULT 'pending',   -- pending | completed | failed
+    amount_usd REAL,
+    created_at TEXT NOT NULL,
+    updated_at TEXT
+);
+
+-- Kalshi lane positions: user-owned event contracts riding the house Kalshi
+-- account. The full cost (contracts x price + fee) is reserved at open --
+-- a binary contract's entire cost is the risk -- and settlement releases the
+-- reserve and books P&L to cash, mirroring pool_stakes' margin flow.
+-- status 'placing' is the crash-evidence state: a row stuck there means an
+-- order may exist at the venue that the ledger has not booked, which is an
+-- admin page, never an auto-release.
+CREATE TABLE IF NOT EXISTS pool_kalshi_positions (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    telegram_id INTEGER NOT NULL,
+    strategy TEXT NOT NULL,
+    market_ticker TEXT NOT NULL,
+    side TEXT NOT NULL,                 -- yes | no
+    contracts INTEGER NOT NULL,
+    entry_cents REAL NOT NULL,          -- limit at placing, average fill once open
+    cost_usd REAL NOT NULL,             -- reserved: max cost at placing, actual at open
+    fee_usd REAL NOT NULL DEFAULT 0,
+    order_id TEXT,
+    intent_ref TEXT NOT NULL,
+    status TEXT NOT NULL DEFAULT 'placing',  -- placing | open | unfilled | settled
+    result TEXT,                        -- yes | no | void
+    pnl_usd REAL,
+    created_at TEXT NOT NULL,
+    settled_at TEXT
+);
+CREATE UNIQUE INDEX IF NOT EXISTS pool_kalshi_intent_once
+    ON pool_kalshi_positions (intent_ref);
 """
 
 _FROZEN_KEY = "intents_frozen"
@@ -1930,6 +1989,187 @@ def assign_chain_deposit(
 
 
 # ---------------------------------------------------------------------------
+# Test-wallet deposits — the shared Phase 1 deposit address
+# ---------------------------------------------------------------------------
+
+_TESTWALLET_BASELINE_KEY = "testwallet_deposits_baselined"
+
+
+def observe_testwallet_deposits(
+    transfers: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    """Credit USDC arriving at the shared test wallet, by sender.
+
+    ``transfers`` is `chain.inbound_usdc` output for TEST_WALLET_ADDRESS,
+    already confirmation-filtered by the caller. Attribution is by the
+    **sender address**: everyone funds one wallet here, so the only honest
+    way to tell deposits apart is who sent them, matched against the wallet
+    each user registered with /wallet. A transfer from an unregistered
+    address is recorded and flagged, never apportioned — guessing an owner
+    is how one user gets credited with another's money.
+
+    A matched arrival also proves the sender controls their registered
+    wallet, so it flips the wallet to `verified` — same rule as the Coinbase
+    path: money arriving from an address is the one proof of control a user
+    cannot fake by typing.
+
+    Idempotent by txid; re-running over the same list is a no-op.
+    """
+    events: list[dict[str, Any]] = []
+    first_run = get_meta(_TESTWALLET_BASELINE_KEY) is None
+    now = _now()
+    minimum = float(bot_config.POOL_MIN_DEPOSIT_USD)
+
+    for transfer in transfers:
+        txid = normalize_txid(transfer.get("txid"))
+        amount = float(transfer.get("amount_usd") or 0)
+        sender = normalize_address(transfer.get("from"))
+        if not txid or amount <= 0:
+            continue
+
+        owner = wallet_owner(sender) if sender else None
+
+        with _connect() as conn:
+            known = conn.execute(
+                "SELECT * FROM pool_testwallet_deposits WHERE txid = ?", (txid,)
+            ).fetchone()
+            if known is None:
+                # Anything already on the wallet when the watcher first runs
+                # is house history, not unclaimed user money — unless the
+                # sender is a registered wallet, which is positive evidence
+                # the transfer is a user's and it credits normally.
+                baseline = first_run and owner is None
+                conn.execute(
+                    "INSERT INTO pool_testwallet_deposits (txid, sender, "
+                    "amount_usd, status, first_seen_at, note) "
+                    "VALUES (?, ?, ?, ?, ?, ?)",
+                    (txid, sender, amount,
+                     "baseline" if baseline else "unmatched", now,
+                     "pre-existing at watcher start" if baseline else None),
+                )
+                known = conn.execute(
+                    "SELECT * FROM pool_testwallet_deposits WHERE txid = ?",
+                    (txid,),
+                ).fetchone()
+
+        if str(known["status"]) in ("credited", "baseline"):
+            continue
+
+        if owner is None or not is_approved(owner) or amount < minimum:
+            reason = (
+                "unregistered sender" if owner is None
+                else "sender not an approved user" if not is_approved(owner)
+                else f"below ${minimum:,.0f} minimum"
+            )
+            events.append({
+                "kind": "unmatched", "txid": txid, "sender": sender,
+                "amount_usd": amount, "reason": reason,
+                "alerted": bool(known["alerted_at"]),
+            })
+            continue
+
+        result = credit(
+            owner, amount,
+            admin_id=0,  # 0 = the system, not a person
+            ref=f"tw_deposit:{txid}",
+            note=f"test-wallet arrival from {sender}",
+        )
+        if not result.get("ok") and result.get("reason") != "duplicate":
+            logger.error(
+                "pool: test-wallet credit failed for %s (%s): %s",
+                owner, txid, result.get("reason"),
+            )
+            continue
+        # "duplicate" means the money is booked and only the status write was
+        # lost to a crash — settle the row quietly, the user was told already.
+        with _connect() as conn:
+            conn.execute(
+                "UPDATE pool_testwallet_deposits SET status = 'credited', "
+                "telegram_id = ?, credited_at = ? WHERE txid = ?",
+                (owner, now, txid),
+            )
+        if sender:
+            mark_wallet_verified(sender, txid=txid)
+        if result.get("ok"):
+            logger.info(
+                "pool: test-wallet credited %s $%.2f (tx %s)", owner, amount, txid
+            )
+            events.append({
+                "kind": "credited", "txid": txid, "sender": sender,
+                "telegram_id": owner, "amount_usd": amount,
+                "cash_usd": float(result.get("cash_usd") or 0.0),
+            })
+
+    if first_run:
+        set_meta(_TESTWALLET_BASELINE_KEY, now)
+    return events
+
+
+def mark_testwallet_deposit_alerted(txid: str) -> None:
+    with _connect() as conn:
+        conn.execute(
+            "UPDATE pool_testwallet_deposits SET alerted_at = ? WHERE txid = ?",
+            (_now(), txid),
+        )
+
+
+def unmatched_testwallet_deposits() -> list[dict[str, Any]]:
+    with _connect() as conn:
+        rows = conn.execute(
+            "SELECT * FROM pool_testwallet_deposits WHERE status = 'unmatched' "
+            "ORDER BY first_seen_at"
+        ).fetchall()
+    return [dict(r) for r in rows]
+
+
+def assign_testwallet_deposit(
+    txid: str, telegram_id: int, *, admin_id: int
+) -> dict[str, Any]:
+    """Credit an unmatched test-wallet arrival to a user, on an admin's say-so.
+
+    The escape hatch for someone who funded from an exchange withdrawal or an
+    address they never registered. Credits the chain's amount through the same
+    idempotency ref as the automatic path, so an assign raced against the
+    sweep still pays exactly once.
+    """
+    clean = normalize_txid(txid)
+    if clean is None:
+        return {"ok": False, "reason": "txid_malformed"}
+    with _connect() as conn:
+        row = conn.execute(
+            "SELECT * FROM pool_testwallet_deposits WHERE txid = ?", (clean,)
+        ).fetchone()
+    if row is None:
+        return {"ok": False, "reason": "not_found"}
+    if str(row["status"]) == "credited":
+        return {"ok": False, "reason": "already_credited",
+                "telegram_id": row["telegram_id"]}
+    if not is_approved(telegram_id):
+        return {"ok": False, "reason": "not_approved"}
+
+    amount = float(row["amount_usd"])
+    result = credit(
+        telegram_id, amount, admin_id=admin_id,
+        ref=f"tw_deposit:{clean}",
+        note=f"assigned by {admin_id}, test-wallet tx {clean}",
+    )
+    if not result.get("ok"):
+        return result
+    with _connect() as conn:
+        conn.execute(
+            "UPDATE pool_testwallet_deposits SET status = 'credited', "
+            "telegram_id = ?, credited_at = ?, note = ? WHERE txid = ?",
+            (telegram_id, _now(), f"assigned by admin {admin_id}", clean),
+        )
+    logger.info(
+        "pool: %s assigned test-wallet tx %s ($%.2f) to %s",
+        admin_id, clean, amount, telegram_id,
+    )
+    return {"ok": True, "telegram_id": telegram_id, "amount_usd": amount,
+            "cash_usd": result.get("cash_usd")}
+
+
+# ---------------------------------------------------------------------------
 # Withdrawals
 # ---------------------------------------------------------------------------
 
@@ -2951,6 +3191,251 @@ def book_close(trade_id: int, *, close_reason: str) -> list[dict[str, Any]]:
 # Portfolio and reconciliation
 # ---------------------------------------------------------------------------
 
+# ---------------------------------------------------------------------------
+# Kalshi lane positions — user contracts on the house Kalshi account
+# ---------------------------------------------------------------------------
+#
+# The money flow mirrors pool_stakes: the full cost is *reserved* (not spent)
+# at open, settlement releases the reserve and books P&L to cash. Binary
+# contracts make the arithmetic honest by construction — the cost IS the risk.
+#
+# Placement happens between two transactions, so the row carries the truth
+# about where money is at every step: 'placing' = reserve held, order may
+# exist at the venue; 'open' = filled, reserve trimmed to the actual cost;
+# 'unfilled' = reserve returned; 'settled' = reserve returned + P&L booked.
+
+
+def open_kalshi_placing(
+    intent_ref: str,
+    telegram_id: int,
+    strategy: str,
+    *,
+    market_ticker: str,
+    side: str,
+    limit_cents: int,
+    fee_per_contract_usd: float,
+    max_contracts: int | None = None,
+) -> dict[str, Any]:
+    """Size and reserve one Kalshi Accept, before the order is placed.
+
+    Sizing and the reserve happen in one transaction (same reasoning as
+    `record_intent`): budget = POOL_KALSHI_RISK_PCT of the user's lane
+    allocation, capped by available cash, converted to whole contracts at the
+    limit price plus the per-contract fee. Refuses rather than rounding up —
+    an allocation that cannot afford one contract is refused as too small,
+    never stretched.
+    """
+    frozen = intents_frozen()
+    if frozen:
+        return {"ok": False, "reason": "frozen", "detail": frozen}
+    if not is_approved(telegram_id):
+        return {"ok": False, "reason": "not_approved"}
+    if side not in ("yes", "no"):
+        return {"ok": False, "reason": "bad_side"}
+    if not (1 <= int(limit_cents) <= 99):
+        return {"ok": False, "reason": "bad_price"}
+
+    per_contract = round(limit_cents / 100.0 + max(float(fee_per_contract_usd), 0), 6)
+    cap = int(bot_config.KALSHI_MAX_CONTRACTS_PER_ACCEPT)
+    if max_contracts is not None:
+        cap = min(cap, int(max_contracts))
+
+    with _write_txn() as conn:
+        account = conn.execute(
+            f"SELECT cash_usd, {_AVAILABLE_SQL} AS available FROM pool_accounts "
+            "WHERE telegram_id = ?",
+            (telegram_id,),
+        ).fetchone()
+        if account is None or float(account["cash_usd"]) <= 0:
+            return {"ok": False, "reason": "not_funded"}
+        if float(account["cash_usd"]) < float(bot_config.POOL_MIN_EQUITY_USD):
+            return {"ok": False, "reason": "below_min_equity",
+                    "minimum_usd": float(bot_config.POOL_MIN_EQUITY_USD)}
+        available = float(account["available"])
+        alloc_row = conn.execute(
+            "SELECT amount_usd FROM pool_strategy_allocs "
+            "WHERE telegram_id = ? AND strategy = ?",
+            (telegram_id, strategy),
+        ).fetchone()
+        alloc = float(alloc_row["amount_usd"]) if alloc_row else 0.0
+        if alloc <= 0:
+            return {"ok": False, "reason": "no_allocation", "strategy": strategy}
+
+        budget = round(
+            min(alloc, available) * float(bot_config.POOL_KALSHI_RISK_PCT), 2
+        )
+        contracts = min(int(budget // per_contract), cap)
+        if contracts < 1:
+            return {"ok": False, "reason": "budget_too_small",
+                    "budget_usd": budget,
+                    "per_contract_usd": round(per_contract, 4)}
+        max_cost = round(contracts * per_contract, 2)
+
+        try:
+            conn.execute(
+                "INSERT INTO pool_kalshi_positions (telegram_id, strategy, "
+                "market_ticker, side, contracts, entry_cents, cost_usd, "
+                "fee_usd, intent_ref, status, created_at) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'placing', ?)",
+                (telegram_id, strategy, market_ticker, side, contracts,
+                 float(limit_cents), max_cost,
+                 round(fee_per_contract_usd * contracts, 4), intent_ref, _now()),
+            )
+        except sqlite3.IntegrityError:
+            return {"ok": False, "reason": "already_recorded"}
+        if not _apply_event(
+            conn, telegram_id, kind="trade_open", amount_usd=max_cost,
+            ref=f"kalshi:{intent_ref}:open", note=f"kalshi {market_ticker} {side}",
+        ):
+            raise RuntimeError(f"kalshi reserve deduped: {intent_ref}")
+
+    logger.info(
+        "pool: kalshi placing %s user %s %s %s x%d cap $%.2f",
+        intent_ref, telegram_id, market_ticker, side, contracts, max_cost,
+    )
+    return {"ok": True, "contracts": contracts, "max_cost_usd": max_cost,
+            "limit_cents": int(limit_cents)}
+
+
+def finish_kalshi_open(
+    intent_ref: str,
+    *,
+    filled_contracts: int,
+    entry_cents: float,
+    cost_usd: float,
+    fee_usd: float,
+    order_id: str | None,
+) -> dict[str, Any]:
+    """Book what the venue actually did with a 'placing' row.
+
+    Zero fills return the whole reserve; a (partial) fill trims the reserve
+    down to the actual cost. Either way the reserve never exceeds what the
+    user genuinely has at the venue once this returns.
+    """
+    with _write_txn() as conn:
+        row = conn.execute(
+            "SELECT * FROM pool_kalshi_positions WHERE intent_ref = ?",
+            (intent_ref,),
+        ).fetchone()
+        if row is None:
+            return {"ok": False, "reason": "not_found"}
+        if str(row["status"]) != "placing":
+            return {"ok": False, "reason": "not_placing", "status": row["status"]}
+        telegram_id = int(row["telegram_id"])
+        reserved = float(row["cost_usd"])
+
+        if filled_contracts <= 0:
+            conn.execute(
+                "UPDATE pool_kalshi_positions SET status = 'unfilled', "
+                "order_id = COALESCE(?, order_id) WHERE id = ?",
+                (order_id, int(row["id"])),
+            )
+            _apply_event(
+                conn, telegram_id, kind="release", amount_usd=reserved,
+                ref=f"kalshi:{intent_ref}:unfilled", note="kalshi order unfilled",
+            )
+            return {"ok": True, "filled": 0}
+
+        actual = round(float(cost_usd), 2)
+        conn.execute(
+            "UPDATE pool_kalshi_positions SET status = 'open', contracts = ?, "
+            "entry_cents = ?, cost_usd = ?, fee_usd = ?, order_id = ? "
+            "WHERE id = ?",
+            (int(filled_contracts), float(entry_cents), actual,
+             round(float(fee_usd), 4), order_id, int(row["id"])),
+        )
+        trim = round(reserved - actual, 2)
+        if trim > 0:
+            _apply_event(
+                conn, telegram_id, kind="release", amount_usd=trim,
+                ref=f"kalshi:{intent_ref}:trim", note="kalshi reserve trim to fill",
+            )
+    logger.info(
+        "pool: kalshi open %s filled %d @ %.1fc cost $%.2f",
+        intent_ref, filled_contracts, entry_cents, cost_usd,
+    )
+    return {"ok": True, "filled": int(filled_contracts), "cost_usd": actual}
+
+
+def settle_kalshi_position(
+    position_id: int, *, result: str, payout_usd: float
+) -> dict[str, Any]:
+    """Book a settled market: release the reserve, land the P&L in cash."""
+    with _write_txn() as conn:
+        row = conn.execute(
+            "SELECT * FROM pool_kalshi_positions WHERE id = ?",
+            (int(position_id),),
+        ).fetchone()
+        if row is None:
+            return {"ok": False, "reason": "not_found"}
+        if str(row["status"]) != "open":
+            return {"ok": False, "reason": "not_open", "status": row["status"]}
+        telegram_id = int(row["telegram_id"])
+        intent_ref = str(row["intent_ref"])
+        cost = float(row["cost_usd"])
+        pnl = round(float(payout_usd) - cost, 2)
+
+        conn.execute(
+            "UPDATE pool_kalshi_positions SET status = 'settled', result = ?, "
+            "pnl_usd = ?, settled_at = ? WHERE id = ?",
+            (result, pnl, _now(), int(row["id"])),
+        )
+        _apply_event(
+            conn, telegram_id, kind="release", amount_usd=cost,
+            ref=f"kalshi:{intent_ref}:settle_release", note="kalshi settled",
+        )
+        _apply_event(
+            conn, telegram_id, kind="trade_close", amount_usd=pnl,
+            ref=f"kalshi:{intent_ref}:close",
+            note=f"kalshi {row['market_ticker']} settled {result}",
+        )
+    logger.info(
+        "pool: kalshi settled #%s user %s result %s pnl $%.2f",
+        position_id, telegram_id, result, pnl,
+    )
+    return {"ok": True, "telegram_id": telegram_id, "pnl_usd": pnl,
+            "market_ticker": str(row["market_ticker"]),
+            "side": str(row["side"]), "contracts": int(row["contracts"])}
+
+
+def open_kalshi_rows(status: str = "open") -> list[dict[str, Any]]:
+    with _connect() as conn:
+        rows = conn.execute(
+            "SELECT * FROM pool_kalshi_positions WHERE status = ? "
+            "ORDER BY created_at",
+            (status,),
+        ).fetchall()
+    return [dict(r) for r in rows]
+
+
+def stale_kalshi_placing(minutes: float = 10.0) -> list[dict[str, Any]]:
+    """Rows stuck in 'placing' — a crash mid-placement, money possibly at the
+    venue unbooked. Reported for a human; deliberately never auto-released,
+    because the reserve may be backing real contracts."""
+    cutoff = (
+        datetime.now(timezone.utc) - timedelta(minutes=minutes)
+    ).strftime("%Y-%m-%dT%H:%M:%SZ")
+    with _connect() as conn:
+        rows = conn.execute(
+            "SELECT * FROM pool_kalshi_positions WHERE status = 'placing' "
+            "AND created_at < ?",
+            (cutoff,),
+        ).fetchall()
+    return [dict(r) for r in rows]
+
+
+def kalshi_positions_for(
+    telegram_id: int, *, limit: int = 20
+) -> list[dict[str, Any]]:
+    with _connect() as conn:
+        rows = conn.execute(
+            "SELECT * FROM pool_kalshi_positions WHERE telegram_id = ? "
+            "AND status IN ('open', 'settled') ORDER BY created_at DESC LIMIT ?",
+            (telegram_id, int(limit)),
+        ).fetchall()
+    return [dict(r) for r in rows]
+
+
 def portfolio(telegram_id: int, spots: dict[str, float] | None = None) -> dict[str, Any]:
     """Everything /portfolio shows: cash, open stakes MTM, realized, history."""
     account = get_account(telegram_id)
@@ -3008,7 +3493,15 @@ def portfolio(telegram_id: int, spots: dict[str, float] | None = None) -> dict[s
         else:
             closed_stakes_out.append(item)
 
-    realized_total = sum(float(s["realized_pnl_usd"]) for s in map(dict, stake_rows))
+    kalshi_rows = kalshi_positions_for(telegram_id)
+    kalshi_open = [r for r in kalshi_rows if r["status"] == "open"]
+    kalshi_closed = [r for r in kalshi_rows if r["status"] == "settled"]
+    kalshi_realized = sum(float(r["pnl_usd"] or 0) for r in kalshi_closed)
+
+    realized_total = (
+        sum(float(s["realized_pnl_usd"]) for s in map(dict, stake_rows))
+        + kalshi_realized
+    )
     cash = float(account["cash_usd"])
     reserved = float(account["reserved_usd"])
     # Per-user deployments only — clamp so a stale allocation cannot exceed
@@ -3030,6 +3523,8 @@ def portfolio(telegram_id: int, spots: dict[str, float] | None = None) -> dict[s
         "unrealized_pnl_usd": round(unrealized, 2),
         "open_stakes": open_stakes_out,
         "closed_stakes": closed_stakes_out[:5],
+        "kalshi_open": kalshi_open,
+        "kalshi_closed": kalshi_closed[:5],
         "events": [dict(r) for r in event_rows],
         "frozen": intents_frozen(),
     }

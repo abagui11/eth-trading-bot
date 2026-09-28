@@ -1740,7 +1740,11 @@ class ReconcileSkipTests(PoolTestCase):
         import watchdog
 
         watchdog._pool_last_recon = 0.0
+        # The reconcile total now sums every configured treasury leg; pin the
+        # Phase 1 legs (test wallet / Kalshi) off so only Coinbase is judged.
         with patch.object(config, "EXECUTION_MODE", "live"), \
+                patch.object(config, "TEST_WALLET_ADDRESS", None), \
+                patch.object(config, "KALSHI_API_KEY_ID", None), \
                 patch.object(live_pending, "get_pending", return_value=[]), \
                 patch.object(trade_ideas_bridge, "pool_active_mill_refs", return_value=set()), \
                 patch.object(pool, "expire_stale_intents", return_value=[]), \
@@ -1788,9 +1792,12 @@ class ReconcileSkipTests(PoolTestCase):
         reconcile = self._run_sweep(lambda: gw)
         reconcile.assert_called_once()
         self.assertAlmostEqual(reconcile.call_args.args[0], 3647.63, places=2)
+        # Breakdown is per treasury location now (coinbase / test_wallet /
+        # kalshi / in-flight), with unconfigured legs absent.
         breakdown = reconcile.call_args.kwargs["breakdown"]
-        self.assertAlmostEqual(breakdown["spot_usd"], 3578.96, places=2)
-        self.assertAlmostEqual(breakdown["buying_power_usd"], 3737.92, places=2)
+        self.assertAlmostEqual(breakdown["coinbase_usd"], 3647.63, places=2)
+        self.assertAlmostEqual(breakdown["in_flight_usd"], 0.0, places=2)
+        self.assertNotIn("test_wallet_usd", breakdown)
 
 
 class PortfolioTests(PoolTestCase):

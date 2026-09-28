@@ -656,6 +656,49 @@ def format_fund_moonpay(
     return "\n".join(lines)
 
 
+def format_fund_testwallet(
+    *,
+    address: str,
+    registered_wallet: str | None,
+    widget_url: str | None = None,
+) -> str:
+    """Fund copy for the shared Phase 1 test wallet.
+
+    One address for everyone, so the copy leads with the sender rule: the
+    transfer is attributed by the wallet it comes FROM, which must be the one
+    the user registered. Without that, an arrival sits unclaimed for an admin
+    instead of crediting.
+    """
+    minimum = float(bot_config.POOL_MIN_DEPOSIT_USD)
+    lines = ["Fund your wallet\n"]
+    if registered_wallet:
+        lines += [
+            f"Send USDC on Base **from your registered wallet** "
+            f"(`{registered_wallet}`) to (tap to copy):",
+        ]
+    else:
+        lines += [
+            "First, register the wallet you'll send from — it's how your "
+            "deposit is matched to you, and the only address withdrawals "
+            "go back to:",
+            "",
+            "/wallet 0x<your address>",
+            "",
+            "Then send USDC on Base from that wallet to (tap to copy):",
+        ]
+    lines += [
+        f"`{address}`",
+        "",
+        f"Network: Base · Asset: USDC only · Minimum: ${minimum:,.0f}",
+        "",
+        "Your balance updates here automatically once it settles — "
+        "tap Refresh or Wallet.",
+    ]
+    if widget_url:
+        lines += ["", f"Or buy USDC with a card: {widget_url}"]
+    return "\n".join(lines)
+
+
 def format_wallet_surface(
     *,
     address: str | None,
@@ -878,8 +921,20 @@ def format_portfolio(p: dict) -> str:
                 f"({float(s['share_frac']) * 100:.1f}%) · "
                 f"risk ${float(s['risk_usd']):,.2f}{unreal_bit}"
             )
+    kalshi_open = p.get("kalshi_open") or []
+    if kalshi_open:
+        lines.append("")
+        lines.append(f"Kalshi windows open ({len(kalshi_open)}):")
+        for k in kalshi_open:
+            lines.append(
+                f"• {k.get('market_ticker')} {str(k.get('side', '')).upper()} "
+                f"× {int(k.get('contracts') or 0)} @ "
+                f"{float(k.get('entry_cents') or 0):.0f}¢ · "
+                f"${float(k.get('cost_usd') or 0):,.2f} at risk"
+            )
     closed = p.get("closed_stakes") or []
-    if closed:
+    kalshi_closed = p.get("kalshi_closed") or []
+    if closed or kalshi_closed:
         lines.append("")
         lines.append("Recent closed:")
         for s in closed:
@@ -888,7 +943,13 @@ def format_portfolio(p: dict) -> str:
                 f"• {product} {s.get('side')} — "
                 f"${float(s['realized_pnl_usd']):+,.2f}"
             )
-    if not opens and not closed:
+        for k in kalshi_closed:
+            lines.append(
+                f"• {k.get('market_ticker')} "
+                f"{str(k.get('side', '')).upper()} — "
+                f"${float(k.get('pnl_usd') or 0):+,.2f}"
+            )
+    if not opens and not closed and not kalshi_open and not kalshi_closed:
         lines.append("")
         if cash <= 0 and deployed <= 0:
             lines.append("No funds yet — tap Fund to get started.")
