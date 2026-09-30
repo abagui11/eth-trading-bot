@@ -44,6 +44,8 @@ _BOT_LABELS = {
     "eva_wick_xrp": "XRP",
     "eva_wick_sol": "SOL",
     "eva_wick_hype": "HYPE",
+    "eva_wick_1h_ladder": "1h ladder · 4/2/1 once per hour",
+    "eva_wick_1h_flat": "1h flat · 1/1 every fire",
 }
 
 # Paper clones of the live wick rule on the altcoin 15m series. They get their
@@ -56,6 +58,19 @@ _ALT_BOTS: dict[str, str] = {
     "eva_wick_sol": "KXSOL15M",
     "eva_wick_hype": "KXHYPE15M",
 }
+
+# Hourly piggyback books: when the live wick rule fires on a 15m market,
+# these buy the same side of the top-of-hour BTC/ETH threshold series at
+# fixed strike rungs past spot (bot repo: eva_wick_hourly.py). Same reasoning
+# as the altcoin clones — they are wick derivatives answering a different
+# question (do wick fires carry to the hourly settle?), not a fourth sleeve.
+_HOURLY_BOTS: dict[str, str] = {
+    "eva_wick_1h_ladder": "KXBTCD · KXETHD",
+    "eva_wick_1h_flat": "KXBTCD · KXETHD",
+}
+
+# Every shadow family that stays out of the sleeves' shared feeds.
+_SHADOW_BOTS: tuple[str, ...] = (*_ALT_BOTS, *_HOURLY_BOTS)
 
 # Short grey subtitles under each bot name in the comparison table (≤4 lines).
 _BOT_BLURBS = {
@@ -75,6 +90,17 @@ _BOT_BLURBS = {
         "buy the favored side before quotes freeze and hold to settlement. "
         "Paper trading this epoch."
     ),
+    "eva_wick_1h_ladder": (
+        "When the live wick rule fires, buy the same side of the hourly "
+        "BTC/ETH threshold market at the 1st/2nd/3rd strikes past spot "
+        "(4/2/1 contracts), at most once per hour. Blind fixed rungs — "
+        "this book exists to price the distances before anyone tunes them."
+    ),
+    "eva_wick_1h_flat": (
+        "Every wick fire, whatever the clock: 1 contract at each of the "
+        "1st and 2nd hourly strikes past spot. The always-on sibling of "
+        "the ladder book."
+    ),
 }
 
 # Bots always shown in the comparison, even before their first trade.
@@ -93,6 +119,11 @@ _EXPERIMENT_EPOCH_DEFAULT = "2026-09-08T18:00:00Z"
 # start date every time the book is reset.
 _ALT_EPOCH_DEFAULT = "2026-09-30T16:47:19Z"
 
+# Switch-on instant of the hourly piggyback books (kalshi-bot restart with
+# eva_wick_1h_* in ENABLED_BOTS). Pinned for the same reason as the altcoin
+# epoch: the forward record includes the fires the books chose to skip.
+_HOURLY_EPOCH_DEFAULT = "2026-09-30T20:07:51Z"
+
 
 def experiment_epoch() -> str:
     return (
@@ -102,6 +133,10 @@ def experiment_epoch() -> str:
 
 def alt_epoch() -> str:
     return (os.getenv("KALSHI_ALT_EPOCH") or _ALT_EPOCH_DEFAULT).strip()
+
+
+def hourly_epoch() -> str:
+    return (os.getenv("KALSHI_HOURLY_EPOCH") or _HOURLY_EPOCH_DEFAULT).strip()
 
 
 def live_bots() -> tuple[str, ...]:
@@ -232,6 +267,7 @@ def performance_payload(limit: int = 15) -> dict[str, Any] | None:
         return None
     epoch = experiment_epoch()
     alt_start = alt_epoch()
+    hourly_start = hourly_epoch()
     try:
         states = conn.execute(
             "SELECT bot_id, starting_usd, cash_usd, realized_pnl_usd"
@@ -241,24 +277,33 @@ def performance_payload(limit: int = 15) -> dict[str, Any] | None:
             "SELECT * FROM paper_positions WHERE status = 'open'"
             " ORDER BY opened_at DESC LIMIT 40"
         ).fetchall()
-        # The altcoin clones settle on the same 15m clock as the live book, so
-        # leaving them in this window would push the real trades off the feed
-        # within the hour. Their record lives in its own table.
+        # The shadow books (altcoin clones + hourly piggybacks) settle on
+        # the same clocks as the live book, so leaving them in this window
+        # would push the real trades off the feed within the hour. Their
+        # records live in their own tables.
         alt_ph = ",".join("?" * len(_ALT_BOTS))
+        hourly_ph = ",".join("?" * len(_HOURLY_BOTS))
+        shadow_ph = ",".join("?" * len(_SHADOW_BOTS))
         closed_rows = conn.execute(
             "SELECT * FROM paper_positions WHERE status != 'open'"
-            f" AND opened_at >= ? AND bot_id NOT IN ({alt_ph})"
+            f" AND opened_at >= ? AND bot_id NOT IN ({shadow_ph})"
             " ORDER BY closed_at DESC LIMIT ?",
-            (epoch, *_ALT_BOTS, max(1, min(int(limit), 100))),
+            (epoch, *_SHADOW_BOTS, max(1, min(int(limit), 100))),
         ).fetchall()
         alt_first = conn.execute(
             f"SELECT MIN(opened_at) FROM paper_positions"
             f" WHERE bot_id IN ({alt_ph})",
             tuple(_ALT_BOTS),
         ).fetchone()[0]
-        # Each family counts from its own start. The altcoin books opened on
-        # 09-30 and the sleeves on 09-08; one shared cut-off would either hide
-        # sleeve history or let a pre-epoch altcoin row into the forward test.
+        hourly_first = conn.execute(
+            f"SELECT MIN(opened_at) FROM paper_positions"
+            f" WHERE bot_id IN ({hourly_ph})",
+            tuple(_HOURLY_BOTS),
+        ).fetchone()[0]
+        # Each family counts from its own start. The sleeves race from
+        # 09-08, the altcoin clones from their 09-30 switch-on, the hourly
+        # piggybacks from theirs; one shared cut-off would either hide
+        # sleeve history or let a pre-epoch shadow row into a forward test.
         agg = conn.execute(
             "SELECT bot_id,"
             "  COUNT(*) AS closed,"
@@ -268,16 +313,17 @@ def performance_payload(limit: int = 15) -> dict[str, Any] | None:
             "  SUM(CASE WHEN result = 'flat' THEN 1 ELSE 0 END) AS early_exits"
             " FROM paper_positions"
             " WHERE status != 'open'"
-            f"   AND opened_at >= (CASE WHEN bot_id IN ({alt_ph})"
-            "                          THEN ? ELSE ? END)"
+            f"   AND opened_at >= (CASE WHEN bot_id IN ({alt_ph}) THEN ?"
+            f"                          WHEN bot_id IN ({hourly_ph}) THEN ?"
+            "                           ELSE ? END)"
             " GROUP BY bot_id",
-            (*_ALT_BOTS, alt_start, epoch),
+            (*_ALT_BOTS, alt_start, *_HOURLY_BOTS, hourly_start, epoch),
         ).fetchall()
         hidden_n = conn.execute(
             "SELECT COUNT(*) FROM paper_positions"
             " WHERE status != 'open' AND opened_at < ?"
-            f" AND bot_id NOT IN ({alt_ph})",
-            (epoch, *_ALT_BOTS),
+            f" AND bot_id NOT IN ({shadow_ph})",
+            (epoch, *_SHADOW_BOTS),
         ).fetchone()[0]
     except sqlite3.Error:
         logger.exception("Kalshi ledger query failed")
@@ -299,6 +345,7 @@ def performance_payload(limit: int = 15) -> dict[str, Any] | None:
 
     bots: list[dict[str, Any]] = []
     alt_bots: list[dict[str, Any]] = []
+    hourly_bots: list[dict[str, Any]] = []
     for st in states:
         bot_id = str(st["bot_id"])
         a = agg_by_bot.get(bot_id)
@@ -309,24 +356,27 @@ def performance_payload(limit: int = 15) -> dict[str, Any] | None:
         if bot_id in _RETIRED_BOTS:
             continue
         is_alt = bot_id in _ALT_BOTS
+        is_hourly = bot_id in _HOURLY_BOTS
         # Idle leftover books (old control/lottery rows) stay off the tab.
         if (
             closed == 0
             and n_open == 0
             and bot_id not in _EXPERIMENT_BOTS
             and not is_alt
+            and not is_hourly
         ):
             continue
         decided = wins + losses
         cash = float(st["cash_usd"] or 0)
+        is_shadow = is_alt or is_hourly
         row = {
             "bot_id": bot_id,
             "label": _BOT_LABELS.get(bot_id, bot_id),
             "blurb": _BOT_BLURBS.get(bot_id, ""),
-            # Altcoin clones are paper by construction in the bot repo
+            # Shadow books are paper by construction in the bot repo
             # (bot_config.PAPER_ONLY_BOTS), not by env, so the badge cannot
             # go stale if someone edits KALSHI_LIVE_BOTS.
-            "mode": "paper" if is_alt else ("live" if bot_id in live_set else "paper"),
+            "mode": "paper" if is_shadow else ("live" if bot_id in live_set else "paper"),
             "starting_usd": float(st["starting_usd"] or 0),
             "cash_usd": cash,
             "equity_usd": cash + open_cost_by_bot.get(bot_id, 0.0),
@@ -342,12 +392,17 @@ def performance_payload(limit: int = 15) -> dict[str, Any] | None:
         if is_alt:
             row["series"] = _ALT_BOTS[bot_id]
             alt_bots.append(row)
+        elif is_hourly:
+            row["series"] = _HOURLY_BOTS[bot_id]
+            hourly_bots.append(row)
         else:
             bots.append(row)
     # Live book first, then paper books alphabetically.
     bots.sort(key=lambda b: (b["mode"] != "live", b["bot_id"]))
     alt_order = list(_ALT_BOTS)
     alt_bots.sort(key=lambda b: alt_order.index(b["bot_id"]))
+    hourly_order = list(_HOURLY_BOTS)
+    hourly_bots.sort(key=lambda b: hourly_order.index(b["bot_id"]))
 
     live_list = [b for b in bots if b["mode"] == "live"]
     live_wins = sum(b["wins"] for b in live_list)
@@ -373,7 +428,7 @@ def performance_payload(limit: int = 15) -> dict[str, Any] | None:
         "hidden_closed": int(hidden_n or 0),
         "totals": totals,
         "bots": bots,
-        "open": [p for p in open_list if p["bot_id"] not in _ALT_BOTS],
+        "open": [p for p in open_list if p["bot_id"] not in _SHADOW_BOTS],
         "closed": closed_list,
         "altcoins": {
             "available": bool(alt_bots),
@@ -385,6 +440,17 @@ def performance_payload(limit: int = 15) -> dict[str, Any] | None:
             "first_trade_label": _fmt_ts(alt_first) + " ET" if alt_first else None,
             "bots": alt_bots,
             "open": [p for p in open_list if p["bot_id"] in _ALT_BOTS],
+        },
+        "hourly": {
+            "available": bool(hourly_bots),
+            "epoch": hourly_start,
+            "epoch_label": _fmt_ts(hourly_start) + " ET",
+            "first_trade": hourly_first,
+            "first_trade_label": (
+                _fmt_ts(hourly_first) + " ET" if hourly_first else None
+            ),
+            "bots": hourly_bots,
+            "open": [p for p in open_list if p["bot_id"] in _HOURLY_BOTS],
         },
         "lastmin": lastmin_payload(),
     }

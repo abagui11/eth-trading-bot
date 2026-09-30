@@ -247,6 +247,16 @@ def _kalshi_rows() -> list[dict[str, Any]]:
         )
         row["label"] = f"{coin} wick clone" if coin else row["label"]
         rows.append(row)
+    # Hourly piggyback books: fixed strike rungs on the top-of-hour BTC/ETH
+    # threshold series whenever the live wick rule fires. Both books trade
+    # both coins, so the chips are BTC/ETH like the sleeves.
+    hourly = payload.get("hourly") or {}
+    for b in hourly.get("bots", []):
+        rows.append(convert(
+            b,
+            family="Kalshi 1h · wick piggyback",
+            coins=list(_KALSHI_SLEEVE_COINS),
+        ))
     return rows
 
 

@@ -69,6 +69,19 @@ def _kalshi_payload() -> dict:
                 },
             ],
         },
+        "hourly": {
+            "available": True,
+            "bots": [
+                {
+                    "bot_id": "eva_wick_1h_ladder",
+                    "label": "1h ladder · 4/2/1 once per hour",
+                    "blurb": "rungs past spot on wick fires",
+                    "series": "KXBTCD · KXETHD", "mode": "paper",
+                    "starting_usd": 246.75, "epoch_pnl_usd": 3.10,
+                    "closed": 6, "open": 3, "win_rate": 0.5,
+                },
+            ],
+        },
     }
 
 
@@ -112,13 +125,14 @@ class TestFunnelComposition:
         assert set(books) == {
             "hq:control", "hq:eva_day",
             "kalshi:eva_wick", "kalshi:eva_wick_sol",
+            "kalshi:eva_wick_1h_ladder",
             "mill:ideas",
         }
 
     def test_everything_defaults_to_stage_one(self, patched_sources):
         payload = eva_lab.funnel_payload()
         by_stage = {st["stage"]: st["books"] for st in payload["stages"]}
-        assert len(by_stage[1]) == 5
+        assert len(by_stage[1]) == 6
         assert by_stage[2] == []
         assert by_stage[3] == []
 
@@ -174,6 +188,13 @@ class TestUnitHonesty:
         assert b["coins"] == ["SOL"]
         assert b["label"] == "SOL wick clone"
         assert b["mode"] == "paper"
+
+    def test_hourly_piggyback_is_its_own_family(self, patched_sources):
+        b = _books(eva_lab.funnel_payload())["kalshi:eva_wick_1h_ladder"]
+        assert b["family"] == "Kalshi 1h · wick piggyback"
+        assert b["coins"] == ["BTC", "ETH"]
+        assert b["mode"] == "paper"
+        assert b["pnl_pct"] == pytest.approx(3.10 / 246.75 * 100, abs=0.01)
 
     def test_mill_is_percent_only(self, patched_sources):
         b = _books(eva_lab.funnel_payload())["mill:ideas"]
