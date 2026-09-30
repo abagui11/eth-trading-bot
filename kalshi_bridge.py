@@ -41,6 +41,20 @@ _BOT_LABELS = {
     "eva_wick": "EVA wick",
     "eva_streak": "EVA reversal",
     "eva_arb": "EVA arb",
+    "eva_wick_xrp": "XRP",
+    "eva_wick_sol": "SOL",
+    "eva_wick_hype": "HYPE",
+}
+
+# Paper clones of the live wick rule on the altcoin 15m series. They get their
+# own table rather than a row each in the main comparison, because they are
+# not competing with the three sleeves — they are the same sleeve answering a
+# different question (does the edge exist outside BTC/ETH?), and mixing them
+# in would make the main table look like six strategies instead of three.
+_ALT_BOTS: dict[str, str] = {
+    "eva_wick_xrp": "KXXRP15M",
+    "eva_wick_sol": "KXSOL15M",
+    "eva_wick_hype": "KXHYPE15M",
 }
 
 # Short grey subtitles under each bot name in the comparison table (≤4 lines).
@@ -72,11 +86,22 @@ _RETIRED_BOTS = ("eva_wick_fade_v1",)
 # to paper with the double-down rule. Comparison starts here.
 _EXPERIMENT_EPOCH_DEFAULT = "2026-09-08T18:00:00Z"
 
+# The altcoin books were switched on at this instant (kalshi-bot restarted on
+# the VPS with the three ids in ENABLED_BOTS). Pinned rather than derived from
+# the first trade: a forward test's record has to include the windows it chose
+# not to trade, and "running since the first entry" would quietly restate the
+# start date every time the book is reset.
+_ALT_EPOCH_DEFAULT = "2026-09-30T16:35:41Z"
+
 
 def experiment_epoch() -> str:
     return (
         os.getenv("KALSHI_EXPERIMENT_EPOCH") or _EXPERIMENT_EPOCH_DEFAULT
     ).strip()
+
+
+def alt_epoch() -> str:
+    return (os.getenv("KALSHI_ALT_EPOCH") or _ALT_EPOCH_DEFAULT).strip()
 
 
 def live_bots() -> tuple[str, ...]:
@@ -206,6 +231,7 @@ def performance_payload(limit: int = 15) -> dict[str, Any] | None:
     if conn is None:
         return None
     epoch = experiment_epoch()
+    alt_start = alt_epoch()
     try:
         states = conn.execute(
             "SELECT bot_id, starting_usd, cash_usd, realized_pnl_usd"
@@ -215,11 +241,24 @@ def performance_payload(limit: int = 15) -> dict[str, Any] | None:
             "SELECT * FROM paper_positions WHERE status = 'open'"
             " ORDER BY opened_at DESC LIMIT 40"
         ).fetchall()
+        # The altcoin clones settle on the same 15m clock as the live book, so
+        # leaving them in this window would push the real trades off the feed
+        # within the hour. Their record lives in its own table.
+        alt_ph = ",".join("?" * len(_ALT_BOTS))
         closed_rows = conn.execute(
             "SELECT * FROM paper_positions WHERE status != 'open'"
-            " AND opened_at >= ? ORDER BY closed_at DESC LIMIT ?",
-            (epoch, max(1, min(int(limit), 100))),
+            f" AND opened_at >= ? AND bot_id NOT IN ({alt_ph})"
+            " ORDER BY closed_at DESC LIMIT ?",
+            (epoch, *_ALT_BOTS, max(1, min(int(limit), 100))),
         ).fetchall()
+        alt_first = conn.execute(
+            f"SELECT MIN(opened_at) FROM paper_positions"
+            f" WHERE bot_id IN ({alt_ph})",
+            tuple(_ALT_BOTS),
+        ).fetchone()[0]
+        # Each family counts from its own start. The altcoin books opened on
+        # 09-30 and the sleeves on 09-08; one shared cut-off would either hide
+        # sleeve history or let a pre-epoch altcoin row into the forward test.
         agg = conn.execute(
             "SELECT bot_id,"
             "  COUNT(*) AS closed,"
@@ -228,14 +267,17 @@ def performance_payload(limit: int = 15) -> dict[str, Any] | None:
             "  SUM(COALESCE(pnl_usd, 0)) AS pnl_usd,"
             "  SUM(CASE WHEN result = 'flat' THEN 1 ELSE 0 END) AS early_exits"
             " FROM paper_positions"
-            " WHERE status != 'open' AND opened_at >= ?"
+            " WHERE status != 'open'"
+            f"   AND opened_at >= (CASE WHEN bot_id IN ({alt_ph})"
+            "                          THEN ? ELSE ? END)"
             " GROUP BY bot_id",
-            (epoch,),
+            (*_ALT_BOTS, alt_start, epoch),
         ).fetchall()
         hidden_n = conn.execute(
             "SELECT COUNT(*) FROM paper_positions"
-            " WHERE status != 'open' AND opened_at < ?",
-            (epoch,),
+            " WHERE status != 'open' AND opened_at < ?"
+            f" AND bot_id NOT IN ({alt_ph})",
+            (epoch, *_ALT_BOTS),
         ).fetchone()[0]
     except sqlite3.Error:
         logger.exception("Kalshi ledger query failed")
@@ -256,6 +298,7 @@ def performance_payload(limit: int = 15) -> dict[str, Any] | None:
         )
 
     bots: list[dict[str, Any]] = []
+    alt_bots: list[dict[str, Any]] = []
     for st in states:
         bot_id = str(st["bot_id"])
         a = agg_by_bot.get(bot_id)
@@ -265,32 +308,46 @@ def performance_payload(limit: int = 15) -> dict[str, Any] | None:
         n_open = sum(1 for p in open_list if p["bot_id"] == bot_id)
         if bot_id in _RETIRED_BOTS:
             continue
+        is_alt = bot_id in _ALT_BOTS
         # Idle leftover books (old control/lottery rows) stay off the tab.
-        if closed == 0 and n_open == 0 and bot_id not in _EXPERIMENT_BOTS:
+        if (
+            closed == 0
+            and n_open == 0
+            and bot_id not in _EXPERIMENT_BOTS
+            and not is_alt
+        ):
             continue
         decided = wins + losses
         cash = float(st["cash_usd"] or 0)
-        bots.append(
-            {
-                "bot_id": bot_id,
-                "label": _BOT_LABELS.get(bot_id, bot_id),
-                "blurb": _BOT_BLURBS.get(bot_id, ""),
-                "mode": "live" if bot_id in live_set else "paper",
-                "starting_usd": float(st["starting_usd"] or 0),
-                "cash_usd": cash,
-                "equity_usd": cash + open_cost_by_bot.get(bot_id, 0.0),
-                "realized_pnl_usd": float(st["realized_pnl_usd"] or 0),
-                "epoch_pnl_usd": float(a["pnl_usd"] or 0) if a else 0.0,
-                "open": n_open,
-                "closed": closed,
-                "wins": wins,
-                "losses": losses,
-                "early_exits": int(a["early_exits"] or 0) if a else 0,
-                "win_rate": (wins / decided) if decided else None,
-            }
-        )
+        row = {
+            "bot_id": bot_id,
+            "label": _BOT_LABELS.get(bot_id, bot_id),
+            "blurb": _BOT_BLURBS.get(bot_id, ""),
+            # Altcoin clones are paper by construction in the bot repo
+            # (bot_config.PAPER_ONLY_BOTS), not by env, so the badge cannot
+            # go stale if someone edits KALSHI_LIVE_BOTS.
+            "mode": "paper" if is_alt else ("live" if bot_id in live_set else "paper"),
+            "starting_usd": float(st["starting_usd"] or 0),
+            "cash_usd": cash,
+            "equity_usd": cash + open_cost_by_bot.get(bot_id, 0.0),
+            "realized_pnl_usd": float(st["realized_pnl_usd"] or 0),
+            "epoch_pnl_usd": float(a["pnl_usd"] or 0) if a else 0.0,
+            "open": n_open,
+            "closed": closed,
+            "wins": wins,
+            "losses": losses,
+            "early_exits": int(a["early_exits"] or 0) if a else 0,
+            "win_rate": (wins / decided) if decided else None,
+        }
+        if is_alt:
+            row["series"] = _ALT_BOTS[bot_id]
+            alt_bots.append(row)
+        else:
+            bots.append(row)
     # Live book first, then paper books alphabetically.
     bots.sort(key=lambda b: (b["mode"] != "live", b["bot_id"]))
+    alt_order = list(_ALT_BOTS)
+    alt_bots.sort(key=lambda b: alt_order.index(b["bot_id"]))
 
     live_list = [b for b in bots if b["mode"] == "live"]
     live_wins = sum(b["wins"] for b in live_list)
@@ -316,7 +373,18 @@ def performance_payload(limit: int = 15) -> dict[str, Any] | None:
         "hidden_closed": int(hidden_n or 0),
         "totals": totals,
         "bots": bots,
-        "open": open_list,
+        "open": [p for p in open_list if p["bot_id"] not in _ALT_BOTS],
         "closed": closed_list,
+        "altcoins": {
+            "available": bool(alt_bots),
+            "epoch": alt_start,
+            "epoch_label": _fmt_ts(alt_start) + " ET",
+            # When the books actually first traded, which is not when they
+            # were switched on — the gap is part of the record.
+            "first_trade": alt_first,
+            "first_trade_label": _fmt_ts(alt_first) + " ET" if alt_first else None,
+            "bots": alt_bots,
+            "open": [p for p in open_list if p["bot_id"] in _ALT_BOTS],
+        },
         "lastmin": lastmin_payload(),
     }

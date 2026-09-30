@@ -1247,6 +1247,63 @@
           </div>
           <p class="sub" id="kalshi-variants-note"></p>
         </div>
+
+        {% set alt = kalshi.altcoins %}
+        <div id="kalshi-alt-card"{% if not (alt and alt.available) %} hidden{% endif %}>
+          <p class="sub news-section">Altcoin shadow books — the same wick rule, thinner markets</p>
+          <p class="sub" style="margin-bottom:10px">
+            The mid-window favourite rule was measured on BTC and ETH only.
+            These three books run <strong>the identical rule</strong> — same
+            67–80¢ band, same 4–10 minute clock, held to settlement — on the
+            XRP, SOL and HYPE 15m series, to find out whether the
+            favourite-longshot mispricing it feeds on belongs to these markets
+            generally or only to the two we happened to measure. There is no
+            backtest behind them; they start from zero and earn a record
+            forward. <strong>Paper only, and paper by construction</strong> —
+            these bot ids cannot route a real order even if they are added to
+            the live whitelist.
+          </p>
+          <p class="sub" style="margin-bottom:10px">
+            Priced like the live book so the rows are comparable: entry is the
+            real ask (skipped above the 82¢ pay cap, which is what makes a wide
+            book a skip rather than a bad fill), settlement pays $1.00 or
+            $0.00, and <strong>Kalshi taker fees are not charged</strong> —
+            the same known overstatement that sits on every book in this
+            ledger, roughly 1.4¢ per contract at 73¢. The one addition is fill
+            realism: the live book learns its fill from the exchange, so each
+            clip here is <strong>walked through the published order book</strong>
+            at the same limit a live immediate-or-cancel order would carry, and
+            the resulting count and average price are what gets recorded. These
+            books can therefore take a partial fill, pay up through a level, or
+            find nothing to buy at all — what they cannot do is record a fill
+            the exchange could not have given them.
+          </p>
+          <div class="table-scroll">
+            <table>
+              <thead>
+                <tr><th>Bot</th><th>Mode</th><th>Trades</th><th>W/L</th><th>Win%</th><th>Early exits</th><th>P&amp;L</th><th>Equity</th></tr>
+              </thead>
+              <tbody id="kalshi-alt-compare">
+                {% for b in (alt.bots if alt else []) %}
+                <tr>
+                  <td class="kalshi-bot-cell">
+                    <div class="kalshi-bot-name"><span class="kalshi-market"><span class="kalshi-asset-dot kalshi-asset-dot--{{ b.label | lower }}" aria-hidden="true"></span>{{ b.label }}</span></div>
+                    <div class="kalshi-bot-blurb">{{ b.series }}</div>
+                  </td>
+                  <td><span class="badge badge-none">PAPER</span></td>
+                  <td>{{ b.closed }}{% if b.open %} (+{{ b.open }} open){% endif %}</td>
+                  <td>{{ b.wins }}W/{{ b.losses }}L</td>
+                  <td>{% if b.win_rate is not none %}{{ (b.win_rate * 100)|round|int }}%{% else %}—{% endif %}</td>
+                  <td>{{ b.early_exits }}</td>
+                  <td class="{{ 'pos' if b.epoch_pnl_usd >= 0 else 'neg' }}">{{ "%+.2f"|format(b.epoch_pnl_usd) }}</td>
+                  <td>${{ "%.2f"|format(b.equity_usd) }}</td>
+                </tr>
+                {% endfor %}
+              </tbody>
+            </table>
+          </div>
+          <p class="sub" id="kalshi-alt-note">{% if alt and alt.epoch_label %}Running since {{ alt.epoch_label }}{% if alt.first_trade_label %}, first entry {{ alt.first_trade_label }}{% endif %}.{% endif %}</p>
+        </div>
         <p class="sub feed-status" id="kalshi-status"></p>
       </section>
     </div><!-- /tab-kalshi -->
@@ -2012,6 +2069,47 @@
       }).join('');
       kalshiSetTable('kalshi-closed', 'kalshi-closed-table', 'kalshi-closed-empty', closedHtml, (data.closed || []).length > 0);
       renderWickVariants(data.wick_variants);
+      renderAltBooks(data.altcoins);
+    }
+    function renderAltBooks(alt) {
+      var card = document.getElementById('kalshi-alt-card');
+      if (!card) return;
+      if (!alt || !alt.available || !(alt.bots || []).length) {
+        card.hidden = true;
+        return;
+      }
+      var body = document.getElementById('kalshi-alt-compare');
+      if (body) {
+        body.innerHTML = alt.bots.map(function (b) {
+          var asset = String(b.label || '').toLowerCase();
+          var name = '<div class="kalshi-bot-name"><span class="kalshi-market">' +
+            '<span class="kalshi-asset-dot kalshi-asset-dot--' + esc(asset) +
+            '" aria-hidden="true"></span>' + esc(b.label) + '</span></div>' +
+            '<div class="kalshi-bot-blurb">' + esc(b.series || '') + '</div>';
+          var wrb = b.win_rate != null ? Math.round(b.win_rate * 100) + '%' : '—';
+          var pnl = (b.epoch_pnl_usd >= 0 ? '+' : '') + Number(b.epoch_pnl_usd || 0).toFixed(2);
+          var trades = String(b.closed || 0) + (b.open ? ' (+' + b.open + ' open)' : '');
+          return '<tr><td class="kalshi-bot-cell">' + name + '</td>' +
+            '<td><span class="badge badge-none">PAPER</span></td>' +
+            '<td>' + trades + '</td>' +
+            '<td>' + b.wins + 'W/' + b.losses + 'L</td>' +
+            '<td>' + wrb + '</td>' +
+            '<td>' + (b.early_exits || 0) + '</td>' +
+            '<td class="' + (b.epoch_pnl_usd >= 0 ? 'pos' : 'neg') + '">' + pnl + '</td>' +
+            '<td>$' + Number(b.equity_usd || 0).toFixed(2) + '</td></tr>';
+        }).join('');
+      }
+      var note = document.getElementById('kalshi-alt-note');
+      if (note) {
+        var txt = '';
+        if (alt.epoch_label) {
+          txt = 'Running since ' + alt.epoch_label;
+          if (alt.first_trade_label) txt += ', first entry ' + alt.first_trade_label;
+          txt += '.';
+        }
+        note.textContent = txt;
+      }
+      card.hidden = false;
     }
     function renderWickVariants(wv) {
       var card = document.getElementById('kalshi-variants-card');
