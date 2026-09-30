@@ -365,15 +365,131 @@ td.pos { color: var(--good); }
 td.neg { color: var(--bad); }
 
 /* Coin markers in the strategy funnel tables — same palette as the Kalshi
-   asset dots so a coin reads the same color on every tab. */
+   asset dots so a coin reads the same color on every tab. Stacked one per
+   line: a dot must never wrap away from its ticker in a narrow cell. */
+.coin-cell {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
 .coin-chip {
   display: inline-flex;
   align-items: center;
   gap: 5px;
-  margin-right: 8px;
   font-family: var(--data);
   font-size: 0.85em;
   white-space: nowrap;
+}
+
+/* --- Eva Lab strategy funnel (CRM-style pipeline) --- */
+.funnel-strip {
+  display: flex;
+  align-items: stretch;
+  gap: 8px;
+  flex-wrap: wrap;
+  margin: 4px 0 16px;
+}
+.funnel-step {
+  flex: 1 1 150px;
+  min-width: 140px;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  padding: 8px 12px;
+  background: var(--card);
+  border: 1px solid var(--border);
+  border-left: 3px solid var(--soft);
+  text-decoration: none;
+  color: var(--ink);
+}
+.funnel-step:hover { border-color: var(--ink); }
+.funnel-step--2 { border-left-color: #1F5673; }
+.funnel-step--3 { border-left-color: var(--m600); }
+.funnel-step-stage {
+  font-family: var(--data);
+  font-size: 0.62rem;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+  color: var(--soft);
+}
+.funnel-step-name { font-weight: 600; font-size: 0.9rem; }
+.funnel-step-count {
+  font-family: var(--data);
+  font-size: 0.78rem;
+  color: var(--muted);
+}
+.funnel-arrow {
+  align-self: center;
+  color: var(--soft);
+  font-size: 1.1rem;
+  flex: 0 0 auto;
+}
+
+.stage-panel {
+  border: 1px solid var(--border);
+  border-left: 3px solid var(--soft);
+  padding: 12px 14px 14px;
+  margin: 0 0 16px;
+}
+.stage-panel--2 { border-left-color: #1F5673; }
+.stage-panel--3 { border-left-color: var(--m600); }
+.stage-panel-head {
+  display: flex;
+  align-items: baseline;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+.stage-num {
+  font-family: var(--data);
+  font-size: 0.62rem;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+  color: var(--soft);
+  border: 1px solid var(--border);
+  padding: 2px 7px;
+}
+.stage-num--2 { color: #1F5673; border-color: rgba(31, 86, 115, 0.45); }
+.stage-num--3 { color: var(--m600); border-color: rgba(14, 122, 82, 0.45); }
+.stage-name {
+  margin: 0;
+  font-size: 1rem;
+  font-weight: 600;
+}
+.stage-count-chip {
+  margin-left: auto;
+  font-family: var(--data);
+  font-size: 0.72rem;
+  color: var(--muted);
+  background: rgba(13, 17, 18, 0.045);
+  padding: 2px 8px;
+  border-radius: 999px;
+}
+.stage-tagline { margin: 6px 0 0; }
+.stage-criteria-label {
+  margin: 10px 0 2px;
+  font-family: var(--data);
+  font-size: 0.68rem;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+  color: var(--soft);
+}
+.stage-criteria {
+  list-style: none;
+  margin: 0 0 10px;
+  padding: 0;
+}
+.stage-criteria li {
+  position: relative;
+  padding: 3px 0 3px 16px;
+  font-size: 0.78rem;
+  line-height: 1.45;
+  color: var(--muted);
+}
+.stage-criteria li::before {
+  content: "\203A";
+  position: absolute;
+  left: 2px;
+  color: var(--soft);
 }
 
 .mill-clip-hint {

@@ -9,7 +9,7 @@
   <link href="https://fonts.googleapis.com/css2?family=Source+Serif+4:opsz,wght@8..60,400;8..60,600&family=Inter:wght@400;500;600&family=IBM+Plex+Mono:wght@400;500&display=swap" rel="stylesheet">
   <link rel="icon" href="/static/brand/eva-mark-32.png" sizes="32x32" type="image/png">
   <link rel="apple-touch-icon" href="/static/brand/eva-mark-180.png">
-  <link rel="stylesheet" href="/static/style.css?v=eva1">
+  <link rel="stylesheet" href="/static/style.css?v=eva2">
 </head>
 <body>
   {% macro mill_clip_detail(t, mode) -%}
@@ -1321,22 +1321,36 @@
           HQ books, <strong>P&amp;L against the seed bankroll</strong> for the
           Kalshi books, per-idea percent return for the Trade Mill — plus the
           day-clustered bootstrap <strong>P(edge&gt;0)</strong> on the
-          analytics tab. A book graduates a stage only by the pre-registered
-          bar in <code>EVA_VARIANTS_PREREG.md</code> (≥60 closes, bootstrap
-          CI above zero, a beaten random-entry placebo, mechanism intact) —
-          never by leading a table here.
-        </p>
-        <p class="sub" style="margin-bottom:10px">
-          A <strong>LIVE</strong> or <strong>LIVE*</strong> badge is a bounded
-          operator risk decision running ahead of the evidence, not a
-          promotion; stage and badge are deliberately independent.
+          analytics tab. Each stage below states the exact bar a book must
+          clear to advance; leading a table never qualifies, and a
+          <strong>LIVE</strong>/<strong>LIVE*</strong> badge is a bounded
+          operator risk decision, not a promotion.
         </p>
         {% if eva_lab and eva_lab.available %}
+        <div class="funnel-strip" role="navigation" aria-label="Strategy pipeline stages">
+          {% for st in eva_lab.stages %}
+          <a class="funnel-step funnel-step--{{ st.stage }}" href="#eva-stage-{{ st.stage }}-panel">
+            <span class="funnel-step-stage">Stage {{ st.stage }}</span>
+            <span class="funnel-step-name">{{ st.name }}</span>
+            <span class="funnel-step-count" id="eva-funnel-count-{{ st.stage }}">{{ st.books | length }} book{{ '' if st.books | length == 1 else 's' }}</span>
+          </a>
+          {% if not loop.last %}<span class="funnel-arrow" aria-hidden="true">&#8594;</span>{% endif %}
+          {% endfor %}
+        </div>
         {% for st in eva_lab.stages %}
-        <p class="sub news-section">{{ st.name }}</p>
-        <p class="sub" style="margin-bottom:8px">{{ st.desc }}</p>
-        <p class="sub" id="eva-stage-{{ st.stage }}-empty"{% if st.books %} hidden{% endif %}>No strategies at this stage yet.</p>
-        <div class="table-scroll" id="eva-stage-{{ st.stage }}-table"{% if not st.books %} hidden{% endif %}>
+        <div class="stage-panel stage-panel--{{ st.stage }}" id="eva-stage-{{ st.stage }}-panel">
+          <div class="stage-panel-head">
+            <span class="stage-num stage-num--{{ st.stage }}">Stage {{ st.stage }}</span>
+            <h3 class="stage-name">{{ st.name }}</h3>
+            <span class="stage-count-chip" id="eva-funnel-chip-{{ st.stage }}">{{ st.books | length }} book{{ '' if st.books | length == 1 else 's' }}</span>
+          </div>
+          <p class="sub stage-tagline">{{ st.tagline }}</p>
+          <p class="stage-criteria-label">{{ st.criteria_label }}</p>
+          <ul class="stage-criteria">
+            {% for c in st.criteria %}<li>{{ c }}</li>{% endfor %}
+          </ul>
+          <p class="sub" id="eva-stage-{{ st.stage }}-empty"{% if st.books %} hidden{% endif %}>No strategies at this stage yet.</p>
+          <div class="table-scroll" id="eva-stage-{{ st.stage }}-table"{% if not st.books %} hidden{% endif %}>
           <table>
             <thead>
               <tr><th>Strategy</th><th>Coin</th><th>Mode</th><th>Closed</th><th>Win%</th><th>Mean R</th><th>Total R</th><th>PnL</th><th>Median hold</th><th>Stopped→paid</th><th>Skips</th></tr>
@@ -1349,9 +1363,11 @@
                   {% if b.blurb %}<div class="kalshi-bot-blurb">{{ b.blurb }}</div>{% endif %}
                 </td>
                 <td>
+                  <div class="coin-cell">
                   {% for c in b.coins %}
                   <span class="coin-chip"><span class="kalshi-asset-dot kalshi-asset-dot--{{ c | lower }}" aria-hidden="true"></span>{{ c }}</span>
                   {% endfor %}
+                  </div>
                 </td>
                 <td>
                   {% if b.mode == 'live_mirror' %}
@@ -1379,7 +1395,8 @@
               {% endfor %}
             </tbody>
           </table>
-        </div>
+          </div>
+        </div><!-- /stage-panel -->
         {% endfor %}
         {% else %}
         <p class="sub">Strategy funnel unavailable — ledgers not mounted.</p>
@@ -2229,12 +2246,12 @@
     // base (neutral) dot so a new book never renders an invisible marker.
     var EVA_KNOWN_COINS = { btc: 1, eth: 1, xrp: 1, sol: 1, hype: 1 };
     function evaCoinCell(coins) {
-      return (coins || []).map(function (c) {
+      return '<div class="coin-cell">' + (coins || []).map(function (c) {
         var key = String(c).toLowerCase();
         var mod = EVA_KNOWN_COINS[key] ? ' kalshi-asset-dot--' + key : '';
         return '<span class="coin-chip"><span class="kalshi-asset-dot' + mod +
           '" aria-hidden="true"></span>' + esc(c) + '</span>';
-      }).join('');
+      }).join('') + '</div>';
     }
     function evaFunnelRow(b) {
       var name = '<div class="kalshi-bot-name">' + esc(b.label) + '</div>' +
@@ -2277,12 +2294,18 @@
       (data.stages || []).forEach(function (st) {
         var body = document.getElementById('eva-stage-' + st.stage);
         if (!body) return;
-        var rows = (st.books || []).map(evaFunnelRow).join('');
+        var books = st.books || [];
+        var rows = books.map(evaFunnelRow).join('');
         body.innerHTML = rows;
         var wrap = document.getElementById('eva-stage-' + st.stage + '-table');
         if (wrap) wrap.hidden = !rows;
         var empty = document.getElementById('eva-stage-' + st.stage + '-empty');
         if (empty) empty.hidden = !!rows;
+        var countTxt = books.length + (books.length === 1 ? ' book' : ' books');
+        var count = document.getElementById('eva-funnel-count-' + st.stage);
+        if (count) count.textContent = countTxt;
+        var chip = document.getElementById('eva-funnel-chip-' + st.stage);
+        if (chip) chip.textContent = countTxt;
       });
     }
 

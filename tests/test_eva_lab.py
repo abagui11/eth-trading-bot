@@ -126,7 +126,21 @@ class TestFunnelComposition:
         payload = eva_lab.funnel_payload()
         assert [st["stage"] for st in payload["stages"]] == [1, 2, 3]
         for st in payload["stages"]:
-            assert st["name"] and st["desc"]
+            assert st["name"] and st["tagline"]
+            assert st["criteria_label"] and len(st["criteria"]) >= 2
+
+    def test_graduation_bar_states_r_and_edge_probability(self,
+                                                          patched_sources):
+        """The user-facing bar must spell out the R and P(edge>0) rules."""
+        payload = eva_lab.funnel_payload()
+        stage1 = payload["stages"][0]
+        text = " ".join(stage1["criteria"])
+        assert "60 closed positions" in text
+        assert "mean R" in text
+        assert "95% CI" in text
+        assert "P(edge>0)" in text and "0.975" in text
+        assert "random entries" in text  # placebo
+        assert len(stage1["criteria"]) == 5  # prereg §4: all five, named
 
     def test_stage_registry_moves_a_book(self, patched_sources, monkeypatch):
         monkeypatch.setattr(

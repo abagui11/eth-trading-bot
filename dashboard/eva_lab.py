@@ -31,34 +31,65 @@ logger = logging.getLogger(__name__)
 STAGE_META: tuple[dict[str, Any], ...] = (
     {
         "stage": 1,
-        "name": "Stage 1 — Incubation",
-        "desc": (
-            "Paper and lab books building a recorded ledger. Graduation is "
-            "the pre-registered bar, not the leaderboard: ≥60 closed "
-            "positions, day-clustered bootstrap CI above zero, beats a "
-            "random-entry placebo with identical geometry, mechanism metric "
-            "moved as predicted, structural review. LIVE/LIVE* badges here "
-            "are operator risk decisions running ahead of the bar — bounded "
-            "clips, not approvals."
+        "name": "Incubation",
+        "tagline": (
+            "Paper and lab books building a recorded ledger. A LIVE / LIVE* "
+            "badge here is a bounded operator risk decision running ahead "
+            "of the evidence — never an approval."
+        ),
+        "criteria_label": (
+            "Graduation bar → Stage 2 — all five must clear "
+            "(EVA_VARIANTS_PREREG.md §4):"
+        ),
+        "criteria": (
+            "Sample — ≥ 60 closed positions in-epoch; below that, mean R "
+            "differences are unmeasurable noise.",
+            "Edge in R — mean R per trade beats its baseline (control for "
+            "the HQ variants; zero net of fees for standalone books) with a "
+            "day-clustered bootstrap 95% CI that excludes zero — reads as "
+            "≈ P(edge>0) ≥ 0.975 on the analytics tab. Day-clustered "
+            "because same-day trades share the tape; total P&L never "
+            "qualifies, sizing can fake it.",
+            "Placebo — beats random entries under identical bracket "
+            "geometry, proving the signal (not the geometry) made the money.",
+            "Mechanism — the pre-registered mechanism metric moved as "
+            "predicted (e.g. stopped-then-paid rate falls for wider stops).",
+            "Structure — bounded risk, honest accounting, no dependence on "
+            "a tuned threshold.",
         ),
     },
     {
         "stage": 2,
-        "name": "Stage 2 — Live validation",
-        "desc": (
-            "Cleared the Stage 1 bar. Trades a small real-money sleeve at "
-            "fixed risk while fill quality and fee drag are audited against "
-            "the paper book, with stepped size-ups measuring whether the "
-            "per-trade edge survives execution at size."
+        "name": "Live validation",
+        "tagline": (
+            "Cleared the statistical bar; now proving the edge survives "
+            "real execution on a small fixed-risk sleeve."
+        ),
+        "criteria_label": "Graduation bar → Stage 3:",
+        "criteria": (
+            "Execution — live fee- and slippage-adjusted mean R stays "
+            "inside the paper book's bootstrap CI; divergence is an "
+            "execution problem to fix, never a reason to re-base.",
+            "Size — stepped size-ups (8 → 25 → 100 contracts on Kalshi; "
+            "risk-per-trade steps on perps) with a fill audit at each step; "
+            "the per-trade edge must survive size.",
+            "Controls — stop, daily-loss halt and kill-switch each "
+            "exercised on a real fill.",
         ),
     },
     {
         "stage": 3,
-        "name": "Stage 3 — Approved & scaled",
-        "desc": (
-            "Survived live validation. Runs sleeve capital under the scaling "
-            "plan, monitored for regime drift; a failed review demotes the "
-            "book, it does not re-base it."
+        "name": "Approved & scaled",
+        "tagline": (
+            "Graduated. Runs sleeve capital under the scaling plan, "
+            "monitored for regime drift."
+        ),
+        "criteria_label": "Held to:",
+        "criteria": (
+            "Scaling — sleeve capital per the scaling study (participation "
+            "caps on Kalshi, linear risk until impact on perps).",
+            "Review — P(edge>0) re-read on a fixed cadence; a failed review "
+            "demotes the book, it does not re-base it.",
         ),
     },
 )
