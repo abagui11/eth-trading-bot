@@ -91,7 +91,7 @@ _EXPERIMENT_EPOCH_DEFAULT = "2026-09-08T18:00:00Z"
 # the first trade: a forward test's record has to include the windows it chose
 # not to trade, and "running since the first entry" would quietly restate the
 # start date every time the book is reset.
-_ALT_EPOCH_DEFAULT = "2026-09-30T16:35:41Z"
+_ALT_EPOCH_DEFAULT = "2026-09-30T16:47:19Z"
 
 
 def experiment_epoch() -> str:

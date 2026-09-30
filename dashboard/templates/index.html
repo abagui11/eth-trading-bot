@@ -1269,14 +1269,17 @@
             book a skip rather than a bad fill), settlement pays $1.00 or
             $0.00, and <strong>Kalshi taker fees are not charged</strong> —
             the same known overstatement that sits on every book in this
-            ledger, roughly 1.4¢ per contract at 73¢. The one addition is fill
-            realism: the live book learns its fill from the exchange, so each
-            clip here is <strong>walked through the published order book</strong>
-            at the same limit a live immediate-or-cancel order would carry, and
-            the resulting count and average price are what gets recorded. These
-            books can therefore take a partial fill, pay up through a level, or
-            find nothing to buy at all — what they cannot do is record a fill
-            the exchange could not have given them.
+            ledger, roughly 1.4¢ per contract at 73¢. These books were meant to
+            add fill realism on top — walking the published order book the way
+            a real immediate-or-cancel order would — but that model was
+            <strong>withdrawn in its first hour</strong>, after it booked a SOL
+            entry at 61¢ against a quoted 69¢ ask. A fill better than the best
+            offer is not a good fill, it is a broken one, and the order-book
+            feed could not be reconciled with the quoted touch. So a full clip
+            is assumed to fill at the ask, exactly as the live book's own paper
+            accounting does. The honest caveat: HYPE trades roughly a seventh
+            of ETH's volume, so on the thin end these books may still be
+            crediting themselves size the market would not have given them.
           </p>
           <div class="table-scroll">
             <table>
