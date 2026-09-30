@@ -181,9 +181,16 @@ def create_app() -> FastAPI:
         import kalshi_bridge
         import trade_ideas_bridge
 
+        from dashboard import eva_lab as eva_lab_module
+
         mill_paper = trade_ideas_bridge.volume_book_payload(limit=12)
         kalshi = kalshi_bridge.performance_payload(limit=15)
         eva_variants = eva_variants_bridge.performance_payload(limit=20)
+        try:
+            eva_lab = eva_lab_module.funnel_payload()
+        except Exception:
+            logger.exception("eva lab funnel payload failed")
+            eva_lab = {"available": False}
         # The ICT family: control plus the two live variant mirrors (prereg
         # amendment 2026-09-21). Shown together on Eva Trades, never blended —
         # the per-source strip is built from live_performance.by_source.
@@ -234,6 +241,7 @@ def create_app() -> FastAPI:
                 "mill_paper": mill_paper or {"available": False},
                 "kalshi": kalshi or {"available": False},
                 "eva_variants": eva_variants or {"available": False},
+                "eva_lab": eva_lab,
                 "yield_enabled": bool(config.YIELD_GEN_API_URL),
                 "yield_dashboard_url": config.YIELD_GEN_DASHBOARD_URL,
             },
@@ -247,6 +255,17 @@ def create_app() -> FastAPI:
         return eva_variants_bridge.performance_payload(
             limit=min(max(limit, 1), 100)
         )
+
+    @app.get("/api/eva/lab")
+    async def api_eva_lab() -> dict:
+        """Strategy funnel: every book grouped by approval stage."""
+        from dashboard import eva_lab as eva_lab_module
+
+        try:
+            return eva_lab_module.funnel_payload()
+        except Exception:
+            logger.exception("eva lab funnel payload failed")
+            return {"available": False}
 
     @app.get("/api/kalshi/performance")
     async def api_kalshi_performance(limit: int = 15) -> dict:
