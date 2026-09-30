@@ -257,6 +257,17 @@ def _kalshi_rows() -> list[dict[str, Any]]:
             family="Kalshi 1h · wick piggyback",
             coins=list(_KALSHI_SLEEVE_COINS),
         ))
+    # Cross-asset wick books: a BTC/ETH wick fire the EVA board agrees with,
+    # bought on an alt's 15m market. The chip is the coin the book actually
+    # trades (the target), the label carries the signal ("BTC→XRP").
+    cross = payload.get("cross") or {}
+    for b in cross.get("bots", []):
+        coin = str(b.get("coin") or "").upper()
+        rows.append(convert(
+            b,
+            family="Kalshi 15m · cross wick",
+            coins=[coin] if coin else [],
+        ))
     return rows
 
 

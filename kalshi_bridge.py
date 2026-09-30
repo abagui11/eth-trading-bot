@@ -46,6 +46,12 @@ _BOT_LABELS = {
     "eva_wick_hype": "HYPE",
     "eva_wick_1h_ladder": "1h ladder · 4/2/1 once per hour",
     "eva_wick_1h_flat": "1h flat · 1/1 every fire",
+    "eva_wick_btc_xrp": "BTC→XRP",
+    "eva_wick_btc_sol": "BTC→SOL",
+    "eva_wick_btc_hype": "BTC→HYPE",
+    "eva_wick_eth_xrp": "ETH→XRP",
+    "eva_wick_eth_sol": "ETH→SOL",
+    "eva_wick_eth_hype": "ETH→HYPE",
 }
 
 # Paper clones of the live wick rule on the altcoin 15m series. They get their
@@ -69,8 +75,20 @@ _HOURLY_BOTS: dict[str, str] = {
     "eva_wick_1h_flat": "KXBTCD · KXETHD",
 }
 
+# Cross-asset wick books (bot repo: eva_wick_cross.py): a BTC or ETH wick
+# fire that the EVA board's M15 stance agrees with buys the same side on an
+# altcoin 15m market. bot_id -> (signal coin, target coin, target series).
+_CROSS_BOTS: dict[str, tuple[str, str, str]] = {
+    "eva_wick_btc_xrp": ("BTC", "XRP", "KXXRP15M"),
+    "eva_wick_btc_sol": ("BTC", "SOL", "KXSOL15M"),
+    "eva_wick_btc_hype": ("BTC", "HYPE", "KXHYPE15M"),
+    "eva_wick_eth_xrp": ("ETH", "XRP", "KXXRP15M"),
+    "eva_wick_eth_sol": ("ETH", "SOL", "KXSOL15M"),
+    "eva_wick_eth_hype": ("ETH", "HYPE", "KXHYPE15M"),
+}
+
 # Every shadow family that stays out of the sleeves' shared feeds.
-_SHADOW_BOTS: tuple[str, ...] = (*_ALT_BOTS, *_HOURLY_BOTS)
+_SHADOW_BOTS: tuple[str, ...] = (*_ALT_BOTS, *_HOURLY_BOTS, *_CROSS_BOTS)
 
 # Short grey subtitles under each bot name in the comparison table (≤4 lines).
 _BOT_BLURBS = {
@@ -101,6 +119,32 @@ _BOT_BLURBS = {
         "1st and 2nd hourly strikes past spot. The always-on sibling of "
         "the ladder book."
     ),
+    "eva_wick_btc_xrp": (
+        "When the wick rule fires on BTC and the EVA board's M15 stance "
+        "points with it (≥0.55 conf), buy the same side of the XRP 15m "
+        "market at the ask. Tests whether a confirmed major-coin move "
+        "carries across assets."
+    ),
+    "eva_wick_btc_sol": (
+        "BTC wick fire + EVA M15 agreement → same side on the SOL 15m "
+        "market at the ask, same quarter-hour settle."
+    ),
+    "eva_wick_btc_hype": (
+        "BTC wick fire + EVA M15 agreement → same side on the HYPE 15m "
+        "market at the ask, same quarter-hour settle."
+    ),
+    "eva_wick_eth_xrp": (
+        "ETH wick fire + EVA M15 agreement → same side on the XRP 15m "
+        "market at the ask, same quarter-hour settle."
+    ),
+    "eva_wick_eth_sol": (
+        "ETH wick fire + EVA M15 agreement → same side on the SOL 15m "
+        "market at the ask, same quarter-hour settle."
+    ),
+    "eva_wick_eth_hype": (
+        "ETH wick fire + EVA M15 agreement → same side on the HYPE 15m "
+        "market at the ask, same quarter-hour settle."
+    ),
 }
 
 # Bots always shown in the comparison, even before their first trade.
@@ -124,6 +168,10 @@ _ALT_EPOCH_DEFAULT = "2026-09-30T16:47:19Z"
 # epoch: the forward record includes the fires the books chose to skip.
 _HOURLY_EPOCH_DEFAULT = "2026-09-30T20:07:51Z"
 
+# Switch-on instant of the cross-asset wick books; same pinning logic.
+# Set at the deploy restart that added the six eva_wick_btc_*/eth_* ids.
+_CROSS_EPOCH_DEFAULT = "2026-09-30T20:52:36Z"
+
 
 def experiment_epoch() -> str:
     return (
@@ -137,6 +185,10 @@ def alt_epoch() -> str:
 
 def hourly_epoch() -> str:
     return (os.getenv("KALSHI_HOURLY_EPOCH") or _HOURLY_EPOCH_DEFAULT).strip()
+
+
+def cross_epoch() -> str:
+    return (os.getenv("KALSHI_CROSS_EPOCH") or _CROSS_EPOCH_DEFAULT).strip()
 
 
 def live_bots() -> tuple[str, ...]:
@@ -268,6 +320,7 @@ def performance_payload(limit: int = 15) -> dict[str, Any] | None:
     epoch = experiment_epoch()
     alt_start = alt_epoch()
     hourly_start = hourly_epoch()
+    cross_start = cross_epoch()
     try:
         states = conn.execute(
             "SELECT bot_id, starting_usd, cash_usd, realized_pnl_usd"
@@ -283,6 +336,7 @@ def performance_payload(limit: int = 15) -> dict[str, Any] | None:
         # records live in their own tables.
         alt_ph = ",".join("?" * len(_ALT_BOTS))
         hourly_ph = ",".join("?" * len(_HOURLY_BOTS))
+        cross_ph = ",".join("?" * len(_CROSS_BOTS))
         shadow_ph = ",".join("?" * len(_SHADOW_BOTS))
         closed_rows = conn.execute(
             "SELECT * FROM paper_positions WHERE status != 'open'"
@@ -300,6 +354,11 @@ def performance_payload(limit: int = 15) -> dict[str, Any] | None:
             f" WHERE bot_id IN ({hourly_ph})",
             tuple(_HOURLY_BOTS),
         ).fetchone()[0]
+        cross_first = conn.execute(
+            f"SELECT MIN(opened_at) FROM paper_positions"
+            f" WHERE bot_id IN ({cross_ph})",
+            tuple(_CROSS_BOTS),
+        ).fetchone()[0]
         # Each family counts from its own start. The sleeves race from
         # 09-08, the altcoin clones from their 09-30 switch-on, the hourly
         # piggybacks from theirs; one shared cut-off would either hide
@@ -315,9 +374,11 @@ def performance_payload(limit: int = 15) -> dict[str, Any] | None:
             " WHERE status != 'open'"
             f"   AND opened_at >= (CASE WHEN bot_id IN ({alt_ph}) THEN ?"
             f"                          WHEN bot_id IN ({hourly_ph}) THEN ?"
+            f"                          WHEN bot_id IN ({cross_ph}) THEN ?"
             "                           ELSE ? END)"
             " GROUP BY bot_id",
-            (*_ALT_BOTS, alt_start, *_HOURLY_BOTS, hourly_start, epoch),
+            (*_ALT_BOTS, alt_start, *_HOURLY_BOTS, hourly_start,
+             *_CROSS_BOTS, cross_start, epoch),
         ).fetchall()
         hidden_n = conn.execute(
             "SELECT COUNT(*) FROM paper_positions"
@@ -346,6 +407,7 @@ def performance_payload(limit: int = 15) -> dict[str, Any] | None:
     bots: list[dict[str, Any]] = []
     alt_bots: list[dict[str, Any]] = []
     hourly_bots: list[dict[str, Any]] = []
+    cross_bots: list[dict[str, Any]] = []
     for st in states:
         bot_id = str(st["bot_id"])
         a = agg_by_bot.get(bot_id)
@@ -357,6 +419,7 @@ def performance_payload(limit: int = 15) -> dict[str, Any] | None:
             continue
         is_alt = bot_id in _ALT_BOTS
         is_hourly = bot_id in _HOURLY_BOTS
+        is_cross = bot_id in _CROSS_BOTS
         # Idle leftover books (old control/lottery rows) stay off the tab.
         if (
             closed == 0
@@ -364,11 +427,12 @@ def performance_payload(limit: int = 15) -> dict[str, Any] | None:
             and bot_id not in _EXPERIMENT_BOTS
             and not is_alt
             and not is_hourly
+            and not is_cross
         ):
             continue
         decided = wins + losses
         cash = float(st["cash_usd"] or 0)
-        is_shadow = is_alt or is_hourly
+        is_shadow = is_alt or is_hourly or is_cross
         row = {
             "bot_id": bot_id,
             "label": _BOT_LABELS.get(bot_id, bot_id),
@@ -395,6 +459,12 @@ def performance_payload(limit: int = 15) -> dict[str, Any] | None:
         elif is_hourly:
             row["series"] = _HOURLY_BOTS[bot_id]
             hourly_bots.append(row)
+        elif is_cross:
+            signal, coin, series = _CROSS_BOTS[bot_id]
+            row["series"] = series
+            row["signal"] = signal
+            row["coin"] = coin
+            cross_bots.append(row)
         else:
             bots.append(row)
     # Live book first, then paper books alphabetically.
@@ -403,6 +473,8 @@ def performance_payload(limit: int = 15) -> dict[str, Any] | None:
     alt_bots.sort(key=lambda b: alt_order.index(b["bot_id"]))
     hourly_order = list(_HOURLY_BOTS)
     hourly_bots.sort(key=lambda b: hourly_order.index(b["bot_id"]))
+    cross_order = list(_CROSS_BOTS)
+    cross_bots.sort(key=lambda b: cross_order.index(b["bot_id"]))
 
     live_list = [b for b in bots if b["mode"] == "live"]
     live_wins = sum(b["wins"] for b in live_list)
@@ -451,6 +523,17 @@ def performance_payload(limit: int = 15) -> dict[str, Any] | None:
             ),
             "bots": hourly_bots,
             "open": [p for p in open_list if p["bot_id"] in _HOURLY_BOTS],
+        },
+        "cross": {
+            "available": bool(cross_bots),
+            "epoch": cross_start,
+            "epoch_label": _fmt_ts(cross_start) + " ET",
+            "first_trade": cross_first,
+            "first_trade_label": (
+                _fmt_ts(cross_first) + " ET" if cross_first else None
+            ),
+            "bots": cross_bots,
+            "open": [p for p in open_list if p["bot_id"] in _CROSS_BOTS],
         },
         "lastmin": lastmin_payload(),
     }

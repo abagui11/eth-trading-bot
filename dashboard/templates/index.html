@@ -1307,6 +1307,47 @@
           </div>
           <p class="sub" id="kalshi-alt-note">{% if alt and alt.epoch_label %}Running since {{ alt.epoch_label }}{% if alt.first_trade_label %}, first entry {{ alt.first_trade_label }}{% endif %}.{% endif %}</p>
         </div>
+
+        {% set cross = kalshi.cross %}
+        <div id="kalshi-cross-card"{% if not (cross and cross.available) %} hidden{% endif %}>
+          <p class="sub news-section">Cross-asset wick books — a confirmed BTC/ETH move, traded on the alts</p>
+          <p class="sub" style="margin-bottom:10px">
+            Six paper books asking a different question from the clones above:
+            not "is the alt's own favourite mispriced" but <strong>"does a
+            confirmed major-coin move carry across assets?"</strong> When the
+            wick rule fires on BTC or ETH <em>and</em> the EVA vision board's
+            M15 stance points the same way (≥0.55 confidence, fail-closed when
+            the board is stale), each book buys the same side of its alt's 15m
+            market at the real ask — no view on the alt's own pricing, same
+            quarter-hour settle, held to settlement. Paper by construction;
+            fees not charged, the same known overstatement as every book here.
+          </p>
+          <div class="table-scroll">
+            <table>
+              <thead>
+                <tr><th>Bot</th><th>Mode</th><th>Trades</th><th>W/L</th><th>Win%</th><th>Early exits</th><th>P&amp;L</th><th>Equity</th></tr>
+              </thead>
+              <tbody id="kalshi-cross-compare">
+                {% for b in (cross.bots if cross else []) %}
+                <tr>
+                  <td class="kalshi-bot-cell">
+                    <div class="kalshi-bot-name"><span class="kalshi-market"><span class="kalshi-asset-dot kalshi-asset-dot--{{ (b.coin or '') | lower }}" aria-hidden="true"></span>{{ b.label }}</span></div>
+                    <div class="kalshi-bot-blurb">{{ b.series }}</div>
+                  </td>
+                  <td><span class="badge badge-none">PAPER</span></td>
+                  <td>{{ b.closed }}{% if b.open %} (+{{ b.open }} open){% endif %}</td>
+                  <td>{{ b.wins }}W/{{ b.losses }}L</td>
+                  <td>{% if b.win_rate is not none %}{{ (b.win_rate * 100)|round|int }}%{% else %}—{% endif %}</td>
+                  <td>{{ b.early_exits }}</td>
+                  <td class="{{ 'pos' if b.epoch_pnl_usd >= 0 else 'neg' }}">{{ "%+.2f"|format(b.epoch_pnl_usd) }}</td>
+                  <td>${{ "%.2f"|format(b.equity_usd) }}</td>
+                </tr>
+                {% endfor %}
+              </tbody>
+            </table>
+          </div>
+          <p class="sub" id="kalshi-cross-note">{% if cross and cross.epoch_label %}Running since {{ cross.epoch_label }}{% if cross.first_trade_label %}, first entry {{ cross.first_trade_label }}{% endif %}.{% endif %}</p>
+        </div>
         <p class="sub feed-status" id="kalshi-status"></p>
       </section>
     </div><!-- /tab-kalshi -->
@@ -2125,6 +2166,47 @@
       kalshiSetTable('kalshi-closed', 'kalshi-closed-table', 'kalshi-closed-empty', closedHtml, (data.closed || []).length > 0);
       renderWickVariants(data.wick_variants);
       renderAltBooks(data.altcoins);
+      renderCrossBooks(data.cross);
+    }
+    function renderCrossBooks(cross) {
+      var card = document.getElementById('kalshi-cross-card');
+      if (!card) return;
+      if (!cross || !cross.available || !(cross.bots || []).length) {
+        card.hidden = true;
+        return;
+      }
+      var body = document.getElementById('kalshi-cross-compare');
+      if (body) {
+        body.innerHTML = cross.bots.map(function (b) {
+          var coin = String(b.coin || '').toLowerCase();
+          var name = '<div class="kalshi-bot-name"><span class="kalshi-market">' +
+            '<span class="kalshi-asset-dot kalshi-asset-dot--' + esc(coin) +
+            '" aria-hidden="true"></span>' + esc(b.label) + '</span></div>' +
+            '<div class="kalshi-bot-blurb">' + esc(b.series || '') + '</div>';
+          var wrb = b.win_rate != null ? Math.round(b.win_rate * 100) + '%' : '—';
+          var pnl = (b.epoch_pnl_usd >= 0 ? '+' : '') + Number(b.epoch_pnl_usd || 0).toFixed(2);
+          var trades = String(b.closed || 0) + (b.open ? ' (+' + b.open + ' open)' : '');
+          return '<tr><td class="kalshi-bot-cell">' + name + '</td>' +
+            '<td><span class="badge badge-none">PAPER</span></td>' +
+            '<td>' + trades + '</td>' +
+            '<td>' + b.wins + 'W/' + b.losses + 'L</td>' +
+            '<td>' + wrb + '</td>' +
+            '<td>' + (b.early_exits || 0) + '</td>' +
+            '<td class="' + (b.epoch_pnl_usd >= 0 ? 'pos' : 'neg') + '">' + pnl + '</td>' +
+            '<td>$' + Number(b.equity_usd || 0).toFixed(2) + '</td></tr>';
+        }).join('');
+      }
+      var note = document.getElementById('kalshi-cross-note');
+      if (note) {
+        var txt = '';
+        if (cross.epoch_label) {
+          txt = 'Running since ' + cross.epoch_label;
+          if (cross.first_trade_label) txt += ', first entry ' + cross.first_trade_label;
+          txt += '.';
+        }
+        note.textContent = txt;
+      }
+      card.hidden = false;
     }
     function renderAltBooks(alt) {
       var card = document.getElementById('kalshi-alt-card');

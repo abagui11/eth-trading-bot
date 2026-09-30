@@ -82,6 +82,19 @@ def _kalshi_payload() -> dict:
                 },
             ],
         },
+        "cross": {
+            "available": True,
+            "bots": [
+                {
+                    "bot_id": "eva_wick_btc_xrp", "label": "BTC→XRP",
+                    "blurb": "BTC wick fire + EVA agreement, traded on XRP",
+                    "series": "KXXRP15M", "signal": "BTC", "coin": "XRP",
+                    "mode": "paper", "starting_usd": 225.0,
+                    "epoch_pnl_usd": -0.80, "closed": 4, "open": 0,
+                    "win_rate": 0.25,
+                },
+            ],
+        },
     }
 
 
@@ -126,13 +139,14 @@ class TestFunnelComposition:
             "hq:control", "hq:eva_day",
             "kalshi:eva_wick", "kalshi:eva_wick_sol",
             "kalshi:eva_wick_1h_ladder",
+            "kalshi:eva_wick_btc_xrp",
             "mill:ideas",
         }
 
     def test_everything_defaults_to_stage_one(self, patched_sources):
         payload = eva_lab.funnel_payload()
         by_stage = {st["stage"]: st["books"] for st in payload["stages"]}
-        assert len(by_stage[1]) == 6
+        assert len(by_stage[1]) == 7
         assert by_stage[2] == []
         assert by_stage[3] == []
 
@@ -195,6 +209,13 @@ class TestUnitHonesty:
         assert b["coins"] == ["BTC", "ETH"]
         assert b["mode"] == "paper"
         assert b["pnl_pct"] == pytest.approx(3.10 / 246.75 * 100, abs=0.01)
+
+    def test_cross_wick_chip_is_the_traded_coin(self, patched_sources):
+        b = _books(eva_lab.funnel_payload())["kalshi:eva_wick_btc_xrp"]
+        assert b["family"] == "Kalshi 15m · cross wick"
+        assert b["coins"] == ["XRP"]  # the book trades XRP; BTC is the signal
+        assert b["label"] == "BTC→XRP"
+        assert b["mode"] == "paper"
 
     def test_mill_is_percent_only(self, patched_sources):
         b = _books(eva_lab.funnel_payload())["mill:ideas"]
