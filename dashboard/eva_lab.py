@@ -44,44 +44,52 @@ STAGE_META: tuple[dict[str, Any], ...] = (
             "badge here is a bounded operator risk decision running ahead "
             "of the evidence — never an approval."
         ),
+        # Amended 2026-10-01 (operator): Stage 2 is entered on a positive
+        # live-eligible record; the full statistical bar that used to gate
+        # it now gates Stage 3, so nothing gets approved on less evidence —
+        # Stage 2 just admits books into measured live validation sooner.
         "criteria_label": (
-            "Graduation bar → Stage 2 — all five must clear "
-            "(EVA_VARIANTS_PREREG.md §4):"
+            "Graduation bar → Stage 2 — either path, plus the structure "
+            "requirement:"
         ),
         "criteria": (
-            "Sample — ≥ 60 closed positions in-epoch; below that, mean R "
-            "differences are unmeasurable noise.",
-            "Edge in R — mean R per trade beats its baseline (control for "
-            "the HQ variants; zero net of fees for standalone books) with a "
-            "day-clustered bootstrap 95% CI that excludes zero — reads as "
-            "≈ P(edge>0) ≥ 0.975 on the analytics tab. Day-clustered "
-            "because same-day trades share the tape; total P&L never "
-            "qualifies, sizing can fake it.",
-            "Placebo — beats random entries under identical bracket "
-            "geometry, proving the signal (not the geometry) made the money.",
-            "Mechanism — the pre-registered mechanism metric moved as "
-            "predicted (e.g. stopped-then-paid rate falls for wider stops).",
-            "Structure — bounded risk, honest accounting, no dependence on "
-            "a tuned threshold.",
+            "Recorded edge — ≥ 500 closed positions over ≥ 10 trading days "
+            "with day-clustered bootstrap P(edge>0) ≥ 0.85 in the book's "
+            "native unit. Total P&L never qualifies, sizing can fake it.",
+            "Operator sponsorship — OR an operator-sponsored live sleeve at "
+            "bounded size: positive recorded P&L, live fills recorded as "
+            "real fills, and an explicit size-step plan. Recorded as a "
+            "decision, not evidence; a P(edge>0) on fewer than ~5 trading "
+            "days is not read as evidence either way.",
+            "Structure — bounded risk (per-bot contract cap), daily-loss "
+            "halt armed on the live sleeve, honest accounting.",
         ),
     },
     {
         "stage": 2,
         "name": "Live validation",
         "tagline": (
-            "Cleared the statistical bar; now proving the edge survives "
-            "real execution on a small fixed-risk sleeve."
+            "Trading real money at stepped size while the full statistical "
+            "bar is earned on the live record."
         ),
-        "criteria_label": "Graduation bar → Stage 3:",
+        "criteria_label": "Graduation bar → Stage 3 — all must clear:",
         "criteria": (
-            "Execution — live fee- and slippage-adjusted mean R stays "
+            "Edge — mean per-trade edge beats zero net of fees with a "
+            "day-clustered bootstrap 95% CI that excludes zero (≈ "
+            "P(edge>0) ≥ 0.975), on ≥ 60 closed live positions "
+            "(EVA_VARIANTS_PREREG.md §4).",
+            "Placebo & mechanism — beats random entries under identical "
+            "geometry, and the pre-registered mechanism metric moved as "
+            "predicted.",
+            "Execution — live fee- and slippage-adjusted edge stays "
             "inside the paper book's bootstrap CI; divergence is an "
             "execution problem to fix, never a reason to re-base.",
-            "Size — stepped size-ups (8 → 25 → 100 contracts on Kalshi; "
-            "risk-per-trade steps on perps) with a fill audit at each step; "
+            "Size — stepped size-ups with a fill audit at each step; "
             "the per-trade edge must survive size.",
             "Controls — stop, daily-loss halt and kill-switch each "
             "exercised on a real fill.",
+            "Demotion — P(edge>0) below 0.50 over ≥ 5 live trading days "
+            "returns the book to Stage 1 and paper.",
         ),
     },
     {
@@ -102,10 +110,14 @@ STAGE_META: tuple[dict[str, Any], ...] = (
 )
 
 # Operator-set stage per book key. Promote by adding e.g. "kalshi:eva_wick": 2
-# and citing the evidence in the changelog. Anything unlisted is Stage 1 —
-# as of 2026-09-30 no book has cleared its pre-registered bar, so the dict
-# starts empty on purpose.
-STRATEGY_STAGE: dict[str, int] = {}
+# and citing the evidence in the changelog. Anything unlisted is Stage 1.
+STRATEGY_STAGE: dict[str, int] = {
+    # 2026-10-01, recorded-edge path: 1,468 closed / 15 days / P(>0) 0.89.
+    "kalshi:eva_wick": 2,
+    # 2026-10-01, sponsorship path: 58 closed / 2 days / +$148 on $225 seed;
+    # live at 25 ct, step to 50 staged for 10-02.
+    "kalshi:eva_wick_sol": 2,
+}
 
 _DEFAULT_STAGE = 1
 

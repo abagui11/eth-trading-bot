@@ -147,17 +147,22 @@ class AltcoinSectionTests(unittest.TestCase):
         self.assertEqual((hype["closed"], hype["open"]), (0, 0))
         self.assertIsNone(hype["win_rate"])
 
-    def test_altcoin_books_never_render_as_live(self) -> None:
-        """Even if someone adds them to KALSHI_LIVE_BOTS on the hub."""
+    def test_altcoin_books_are_paper_unless_whitelisted(self) -> None:
+        for row in self.payload["altcoins"]["bots"]:
+            self.assertEqual(row["mode"], "paper")
+
+    def test_whitelisted_clone_renders_live(self) -> None:
+        """SOL was released 2026-10-01; the hub whitelist mirrors the bot's."""
         with patch.object(
-            kalshi_bridge, "live_bots",
-            lambda: ("eva_wick", "eva_wick_xrp", "eva_wick_sol",
-                     "eva_wick_hype"),
+            kalshi_bridge, "live_bots", lambda: ("eva_wick", "eva_wick_sol"),
         ):
             payload = kalshi_bridge.performance_payload(limit=15)
-        for row in payload["altcoins"]["bots"]:
-            self.assertEqual(row["mode"], "paper")
-        # And they must not leak into the live totals.
+        modes = {r["bot_id"]: r["mode"] for r in payload["altcoins"]["bots"]}
+        self.assertEqual(modes.get("eva_wick_sol"), "live")
+        for bot_id, mode in modes.items():
+            if bot_id != "eva_wick_sol":
+                self.assertEqual(mode, "paper")
+        # Clones stay in their own table, out of the main live totals.
         self.assertEqual(payload["totals"]["label"], "EVA wick")
 
     def test_epoch_is_when_the_books_were_switched_on(self) -> None:

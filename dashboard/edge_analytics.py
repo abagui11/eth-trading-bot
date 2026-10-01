@@ -37,6 +37,9 @@ KALSHI_EPOCH = {
     "eva_wick": "2026-09-17",
     "eva_streak": "2026-09-08T18:00:00Z",
     "eva_arb": "2026-09-08T18:00:00Z",
+    # Same start line as the altcoin table (kalshi_bridge alt epoch); paper
+    # until 2026-10-01, live at 25 ct from then — one continuous book.
+    "eva_wick_sol": "2026-09-30T16:35:41Z",
 }
 # 0.5% of median recorded window volume, blended BTC/ETH — from the
 # order-book depth study behind kalshi_scale_analysis.png (2026-09-16).
@@ -54,9 +57,11 @@ SCALING_SIZES = (1, 2, 5, 10, 25, 50, 100, 200, 500, 1000, 2000)
 # "you'd be up X%" digest); base 100 makes cum/base*100 = cum of those %.
 HQ_PAPER_BASE_USD = 5000.0
 KALSHI_SEEDS_USD = {
-    "eva_wick": 746.75,    # 246.75 (09-17 epoch) + $500 deposit 2026-10-01
+    # 246.75 (09-17 epoch) + $500 (10-01 05:33Z) + $1,750 (10-01 ~18:45Z)
+    "eva_wick": 2496.75,
     "eva_streak": 246.75,
     "eva_arb": 246.75,
+    "eva_wick_sol": 225.0,  # alt clone ledger seed; real money shares shard 2
 }
 LAB_NOTIONAL_USD = 1000.0
 MILL_PAPER_PCT_BASE = 100.0
@@ -79,6 +84,7 @@ def _base_usd(key: str) -> float | None:
         "kalshi:eva_wick": KALSHI_SEEDS_USD["eva_wick"],
         "kalshi:eva_streak": KALSHI_SEEDS_USD["eva_streak"],
         "kalshi:eva_arb": KALSHI_SEEDS_USD["eva_arb"],
+        "kalshi:eva_wick_sol": KALSHI_SEEDS_USD["eva_wick_sol"],
     }.get(key)
 
 
@@ -439,6 +445,7 @@ _LABELS = {
     "kalshi:eva_wick": ("Kalshi wick (LIVE)", "kalshi"),
     "kalshi:eva_streak": ("Kalshi reversal (paper)", "kalshi"),
     "kalshi:eva_arb": ("Kalshi arb (paper)", "kalshi"),
+    "kalshi:eva_wick_sol": ("Kalshi SOL wick (LIVE from 10-01)", "kalshi"),
 }
 _ORDER = list(_LABELS)
 
@@ -509,9 +516,11 @@ def build_edge_payload() -> dict[str, Any]:
             "Charts and Return % are percent growth of each book's sleeve/seed "
             f"(HQ paper ${HQ_PAPER_BASE_USD:.0f}, HQ live "
             f"${float(bot_config.LIVE_HQ_EQUITY_USD):.0f}, Kalshi wick "
-            f"${KALSHI_SEEDS_USD['eva_wick']:.2f} — reseeded +$500 on "
-            "2026-10-01 when the deposit landed — streak/arb "
-            f"${KALSHI_SEEDS_USD['eva_streak']:.2f}, "
+            f"${KALSHI_SEEDS_USD['eva_wick']:.2f} — reseeded +$500 and "
+            "+$1,750 on 2026-10-01 as each deposit landed — streak/arb "
+            f"${KALSHI_SEEDS_USD['eva_streak']:.2f}, SOL wick "
+            f"${KALSHI_SEEDS_USD['eva_wick_sol']:.2f} (paper until 2026-10-01, "
+            "live at 25 ct since; one continuous book), "
             f"lab ${LAB_NOTIONAL_USD:.0f} notional). "
             "Trade Mill is every sized idea since "
             f"{bot_config.MILL_PAPER_EPOCH_START} (sum of per-idea pnl_pct — "

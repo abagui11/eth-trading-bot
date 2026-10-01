@@ -149,12 +149,22 @@ class TestFunnelComposition:
             "mill:ideas",
         }
 
-    def test_everything_defaults_to_stage_one(self, patched_sources):
+    def test_everything_defaults_to_stage_one(self, patched_sources,
+                                              monkeypatch):
+        monkeypatch.setattr(eva_lab, "STRATEGY_STAGE", {})
         payload = eva_lab.funnel_payload()
         by_stage = {st["stage"]: st["books"] for st in payload["stages"]}
         assert len(by_stage[1]) == 7
         assert by_stage[2] == []
         assert by_stage[3] == []
+
+    def test_live_wick_books_sit_in_stage_two(self, patched_sources):
+        """2026-10-01 promotions: BTC/ETH wick and the SOL clone."""
+        assert eva_lab.STRATEGY_STAGE["kalshi:eva_wick"] == 2
+        assert eva_lab.STRATEGY_STAGE["kalshi:eva_wick_sol"] == 2
+        payload = eva_lab.funnel_payload()
+        stage2 = {b["key"] for b in payload["stages"][1]["books"]}
+        assert "kalshi:eva_wick" in stage2
 
     def test_all_three_stages_always_render(self, patched_sources):
         payload = eva_lab.funnel_payload()
@@ -165,16 +175,22 @@ class TestFunnelComposition:
 
     def test_graduation_bar_states_r_and_edge_probability(self,
                                                           patched_sources):
-        """The user-facing bar must spell out the R and P(edge>0) rules."""
+        """The user-facing bars must spell out the P(edge>0) rules.
+
+        Amended 2026-10-01: the prereg §4 statistical bar moved from the
+        Stage 2 gate to the Stage 3 gate — it must still be stated in full.
+        """
         payload = eva_lab.funnel_payload()
-        stage1 = payload["stages"][0]
-        text = " ".join(stage1["criteria"])
-        assert "60 closed positions" in text
-        assert "mean R" in text
-        assert "95% CI" in text
-        assert "P(edge>0)" in text and "0.975" in text
-        assert "random entries" in text  # placebo
-        assert len(stage1["criteria"]) == 5  # prereg §4: all five, named
+        entry = " ".join(payload["stages"][0]["criteria"])
+        assert "P(edge>0) ≥ 0.85" in entry
+        assert "500 closed" in entry and "10 trading days" in entry
+        assert "sponsor" in entry
+        approve = " ".join(payload["stages"][1]["criteria"])
+        assert "60 closed live positions" in approve
+        assert "95% CI" in approve
+        assert "P(edge>0)" in approve and "0.975" in approve
+        assert "random entries" in approve  # placebo
+        assert "Demotion" in approve
 
     def test_stage_registry_moves_a_book(self, patched_sources, monkeypatch):
         monkeypatch.setattr(

@@ -437,10 +437,16 @@ def performance_payload(limit: int = 15) -> dict[str, Any] | None:
             "bot_id": bot_id,
             "label": _BOT_LABELS.get(bot_id, bot_id),
             "blurb": _BOT_BLURBS.get(bot_id, ""),
-            # Shadow books are paper by construction in the bot repo
-            # (bot_config.PAPER_ONLY_BOTS), not by env, so the badge cannot
-            # go stale if someone edits KALSHI_LIVE_BOTS.
-            "mode": "paper" if is_shadow else ("live" if bot_id in live_set else "paper"),
+            # Hourly and cross books are paper by construction in the bot repo
+            # (bot_config.PAPER_ONLY_BOTS), not by env, so their badge cannot
+            # go stale if someone edits KALSHI_LIVE_BOTS. Altcoin clones can
+            # be released there (ALT_WICK_LIVE_RELEASED — SOL since
+            # 2026-10-01), so for them the env whitelist decides.
+            "mode": (
+                "live"
+                if bot_id in live_set and not (is_hourly or is_cross)
+                else "paper"
+            ),
             "starting_usd": float(st["starting_usd"] or 0),
             "cash_usd": cash,
             "equity_usd": cash + open_cost_by_bot.get(bot_id, 0.0),
