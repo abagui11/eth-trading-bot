@@ -1363,10 +1363,13 @@
           process it has reached. Each book is valued off its recorded
           ledger — <strong>R per trade at equal dollar risk</strong> for the
           HQ books, <strong>P&amp;L against the seed bankroll</strong> for the
-          Kalshi books, per-idea percent return for the Trade Mill — plus the
-          day-clustered bootstrap <strong>P(edge&gt;0)</strong> on the
-          analytics tab. Each stage below states the exact bar a book must
-          clear to advance; leading a table never qualifies, and a
+          Kalshi books, per-idea percent return for the Trade Mill — plus
+          <strong>P(&gt;0)</strong>, the day-clustered bootstrap probability
+          the book's edge is real (daily sums in the book's native unit,
+          20k resamples — the same method as the analytics tab; "—" means
+          fewer than 2 trading days of evidence). Each stage below states
+          the exact bar a book must clear to advance; leading a table never
+          qualifies, and a
           <strong>LIVE</strong>/<strong>LIVE*</strong> badge is a bounded
           operator risk decision, not a promotion.
         </p>
@@ -1397,7 +1400,7 @@
           <div class="table-scroll" id="eva-stage-{{ st.stage }}-table"{% if not st.books %} hidden{% endif %}>
           <table>
             <thead>
-              <tr><th>Strategy</th><th>Coin</th><th>Mode</th><th>Closed</th><th>Win%</th><th>Mean R</th><th>Total R</th><th>PnL</th><th>Median hold</th><th>Stopped→paid</th><th>Skips</th></tr>
+              <tr><th>Strategy</th><th>Coin</th><th>Mode</th><th>Closed</th><th>Win%</th><th title="Day-clustered bootstrap probability the book's edge is &gt; 0 — same method as Investor Analytics. Needs ≥ 2 trading days.">P(&gt;0)</th><th>Mean R</th><th>Total R</th><th>PnL</th><th>Median hold</th><th>Stopped→paid</th><th>Skips</th></tr>
             </thead>
             <tbody id="eva-stage-{{ st.stage }}">
               {% for b in st.books %}
@@ -1422,6 +1425,7 @@
                 </td>
                 <td>{{ b.n_closed }}{% if b.n_open %} (+{{ b.n_open }} open){% endif %}</td>
                 <td>{% if b.win_rate is not none %}{{ (b.win_rate * 100)|round|int }}%{% else %}—{% endif %}</td>
+                <td>{% if b.p_edge is not none %}{{ "%.2f"|format(b.p_edge) }}{% else %}—{% endif %}</td>
                 <td class="{{ 'pos' if b.mean_r is not none and b.mean_r >= 0 else ('neg' if b.mean_r is not none else '') }}">{% if b.mean_r is not none %}{{ "%+.3f"|format(b.mean_r) }}{% else %}—{% endif %}</td>
                 <td class="{{ 'pos' if b.sum_r is not none and b.sum_r >= 0 else ('neg' if b.sum_r is not none else '') }}">{% if b.sum_r is not none %}{{ "%+.2f"|format(b.sum_r) }}R{% else %}—{% endif %}</td>
                 {% set pnl_ref = b.pnl_usd if b.pnl_usd is not none else b.pnl_pct %}
@@ -2360,11 +2364,14 @@
         ? '—' : Number(b.median_hold_h).toFixed(1) + 'h';
       var stopped = b.stopped_n ? (b.stopped_then_paid + '/' + b.stopped_n) : '—';
       var skips = (b.skips === null || b.skips === undefined) ? '—' : String(b.skips);
+      var pEdge = (b.p_edge === null || b.p_edge === undefined)
+        ? '—' : Number(b.p_edge).toFixed(2);
       return '<tr><td class="kalshi-bot-cell">' + name + '</td>' +
         '<td>' + evaCoinCell(b.coins) + '</td>' +
         modeCell +
         '<td>' + (b.n_closed || 0) + (b.n_open ? ' (+' + b.n_open + ' open)' : '') + '</td>' +
         '<td>' + wr + '</td>' +
+        '<td>' + pEdge + '</td>' +
         '<td class="' + evaSignCls(b.mean_r) + '">' + evaNum(b.mean_r, 3) + '</td>' +
         '<td class="' + evaSignCls(b.sum_r) + '">' +
         ((b.sum_r === null || b.sum_r === undefined) ? '—' : evaNum(b.sum_r, 2, 'R')) + '</td>' +

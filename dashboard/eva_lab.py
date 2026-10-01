@@ -9,11 +9,13 @@ The valuation process the stages encode (see ``EVA_VARIANTS_PREREG.md`` and
 ``dashboard/edge_analytics.py``): a strategy is measured on its *recorded
 ledger* — R per trade at equal dollar risk for the HQ/perps books, P&L
 against the seed bankroll for the Kalshi books, per-idea percent return for
-the Trade Mill — plus the day-clustered bootstrap P(edge>0) on Investor
-Analytics. Advancing a stage is an operator decision recorded in
-``STRATEGY_STAGE`` with the evidence, never inferred from a leaderboard:
-a book can lead every column here and still be Stage 1 until the
-pre-registered bar clears.
+the Trade Mill — plus the day-clustered bootstrap P(edge>0), shown inline
+in the P(>0) column (same method as Investor Analytics: daily sums in the
+book's native unit, resampled with replacement; the unit cancels out of a
+sign probability, so R / $ / % books stay honest side by side). Advancing a
+stage is an operator decision recorded in ``STRATEGY_STAGE`` with the
+evidence, never inferred from a leaderboard: a book can lead every column
+here and still be Stage 1 until the pre-registered bar clears.
 
 Mode (LIVE / LIVE* / PAPER) is deliberately independent of stage — control,
 the wick book and the two mirrors trade real money today by operator risk
@@ -23,10 +25,15 @@ decisions, and the funnel must not present that as approval.
 from __future__ import annotations
 
 import logging
+import random
+from collections import defaultdict
 from datetime import datetime, timezone
-from typing import Any
+from typing import Any, Callable
 
 logger = logging.getLogger(__name__)
+
+# Matches dashboard.edge_analytics.BOOT_DRAWS — same method, same resolution.
+_BOOT_DRAWS = 20_000
 
 STAGE_META: tuple[dict[str, Any], ...] = (
     {
@@ -121,6 +128,125 @@ _HQ_COINS = ("BTC", "ETH")
 _KALSHI_SLEEVE_COINS = ("BTC", "ETH")
 
 
+# ---------------------------------------------------------------------------
+# P(edge>0) — the same day-clustered bootstrap Investor Analytics runs
+# (edge_analytics._stats), computed here per funnel row from each book's own
+# recorded series in its native unit (R for HQ, $ for Kalshi, % for the
+# mill). A sign probability is unit-invariant, so the funnel's "units are
+# never blended" rule survives. Cached per (book, n_closed): the 60s poller
+# must not re-run 20k draws on books that have not closed a trade since.
+# ---------------------------------------------------------------------------
+
+_pedge_cache: dict[str, tuple[int, float | None]] = {}
+
+
+def _bootstrap_p_edge(
+    rows: list[tuple[str, float]], *, key: str
+) -> float | None:
+    """Day-clustered bootstrap P(sum>0) over daily sums of ``rows``.
+
+    ``rows`` = [(closed_at, value)]. Same-day trades share the tape, so days
+    (not trades) are the resampling unit — identical to edge_analytics.
+    Needs >= 2 trading days; below that the answer is "no information" (None),
+    never a number. Seeded per (key, state) so the figure is stable between
+    polls instead of flickering by resampling noise.
+    """
+    by_day: dict[str, float] = defaultdict(float)
+    for ts, value in rows:
+        if ts:
+            by_day[str(ts)[:10]] += float(value)
+    daily = list(by_day.values())
+    k = len(daily)
+    if k < 2:
+        return None
+    rng = random.Random(f"{key}:{k}:{len(rows)}")
+    pos = 0
+    for _ in range(_BOOT_DRAWS):
+        s = 0.0
+        for _ in range(k):
+            s += daily[rng.randrange(k)]
+        if s > 0:
+            pos += 1
+    return round(pos / _BOOT_DRAWS, 2)
+
+
+def _p_edge_cached(
+    key: str, n_closed: int, series_fn: Callable[[], list[tuple[str, float]]]
+) -> float | None:
+    """Bootstrap for ``key``, recomputed only when its closed count moves.
+
+    A failed series read keeps the last computed figure (or None) — a flaky
+    ledger must degrade the column, never the whole funnel.
+    """
+    cached = _pedge_cache.get(key)
+    if cached is not None and cached[0] == int(n_closed or 0):
+        return cached[1]
+    try:
+        p_edge = _bootstrap_p_edge(series_fn(), key=key)
+    except Exception:
+        logger.exception("eva lab funnel: P(edge>0) failed for %s", key)
+        return cached[1] if cached else None
+    _pedge_cache[key] = (int(n_closed or 0), p_edge)
+    return p_edge
+
+
+def _hq_series(variant: str, epoch: str) -> list[tuple[str, float]]:
+    """(closed_at, realized_r) for one HQ book since the experiment epoch."""
+    import eva_variants
+
+    import eva_variants_bridge
+
+    if variant == eva_variants.CONTROL:
+        rows = eva_variants_bridge.control_positions(epoch or None)
+    else:
+        rows = [
+            r for r in eva_variants.closed_positions(variant, limit=10_000)
+            if not epoch or str(r.get("closed_at") or "") >= epoch
+        ]
+    return [
+        (str(r.get("closed_at") or ""), float(r["realized_r"]))
+        for r in rows
+        if r.get("realized_r") is not None and r.get("closed_at")
+    ]
+
+
+def _kalshi_series(bot_id: str, since: str) -> list[tuple[str, float]]:
+    """(closed_at, pnl_usd) for one Kalshi book since its family epoch."""
+    import kalshi_bridge
+
+    conn = kalshi_bridge._connect(kalshi_bridge.kalshi_db_path())
+    if conn is None:
+        return []
+    try:
+        rows = conn.execute(
+            "SELECT closed_at, pnl_usd FROM paper_positions"
+            " WHERE bot_id = ? AND status != 'open'"
+            " AND pnl_usd IS NOT NULL AND closed_at >= ?",
+            (str(bot_id), since or ""),
+        ).fetchall()
+        return [(str(r["closed_at"]), float(r["pnl_usd"])) for r in rows]
+    finally:
+        conn.close()
+
+
+def _mill_series() -> list[tuple[str, float]]:
+    """(closed_at, pnl_pct) for every resolved mill idea — the series behind
+    the summary's pnl_pct_sum, in the same per-idea percent unit."""
+    import trade_ideas_bridge
+
+    conn = trade_ideas_bridge._connect()
+    if conn is None:
+        return []
+    try:
+        rows = conn.execute(
+            "SELECT closed_at, pnl_pct FROM paper_trades"
+            " WHERE closed_at IS NOT NULL AND pnl_pct IS NOT NULL"
+        ).fetchall()
+        return [(str(r["closed_at"]), float(r["pnl_pct"])) for r in rows]
+    finally:
+        conn.close()
+
+
 def _row(
     *,
     key: str,
@@ -133,6 +259,7 @@ def _row(
     n_closed: int = 0,
     n_open: int = 0,
     win_rate: float | None = None,
+    p_edge: float | None = None,
     mean_r: float | None = None,
     sum_r: float | None = None,
     pnl_usd: float | None = None,
@@ -154,6 +281,7 @@ def _row(
         "n_closed": int(n_closed or 0),
         "n_open": int(n_open or 0),
         "win_rate": win_rate,
+        "p_edge": round(p_edge, 2) if p_edge is not None else None,
         "mean_r": mean_r,
         "sum_r": sum_r,
         "pnl_usd": round(pnl_usd, 2) if pnl_usd is not None else None,
@@ -177,9 +305,11 @@ def _hq_rows() -> list[dict[str, Any]]:
     payload = eva_variants_bridge.performance_payload(limit=1)
     if not payload or not payload.get("available"):
         return []
+    epoch = str(payload.get("epoch") or "")
     rows = []
     for b in payload.get("books", []):
         mode = str(b.get("mode") or "paper")
+        variant = str(b.get("variant") or "")
         rows.append(_row(
             key=f"hq:{b.get('variant')}",
             family="HQ perps",
@@ -191,6 +321,10 @@ def _hq_rows() -> list[dict[str, Any]]:
             n_closed=b.get("n_closed") or 0,
             n_open=b.get("n_open") or 0,
             win_rate=b.get("win_rate"),
+            p_edge=_p_edge_cached(
+                f"hq:{variant}", b.get("n_closed") or 0,
+                lambda v=variant: _hq_series(v, epoch),
+            ),
             mean_r=b.get("mean_r"),
             sum_r=b.get("sum_r"),
             pnl_usd=b.get("pnl_usd"),
@@ -215,9 +349,13 @@ def _kalshi_rows() -> list[dict[str, Any]]:
     if not payload or not payload.get("available"):
         return []
 
-    def convert(b: dict[str, Any], *, family: str, coins: list[str]) -> dict[str, Any]:
+    def convert(
+        b: dict[str, Any], *, family: str, coins: list[str], epoch: str
+    ) -> dict[str, Any]:
         seed = float(b.get("starting_usd") or 0)
         pnl = float(b.get("epoch_pnl_usd") or 0)
+        bot_id = str(b.get("bot_id") or "")
+        closed = b.get("closed") or 0
         return _row(
             key=f"kalshi:{b.get('bot_id')}",
             family=family,
@@ -225,15 +363,22 @@ def _kalshi_rows() -> list[dict[str, Any]]:
             blurb=str(b.get("blurb") or b.get("series") or ""),
             coins=coins,
             mode=str(b.get("mode") or "paper"),
-            n_closed=b.get("closed") or 0,
+            n_closed=closed,
             n_open=b.get("open") or 0,
             win_rate=b.get("win_rate"),
+            p_edge=_p_edge_cached(
+                f"kalshi:{bot_id}", closed,
+                lambda: _kalshi_series(bot_id, epoch),
+            ),
             pnl_usd=pnl,
             pnl_pct=(pnl / seed * 100.0) if seed > 0 else None,
         )
 
+    # Each family's series is epoch-filtered with the same epoch the bridge
+    # used for the row's own n / P&L, so the column never mixes windows.
     rows = [
-        convert(b, family="Kalshi 15m", coins=list(_KALSHI_SLEEVE_COINS))
+        convert(b, family="Kalshi 15m", coins=list(_KALSHI_SLEEVE_COINS),
+                epoch=kalshi_bridge.experiment_epoch())
         for b in payload.get("bots", [])
     ]
     alt = payload.get("altcoins") or {}
@@ -244,6 +389,7 @@ def _kalshi_rows() -> list[dict[str, Any]]:
             b,
             family="Kalshi 15m · altcoin wick",
             coins=[coin] if coin else [],
+            epoch=kalshi_bridge.alt_epoch(),
         )
         row["label"] = f"{coin} wick clone" if coin else row["label"]
         rows.append(row)
@@ -256,6 +402,7 @@ def _kalshi_rows() -> list[dict[str, Any]]:
             b,
             family="Kalshi 1h · wick piggyback",
             coins=list(_KALSHI_SLEEVE_COINS),
+            epoch=kalshi_bridge.hourly_epoch(),
         ))
     # Cross-asset wick books: a BTC/ETH wick fire the EVA board agrees with,
     # bought on an alt's 15m market. The chip is the coin the book actually
@@ -267,6 +414,7 @@ def _kalshi_rows() -> list[dict[str, Any]]:
             b,
             family="Kalshi 15m · cross wick",
             coins=[coin] if coin else [],
+            epoch=kalshi_bridge.cross_epoch(),
         ))
     return rows
 
@@ -299,6 +447,9 @@ def _mill_row() -> dict[str, Any] | None:
         n_closed=summary.get("closed") or 0,
         n_open=summary.get("open") or 0,
         win_rate=summary.get("win_rate"),
+        p_edge=_p_edge_cached(
+            "mill:ideas", summary.get("closed") or 0, _mill_series,
+        ),
         pnl_pct=summary.get("pnl_pct_sum"),
     )
 

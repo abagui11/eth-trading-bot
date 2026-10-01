@@ -122,6 +122,12 @@ def patched_sources(monkeypatch):
     monkeypatch.setattr(
         trade_ideas_bridge, "volume_book_payload",
         lambda limit=50: _mill_payload())
+    # Keep the funnel hermetic: the P(>0) series readers hit real ledgers,
+    # which don't exist here. Empty series -> p_edge None, cache fresh.
+    monkeypatch.setattr(eva_lab, "_pedge_cache", {})
+    monkeypatch.setattr(eva_lab, "_hq_series", lambda *a, **k: [])
+    monkeypatch.setattr(eva_lab, "_kalshi_series", lambda *a, **k: [])
+    monkeypatch.setattr(eva_lab, "_mill_series", lambda *a, **k: [])
 
 
 def _books(payload: dict) -> dict[str, dict]:
@@ -230,6 +236,62 @@ class TestUnitHonesty:
         b = _books(eva_lab.funnel_payload())["hq:eva_day"]
         assert b["mode"] == "live_mirror"
         assert "NOT a promotion" in b["mode_note"]
+
+
+class TestPEdge:
+    """The P(>0) column: day-clustered bootstrap, honest about thin samples."""
+
+    def test_every_row_carries_the_key(self, patched_sources):
+        for b in _books(eva_lab.funnel_payload()).values():
+            assert "p_edge" in b
+
+    def test_under_two_days_is_none_not_a_number(self):
+        rows = [("2026-09-30T10:00:00Z", 1.0), ("2026-09-30T11:00:00Z", 2.0)]
+        assert eva_lab._bootstrap_p_edge(rows, key="x") is None
+
+    def test_all_positive_days_reads_one(self):
+        rows = [(f"2026-09-{d:02d}T10:00:00Z", 1.0) for d in (27, 28, 29, 30)]
+        assert eva_lab._bootstrap_p_edge(rows, key="x") == 1.0
+
+    def test_deterministic_and_unit_invariant(self):
+        rows = [("2026-09-28T10:00:00Z", 3.0), ("2026-09-29T10:00:00Z", -1.0),
+                ("2026-09-30T10:00:00Z", -1.0), ("2026-09-30T12:00:00Z", 2.0)]
+        p1 = eva_lab._bootstrap_p_edge(rows, key="k")
+        p2 = eva_lab._bootstrap_p_edge(rows, key="k")
+        scaled = [(t, v * 1000.0) for t, v in rows]
+        p3 = eva_lab._bootstrap_p_edge(scaled, key="k")
+        assert p1 == p2 == p3  # same seed, same sign pattern -> identical
+        assert 0.0 < p1 < 1.0  # mixed days must not read as certainty
+
+    def test_flows_into_a_kalshi_row(self, patched_sources, monkeypatch):
+        series = [(f"2026-09-{d:02d}T10:00:00Z", 1.0) for d in (28, 29, 30)]
+        monkeypatch.setattr(
+            eva_lab, "_kalshi_series", lambda bot_id, since: series)
+        b = _books(eva_lab.funnel_payload())["kalshi:eva_wick"]
+        assert b["p_edge"] == 1.0
+
+    def test_series_failure_degrades_only_the_column(self, patched_sources,
+                                                     monkeypatch):
+        def boom(*a, **k):
+            raise RuntimeError("ledger gone")
+
+        monkeypatch.setattr(eva_lab, "_kalshi_series", boom)
+        b = _books(eva_lab.funnel_payload())["kalshi:eva_wick"]
+        assert b["p_edge"] is None  # column degrades
+        assert b["pnl_usd"] == 114.62  # row survives
+
+    def test_cache_skips_recompute_until_n_moves(self, patched_sources,
+                                                 monkeypatch):
+        calls = {"n": 0}
+
+        def counting_series(bot_id, since):
+            calls["n"] += 1
+            return [(f"2026-09-{d:02d}T10:00:00Z", 1.0) for d in (29, 30)]
+
+        monkeypatch.setattr(eva_lab, "_kalshi_series", counting_series)
+        eva_lab.funnel_payload()
+        eva_lab.funnel_payload()  # same closed counts -> cache hit
+        assert calls["n"] == 4  # one per kalshi book, once each
 
 
 class TestFailureIsolation:
