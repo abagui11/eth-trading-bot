@@ -1107,10 +1107,13 @@
         <p class="sub" style="margin-bottom:10px">
           Three sleeves race from the same start line
           (<span id="kalshi-epoch">{{ kalshi.experiment_epoch_label }}</span>):
-          the <strong>LIVE</strong> book trades real Kalshi money at 1-contract
-          size, the paper bots shadow the same markets on ledger-only fills,
-          and the arb sleeve logs last-2-min dips without trading. Live equity
-          should match shard-2 cash; taker fees sit only on the account.
+          the <strong>LIVE</strong> book trades real Kalshi money (51
+          contracts/trade against a $725 bankroll since 10/01; 8&nbsp;ct
+          09/17&ndash;09/28, 16&nbsp;ct to 10/01), the paper bots shadow the
+          same markets on ledger-only fills, and the arb sleeve logs
+          last-2-min dips without trading. The ledger is pre-fee, so book
+          equity runs above shard-2 cash by accumulated taker fees; seeds
+          move only when real capital does (+$500 on 10/01).
         </p>
         {% set kt = kalshi.totals %}
         <p class="sub news-section" style="margin-bottom:6px">
