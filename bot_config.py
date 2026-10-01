@@ -269,7 +269,8 @@ SCALE_IN_MIN_R = 0.5
 # --- Live execution sleeves (Coinbase US futures — CDE nano contracts) --------
 # All LIVE_* values are live-only. Paper sizing (TRADE_DEPLOY_PCT=0.25,
 # PRODUCT_QTY_CAPS) is untouched — never reuse paper equity for live size.
-LIVE_HQ_EQUITY_USD = 2000.0          # HQ ICT margin sleeve
+LIVE_HQ_EQUITY_USD = 1700.0          # HQ ICT margin sleeve (2026-10-01: x0.85
+# with the mill sleeve when $500 of the account moved to the Kalshi bankroll)
 LIVE_TRADE_DEPLOY_PCT = 0.50         # fallback notional when no clip is set
 LIVE_MAX_OPEN_HQ = 4                 # skip new ideas when full (no FIFO kill)
 LIVE_MAX_PER_PRODUCT_HQ = 2          # concurrent positions in one product
@@ -280,7 +281,7 @@ LIVE_MAX_PER_PRODUCT_HQ = 2          # concurrent positions in one product
 # LIVE_MAX_PER_PRODUCT_HQ. Their notional still counts against
 # LIVE_MAX_LEVERAGE, which is the cap that actually bounds the book. 0 disables.
 LIVE_DERISKED_SLOT_EXEMPT_HQ = 2
-LIVE_DAILY_LOSS_LIMIT_USD = 160.0    # 8% of sleeve → halt until next UTC day
+LIVE_DAILY_LOSS_LIMIT_USD = 136.0    # 8% of sleeve → halt until next UTC day
 # Notional ceiling, not a risk ceiling — per-trade risk is bounded by
 # LIVE_HQ_RISK_PCT. Four concurrent clips at their widest (two tight-stop ETH
 # at 4 nanos, ~$960 each, plus two BTC at ~$800) is ~$3,520, which needs 1.76x.
@@ -335,10 +336,10 @@ WATCHDOG_LIVE_META_KEY = "watchdog_live_enabled"
 # fits the sleeve is rejected by the exposure check. Capital (sleeve + open
 # count + daily loss) is the limiter — not a daily fill count. A closed clip
 # frees its capital.
-LIVE_MILL_SLEEVE_USD = 1400.0
+LIVE_MILL_SLEEVE_USD = 1190.0  # 2026-10-01: x0.85 with the HQ sleeve ($500 → Kalshi)
 LIVE_MILL_MAX_OPEN = 3
 LIVE_MILL_MAX_FILLS_PER_DAY = 0      # 0 = no daily fill cap
-LIVE_MILL_DAILY_LOSS_LIMIT_USD = 112.0  # 8% of sleeve, same ratio as HQ
+LIVE_MILL_DAILY_LOSS_LIMIT_USD = 95.2  # 8% of sleeve, same ratio as HQ
 
 # Temporary testing priority: before a live entry, flatten any open position on
 # the same product that is the *opposite* direction and ranks below the entry
