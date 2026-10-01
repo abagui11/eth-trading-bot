@@ -423,10 +423,20 @@ def _mill_row() -> dict[str, Any] | None:
     """The Trade Mill's sized-idea book; P&L in percent-of-notional units."""
     import trade_ideas_bridge
 
+    import bot_config
+
     payload = trade_ideas_bridge.volume_book_payload(limit=50)
     if not payload or not payload.get("available"):
         return None
     summary = payload.get("summary") or {}
+    # 2026-10-01: mode follows the fill switches instead of being hardcoded —
+    # with auto-fill, any-accept, and the operator id list all off, no mill
+    # idea can reach real money and the row must say paper.
+    mill_live = bool(
+        getattr(bot_config, "LIVE_MILL_AUTO_FILL_ENABLED", False)
+        or getattr(bot_config, "LIVE_MILL_ANY_ACCEPT_FILLS", False)
+        or getattr(bot_config, "LIVE_MILL_FILL_TELEGRAM_IDS", ())
+    )
     coins = sorted({
         str(t.get("product_id") or "").replace("-USD", "")
         for t in payload.get("trades", [])
@@ -442,8 +452,8 @@ def _mill_row() -> dict[str, Any] | None:
             "unit); live clips fill a capital-limited subset of this book."
         ),
         coins=coins,
-        mode="live_mirror",
-        mode_note=_MILL_NOTE,
+        mode="live_mirror" if mill_live else "paper",
+        mode_note=_MILL_NOTE if mill_live else None,
         n_closed=summary.get("closed") or 0,
         n_open=summary.get("open") or 0,
         win_rate=summary.get("win_rate"),

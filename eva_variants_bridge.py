@@ -238,12 +238,17 @@ def performance_payload(limit: int = 20) -> dict[str, Any]:
     # promoted live book; the two mirrored variants trade real money too but
     # are NOT promoted — the tab must say both things at once, because a live
     # badge that reads as a verdict is how an n=9 lead becomes "the strategy".
+    # 2026-10-01: the badge now also requires the kill-switch to be ON —
+    # control was retired from live on 09-28 and both mirrors went paper-only
+    # today ($750 → Kalshi), and a LIVE badge on a book whose entries cannot
+    # fill is a false statement about where real money is.
     mirrored = {
         "eva_swing_llm": getattr(bot_config, "EVA_SWING_LLM_LIVE_ENABLED", False),
         "eva_day": getattr(bot_config, "EVA_DAY_LIVE_ENABLED", False),
     }
+    control_live = bool(getattr(bot_config, "LIVE_HQ_CONTROL_ENABLED", False))
     for b in books:
-        if b["variant"] == live:
+        if b["variant"] == live and control_live:
             b["mode"] = "live"
         elif mirrored.get(b["variant"]):
             b["mode"] = "live_mirror"
@@ -253,8 +258,11 @@ def performance_payload(limit: int = 20) -> dict[str, Any]:
     # Best paper book by mean R — the promotion candidate, *not* a
     # recommendation. Whether it has earned promotion is decided by the
     # pre-registered bar in EVA_VARIANTS_PREREG.md, not by leading this list.
+    # Control is excluded by name, not by mode: it is the baseline, not a
+    # candidate, even now that its mode reads paper.
     ranked = [b for b in books
-              if b["mode"] == "paper" and b.get("mean_r") is not None
+              if b["mode"] == "paper" and b["variant"] != live
+              and b.get("mean_r") is not None
               and b["n_closed"] > 0]
     leader = max(ranked, key=lambda b: b["mean_r"])["variant"] if ranked else None
 

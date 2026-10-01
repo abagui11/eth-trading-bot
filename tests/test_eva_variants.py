@@ -503,6 +503,9 @@ class TestPayload:
         monkeypatch.setattr(config, "LEDGER_DB", tmp_path / "t.db")
         monkeypatch.setattr(bot_config, "EVA_VARIANTS_ENABLED", True)
         monkeypatch.setattr(bot_config, "EVA_LIVE_VARIANT", "control")
+        # 2026-10-01: the LIVE badge also requires the kill-switch to be on
+        # (Coinbase is paper-only today, so the deployed default is False).
+        monkeypatch.setattr(bot_config, "LIVE_HQ_CONTROL_ENABLED", True)
         monkeypatch.setattr(evb, "_control_stops", lambda: {})
 
         payload = evb.performance_payload()
@@ -511,6 +514,24 @@ class TestPayload:
         assert names == list(ev.VARIANTS)
         live = [b for b in payload["books"] if b["mode"] == "live"]
         assert len(live) == 1 and live[0]["variant"] == "control"
+
+    def test_retired_control_is_not_badged_live(self, tmp_path, monkeypatch):
+        """With the kill-switch off, no book may wear the LIVE badge — a LIVE
+        label on a book whose entries cannot fill is a false statement."""
+        import bot_config
+        import config
+        import eva_variants_bridge as evb
+
+        monkeypatch.setattr(config, "LEDGER_DB", tmp_path / "t.db")
+        monkeypatch.setattr(bot_config, "EVA_VARIANTS_ENABLED", True)
+        monkeypatch.setattr(bot_config, "EVA_LIVE_VARIANT", "control")
+        monkeypatch.setattr(bot_config, "LIVE_HQ_CONTROL_ENABLED", False)
+        monkeypatch.setattr(bot_config, "EVA_SWING_LLM_LIVE_ENABLED", False)
+        monkeypatch.setattr(bot_config, "EVA_DAY_LIVE_ENABLED", False)
+        monkeypatch.setattr(evb, "_control_stops", lambda: {})
+
+        payload = evb.performance_payload()
+        assert [b for b in payload["books"] if b["mode"] != "paper"] == []
 
     def test_disabled_flag_yields_unavailable(self, monkeypatch):
         import bot_config

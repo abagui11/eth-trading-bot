@@ -228,7 +228,17 @@ class TestUnitHonesty:
         assert b["pnl_usd"] is None
         assert b["pnl_pct"] == -3.4
         assert b["coins"] == ["BTC", "ETH"]
-        # Live fills exist but are a subset — badge must say LIVE*, not LIVE.
+        # 2026-10-01: mode follows the fill switches. All off (today's
+        # posture) → paper; any on → LIVE* (a subset of the book fills).
+        assert b["mode"] == "paper"
+        assert b["mode_note"] is None
+
+    def test_mill_mode_follows_the_fill_switches(self, patched_sources):
+        import bot_config
+        from unittest.mock import patch as _patch
+
+        with _patch.object(bot_config, "LIVE_MILL_AUTO_FILL_ENABLED", True):
+            b = _books(eva_lab.funnel_payload())["mill:ideas"]
         assert b["mode"] == "live_mirror"
         assert b["mode_note"]
 

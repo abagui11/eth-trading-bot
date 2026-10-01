@@ -372,6 +372,14 @@ class MillSleeveTests(unittest.TestCase):
             # synthetic levels are not judged against the live ETH mark (and so
             # the suite makes no network call); it has its own tests.
             patch.object(bot_config, "LIVE_REVALIDATE_ON_FILL", False),
+            # Coinbase went paper-only 2026-10-01 (auto-fill off, fill ids
+            # emptied). These fixtures test the fill mechanisms themselves,
+            # so the switches are held open here — same pattern as the
+            # control-retirement patch above.
+            patch.object(bot_config, "LIVE_MILL_AUTO_FILL_ENABLED", True),
+            patch.object(
+                bot_config, "LIVE_MILL_FILL_TELEGRAM_IDS", (self.OPERATOR,)
+            ),
         ]
         for p in self._patches:
             p.start()

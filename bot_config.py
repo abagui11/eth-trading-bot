@@ -139,8 +139,14 @@ EVA_LIVE_VARIANT = "control"          # the only book whose PROMOTION bar has ru
 # measurement instrument, the epoch is unchanged, and live results are
 # excluded from the §4 statistics. Each flag is a kill-switch: off stops the
 # mirror without touching the paper book or the experiment.
-EVA_SWING_LLM_LIVE_ENABLED = True     # mirrors entry_source == "swing_vision"
-EVA_DAY_LIVE_ENABLED = True           # mirrors entry_source == "vision_rebracket"
+#
+# 2026-10-01: BOTH MIRRORS OFF — all Coinbase execution moved to paper while
+# capital concentrates on Kalshi ($750 out). This is the kill-switch use the
+# amendment promised: entries stop, the paper books keep measuring, and open
+# live mirrors still exit with their paper twins (_maybe_close_live_mirror is
+# gated on EXECUTION_MODE, not on these flags — verified before flipping).
+EVA_SWING_LLM_LIVE_ENABLED = False    # mirrors entry_source == "swing_vision"
+EVA_DAY_LIVE_ENABLED = False          # mirrors entry_source == "vision_rebracket"
                                       # m1_trigger is EXCLUDED: negative prior
                                       # (prereg §2 H3), zero closed positions.
 # Fixed dollar risk per live variant clip, like the paper books' $10 — NOT a
@@ -359,12 +365,18 @@ LIVE_HQ_CLEARS_MILL: bool = True
 # next sized idea at or above this confidence self-fills (FIFO — the first
 # qualifying mint wins the slot). Once one clip is open the remaining slots
 # are reserved for manual Accepts, so the auto path can never crowd them out.
-LIVE_MILL_AUTO_FILL_ENABLED = True
+#
+# 2026-10-01: OFF — all Coinbase execution moved to paper ($750 → Kalshi).
+# Open clips keep their venue brackets and the close monitor; only new fills
+# stop. Idea minting, cards, and user_paper_trades continue unchanged.
+LIVE_MILL_AUTO_FILL_ENABLED = False
 LIVE_MILL_AUTO_MIN_CONFIDENCE = 0.5
 
 # Telegram ids whose Accept fills a real clip, bypassing the conviction gate.
 # Everyone else's Accept stays paper-only (user_paper_trades).
-LIVE_MILL_FILL_TELEGRAM_IDS: tuple[int, ...] = (8282981740, 2037245798)
+# 2026-10-01: emptied — Coinbase is paper-only, so no Accept (operator or
+# tester) deploys real money. Alert routing is pinned separately below.
+LIVE_MILL_FILL_TELEGRAM_IDS: tuple[int, ...] = ()
 # Widen that to any approved, funded tester. Without it a tester's Accept only
 # reserves a claim against a house fill, and the house filled 62 of 544 recent
 # ideas — so the common outcome was "you're in if it fills" followed by nothing.
@@ -372,7 +384,8 @@ LIVE_MILL_FILL_TELEGRAM_IDS: tuple[int, ...] = (8282981740, 2037245798)
 # and trade selection moves from "auto-fill takes the first qualifying mint" to
 # "whatever someone taps". Sleeve caps still bound exposure; the selection
 # change is **unmeasured** and was shipped as a deliberate product call.
-LIVE_MILL_ANY_ACCEPT_FILLS: bool = True
+# 2026-10-01: OFF with the rest of Coinbase live execution.
+LIVE_MILL_ANY_ACCEPT_FILLS: bool = False
 
 # --- Accept-time revalidation -------------------------------------------
 # An idea is priced when it is minted and filled whenever someone taps Accept,
@@ -411,7 +424,9 @@ LIVE_MILL_REOFFER_MAX_AGE_MIN: int = 120
 # Every live open/close/halt is pushed to these chats on top of
 # TELEGRAM_ADMIN_CHAT_ID. Both sleeves now fill without a human in the loop, so
 # a real fill must never be discoverable only by reading the journal.
-LIVE_ALERT_TELEGRAM_IDS: tuple[int, ...] = LIVE_MILL_FILL_TELEGRAM_IDS
+# 2026-10-01: pinned to the literal operator ids (was = LIVE_MILL_FILL_TELEGRAM_IDS,
+# which is now empty) so the closes of still-open live positions keep alerting.
+LIVE_ALERT_TELEGRAM_IDS: tuple[int, ...] = (8282981740, 2037245798)
 LIVE_FILL_ALERTS_ENABLED = True
 
 # --- Tester pool — pooled live allocations with per-user accounting ----------
