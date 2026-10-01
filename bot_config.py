@@ -141,7 +141,7 @@ EVA_LIVE_VARIANT = "control"          # the only book whose PROMOTION bar has ru
 # mirror without touching the paper book or the experiment.
 #
 # 2026-10-01: BOTH MIRRORS OFF — all Coinbase execution moved to paper while
-# capital concentrates on Kalshi ($750 out). This is the kill-switch use the
+# capital concentrates on Kalshi ($1,750 out). This is the kill-switch use the
 # amendment promised: entries stop, the paper books keep measuring, and open
 # live mirrors still exit with their paper twins (_maybe_close_live_mirror is
 # gated on EXECUTION_MODE, not on these flags — verified before flipping).
@@ -366,7 +366,7 @@ LIVE_HQ_CLEARS_MILL: bool = True
 # qualifying mint wins the slot). Once one clip is open the remaining slots
 # are reserved for manual Accepts, so the auto path can never crowd them out.
 #
-# 2026-10-01: OFF — all Coinbase execution moved to paper ($750 → Kalshi).
+# 2026-10-01: OFF — all Coinbase execution moved to paper ($1,750 → Kalshi).
 # Open clips keep their venue brackets and the close monitor; only new fills
 # stop. Idea minting, cards, and user_paper_trades continue unchanged.
 LIVE_MILL_AUTO_FILL_ENABLED = False
