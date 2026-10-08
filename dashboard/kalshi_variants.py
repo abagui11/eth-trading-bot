@@ -30,6 +30,7 @@ import logging
 import random
 import re
 import sqlite3
+import threading
 import time
 from collections import defaultdict
 from datetime import datetime, timedelta, timezone
@@ -50,6 +51,8 @@ _MONTHS = {m: i + 1 for i, m in enumerate(
      "JUL", "AUG", "SEP", "OCT", "NOV", "DEC"])}
 
 _cache: dict[str, Any] = {"at": 0.0, "payload": None}
+_refresh_lock = threading.Lock()
+_refreshing = False
 
 
 def _iso(s: str) -> datetime:
@@ -134,12 +137,42 @@ def _summarise(deltas_by_day: dict[str, float], n_windows: int,
 def build_variants_payload(
     kalshi_db: Path | None, lastmin_db: Path | None
 ) -> dict[str, Any]:
+    """Cached variants table, refreshed off the request path.
+
+    The build walks every paired window against the quote log (~350ms), so an
+    expired cache is served stale while one daemon thread recomputes — no
+    refresh or Load-more click ever pays the rebuild.
+    """
+    global _refreshing
     now = time.time()
-    if _cache["payload"] is not None and now - _cache["at"] < CACHE_TTL_SEC:
+    if _cache["payload"] is not None:
+        if now - _cache["at"] >= CACHE_TTL_SEC:
+            with _refresh_lock:
+                already = _refreshing
+                _refreshing = True
+            if not already:
+                threading.Thread(
+                    target=_refresh_cache,
+                    args=(kalshi_db, lastmin_db),
+                    name="kalshi-variants-refresh",
+                    daemon=True,
+                ).start()
         return _cache["payload"]
     payload = _build(kalshi_db, lastmin_db)
     _cache.update(at=now, payload=payload)
     return payload
+
+
+def _refresh_cache(kalshi_db: Path | None, lastmin_db: Path | None) -> None:
+    global _refreshing
+    try:
+        payload = _build(kalshi_db, lastmin_db)
+        _cache.update(at=time.time(), payload=payload)
+    except Exception:
+        logger.exception("kalshi variants background refresh failed")
+    finally:
+        with _refresh_lock:
+            _refreshing = False
 
 
 def _build(kalshi_db: Path | None, lastmin_db: Path | None) -> dict[str, Any]:

@@ -7,10 +7,12 @@ from unittest.mock import patch
 
 import bot_config
 import config
+import strategy_catalog
 from telegram_ui import (
     CB_OPEN,
     CB_TRADE_MORE_PREFIX,
     CB_TRADE_YES_PREFIX,
+    format_admin_message,
     format_fund_result,
     format_metrics_message,
     format_open_account_result,
@@ -22,6 +24,11 @@ from telegram_ui import (
 class TelegramUiTests(unittest.TestCase):
     def _buttons(self, keyboard):
         return [b for row in keyboard.inline_keyboard for b in row]
+
+    def test_format_admin_message_prefixes_ops_traffic(self) -> None:
+        self.assertEqual(format_admin_message("Hello"), "*admin*\n\nHello")
+        self.assertTrue(format_admin_message("*admin*\n\nAlready").startswith("*admin*"))
+        self.assertEqual(format_admin_message(""), "*admin*")
 
     def test_main_keyboard_has_open_account_and_journal(self) -> None:
         """The demo-book menu, still shown when the pool is off."""
@@ -132,6 +139,30 @@ class TelegramUiTests(unittest.TestCase):
             yes.callback_data, f"{CB_TRADE_YES_PREFIX}20260721T120000Z_ETH"
         )
         self.assertLessEqual(len(more.callback_data.encode("utf-8")), 64)
+
+
+class DeployFeeUxTests(unittest.TestCase):
+    def test_alloc_keyboard_labels_100_percent_after_fee(self) -> None:
+        from telegram_ui import alloc_keyboard
+
+        with patch.object(bot_config, "POOL_DEPLOY_FEE_USD", 5.0):
+            buttons = [
+                b for row in alloc_keyboard("kalshi_wick").inline_keyboard
+                for b in row
+            ]
+        labels = [b.text for b in buttons]
+        self.assertIn("100% after $5 fee", labels)
+        self.assertIn("25% of available", labels)
+
+    def test_allocation_prompt_explains_network_fee(self) -> None:
+        with patch.object(bot_config, "POOL_DEPLOY_FEE_USD", 5.0):
+            text = strategy_catalog.allocation_prompt(
+                "kalshi_wick",
+                {"cash_usd": 500.0, "wallet_usd": 500.0, "available_usd": 500.0},
+            )
+        self.assertIn("Network fee: $5.00", text)
+        self.assertIn("$495.00", text)
+        self.assertIn("100%", text)
 
 
 if __name__ == "__main__":

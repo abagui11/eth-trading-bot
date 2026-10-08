@@ -785,6 +785,14 @@ def _payout_sweep() -> None:
     if not pool.mark_withdrawal_submitting(wid):
         return
 
+    # Rail 1: the test wallet, when it holds the money on a chain this user
+    # has proven their address on. Undeployed capital lives there under the
+    # deploy-routing rule, so without this rail a tester who never deployed
+    # could only be paid from house float at Coinbase.
+    if _payout_from_test_wallet(wid, uid, amount, address):
+        return
+
+    # Rail 2: Coinbase (deployed-to-Coinbase capital, and the fallback).
     try:
         account = payouts.usdc_account()
     except Exception as exc:
@@ -863,6 +871,105 @@ def _payout_sweep() -> None:
         )
     except Exception:
         logger.exception("payout admin FYI failed")
+
+
+def _payout_from_test_wallet(wid: int, uid: int, amount: float, address: str) -> bool:
+    """Try to pay withdrawal `wid` from the test wallet via the signer.
+
+    Returns True when the withdrawal is now in a terminal-for-this-pass state
+    (submitted, or unknown + halted) and the Coinbase rail must NOT run.
+    Returns False when nothing was sent and Coinbase should take it — the
+    signer is off, the wallet has no balance on a provable chain, or a
+    pre-broadcast check refused. The row stays 'submitting' across the hand-off
+    so the claim made above still holds.
+    """
+    import notify
+    import pool
+
+    try:
+        import chain
+        import signer
+
+        if not signer.enabled():
+            return False
+        wallet = config.TEST_WALLET_ADDRESS
+        if not wallet:
+            return False
+        chosen: int | None = None
+        for cid in pool.payout_chains_for(uid):
+            if not chain.rpc_url(cid):
+                continue
+            try:
+                held = chain._usdc_balance_rpc(wallet, chain_id=cid)
+            except chain.ChainError:
+                continue
+            if held + 1e-9 >= amount:
+                chosen = cid
+                break
+        if chosen is None:
+            return False
+    except Exception:
+        logger.exception("payout #%s: test-wallet rail check failed", wid)
+        return False
+
+    try:
+        sent = signer.send_usdc_payout(uid, amount, chain_id=chosen)
+    except signer.SignerError as exc:
+        if exc.submitted:
+            # Same rule as Coinbase: a send that may have happened is not
+            # refunded and not retried. Halt and let a human look.
+            pool.mark_withdrawal_unknown(wid, reason=f"signer: {exc}")
+            try:
+                notify.send_pool_admin_alert(
+                    f"PAYOUTS HALTED — withdrawal #{wid} outcome UNKNOWN "
+                    f"(test-wallet rail).\n${amount:,.2f} to {address} on "
+                    f"{chain.chain_name(chosen)}\n{str(exc)[:200]}\n\n"
+                    f"Check the test wallet's USDC on {chain.chain_name(chosen)} "
+                    "and the destination before doing anything. Do NOT resend. "
+                    "Clear with /payouts resume once settled."
+                )
+            except Exception:
+                logger.exception("unknown-payout alert failed")
+            return True
+        # Refused before anything left: gas, balance race, estimate. Let
+        # Coinbase take it this pass rather than failing the tester.
+        logger.warning("payout #%s: signer refused (%s) — falling back to coinbase", wid, exc)
+        return False
+    except Exception as exc:
+        pool.mark_withdrawal_unknown(wid, reason=f"signer unexpected: {exc}")
+        logger.exception("payout #%s: signer crashed", wid)
+        return True
+
+    # Gas is paid by the house in ETH; the tester is not charged a fee on
+    # this rail, so the whole reserve goes back.
+    result = pool.mark_withdrawal_submitted(
+        wid, cb_tx_id=f"signer:{sent['txid']}", fee_usd=0.0, txid=sent["txid"],
+        source="test_wallet", chain_id=chosen,
+    )
+    refund = float(result.get("refunded_usd") or 0)
+    lines = [
+        f"Withdrawal sent: ${amount:,.2f} USDC on {chain.chain_name(chosen)}.",
+        f"To: {address}",
+        f"Transaction: {sent['explorer']}",
+    ]
+    if refund >= 0.01:
+        lines.append(f"Fee reserve returned: ${refund:,.2f} (no fee on this send).")
+    lines.append(
+        "It is on its way — usually a few minutes. We will message you again "
+        "once it is confirmed in your wallet."
+    )
+    try:
+        notify.send_pool_dm(uid, "\n".join(lines))
+    except Exception:
+        logger.exception("payout DM failed for %s", uid)
+    try:
+        notify.send_pool_admin_alert(
+            f"Paid out ${amount:,.2f} to {uid} (#{wid}) from the test wallet on "
+            f"{chain.chain_name(chosen)}.\n{sent['explorer']}"
+        )
+    except Exception:
+        logger.exception("payout admin FYI failed")
+    return True
 
 
 def _notify_payout_failed(uid: int, wid: int, amount: float, why: str) -> None:
@@ -983,9 +1090,6 @@ def _settle_sweep() -> None:
 
     try:
         import chain
-
-        if not chain.configured():
-            return
     except Exception:
         logger.exception("settle sweep: chain unavailable")
         return
@@ -994,10 +1098,27 @@ def _settle_sweep() -> None:
         wid = int(row["id"])
         amount = float(row["amount_usd"])
         try:
-            since = _epoch(row["submitted_at"])
-            found = chain.confirm_payout(
-                str(row["to_address"]), amount, after_timestamp=since
-            )
+            if str(row.get("source") or "coinbase") == "test_wallet" and row.get("txid"):
+                # Signer payouts carry their own hash and chain: confirm the
+                # receipt itself, which works over RPC where Etherscan does not.
+                cid = int(row.get("chain_id") or chain.CHAIN_ID)
+                if not chain.readable(cid):
+                    continue
+                hit = chain.find_transfer(
+                    str(row["txid"]), to_address=str(row["to_address"]), chain_id=cid
+                )
+                found = (
+                    {"ok": True, "txid": hit["txid"]}
+                    if hit and hit.get("confirmations", 0) >= chain.MIN_CONFIRMATIONS
+                    else {"ok": False, "reason": "not_seen_yet"}
+                )
+            else:
+                if not chain.configured():
+                    continue
+                since = _epoch(row["submitted_at"])
+                found = chain.confirm_payout(
+                    str(row["to_address"]), amount, after_timestamp=since
+                )
         except Exception:
             logger.exception("settle sweep: lookup failed for #%s", wid)
             continue
@@ -1190,43 +1311,66 @@ def _testwallet_deposit_sweep() -> None:
     import notify
     import pool
 
-    if (
-        not bot_config.POOL_ENABLED
-        or not config.TEST_WALLET_ADDRESS
-        or not chain.configured()
-    ):
+    if not bot_config.POOL_ENABLED or not config.TEST_WALLET_ADDRESS:
         return
 
-    try:
-        transfers = chain.inbound_usdc(
-            str(config.TEST_WALLET_ADDRESS),
-            limit=50,
-            chain_id=int(config.TEST_WALLET_CHAIN_ID),
-        )
-    except Exception:
-        logger.exception("test-wallet sweep: chain read failed — skipped")
-        return
-    settled = [
-        t for t in transfers if t["confirmations"] >= chain.MIN_CONFIRMATIONS
-    ]
+    address = str(config.TEST_WALLET_ADDRESS)
+    # One EOA, every listed chain: a tester may send on Base or Ethereum and
+    # both land in the same wallet. Each chain is read and credited on its
+    # own so one source being down never hides deposits on the other.
+    for chain_id in config.TEST_WALLET_CHAIN_IDS:
+        chain_id = int(chain_id)
+        if not chain.readable(chain_id):
+            continue
+        cursor_key = f"testwallet_scan_block:{chain_id}"
+        cursor_raw = pool.get_meta(cursor_key)
+        cursor = int(cursor_raw) if cursor_raw and cursor_raw.isdigit() else None
+        try:
+            transfers, next_cursor = chain.recent_inbound_usdc(
+                address, chain_id=chain_id, cursor_block=cursor, limit=50,
+            )
+        except Exception:
+            logger.exception(
+                "test-wallet sweep: %s read failed — skipped this pass",
+                chain.chain_name(chain_id),
+            )
+            continue
+        settled = [
+            t for t in transfers if t["confirmations"] >= chain.MIN_CONFIRMATIONS
+        ]
 
-    try:
-        events = pool.observe_testwallet_deposits(settled)
-    except Exception:
-        logger.exception("test-wallet sweep: crediting failed")
-        return
+        try:
+            events = pool.observe_testwallet_deposits(settled, chain_id=chain_id)
+        except Exception:
+            logger.exception("test-wallet sweep: crediting failed (%s)",
+                             chain.chain_name(chain_id))
+            continue
+        if next_cursor is not None:
+            try:
+                pool.set_meta(cursor_key, str(int(next_cursor)))
+            except Exception:
+                logger.exception("test-wallet sweep: cursor write failed")
 
+        _announce_testwallet_events(events, chain_id)
+
+
+def _announce_testwallet_events(events: list[dict], chain_id: int) -> None:
+    import chain
+    import notify
+    import pool
+
+    network = chain.chain_name(chain_id)
     for event in events:
         if event["kind"] == "credited":
             amount = float(event["amount_usd"])
             try:
                 notify.send_pool_dm(
                     int(event["telegram_id"]),
-                    f"Deposit received: ${amount:,.2f} USDC.\n"
+                    f"Deposit received: ${amount:,.2f} USDC on {network}.\n"
                     f"Cash balance: ${float(event['cash_usd']):,.2f}.\n\n"
                     "Matched to you by the wallet it came from and confirmed "
-                    "on-chain. You can Accept trade cards now — /portfolio "
-                    "any time.",
+                    "on-chain — that wallet is now verified for withdrawals. "
+                    "You can Accept trade cards now — /portfolio any time.",
                 )
             except Exception:
                 logger.exception(
@@ -1234,7 +1378,7 @@ def _testwallet_deposit_sweep() -> None:
                 )
             try:
                 notify.send_pool_admin_alert(
-                    f"Test wallet: auto-credited ${amount:,.2f} to "
+                    f"Test wallet ({network}): auto-credited ${amount:,.2f} to "
                     f"{event['telegram_id']} (tx {event['txid']})."
                 )
             except Exception:
@@ -1242,11 +1386,14 @@ def _testwallet_deposit_sweep() -> None:
         elif event["kind"] == "unmatched" and not event.get("alerted"):
             try:
                 notify.send_pool_admin_alert(
-                    f"UNCLAIMED test-wallet deposit: "
+                    f"UNCLAIMED test-wallet deposit on {network}: "
                     f"${float(event['amount_usd']):,.2f} USDC "
                     f"({event.get('reason')}).\n"
                     f"tx {event['txid']}\nfrom {event.get('sender')}\n\n"
-                    "Nobody has been credited. If you know whose it is:\n"
+                    "Nobody has been credited. An unregistered sender is "
+                    "usually an exchange withdrawal (Coinbase.com, Binance, "
+                    "Kraken…): the money can be assigned, but the user cannot "
+                    "withdraw until a deposit arrives from their own wallet.\n"
                     f"/assign {event['txid']} <telegram_id>"
                 )
                 pool.mark_testwallet_deposit_alerted(str(event["txid"]))
@@ -1258,6 +1405,90 @@ def _testwallet_deposit_sweep() -> None:
 # no alerted column because the state should be rare and short-lived; a
 # restart re-alerting is the right failure direction.
 _kalshi_placing_alerted: set[int] = set()
+
+# (telegram_id, strategy, reason) money-blockers already nudged this process
+# lifetime — autopilot hits every 15-minute window, so a user with nothing
+# allocated hears about it once, not fifty times a day.
+_autopilot_nudged: set[tuple[int, str, str]] = set()
+
+
+def run_kalshi_autopilot() -> None:
+    """Enter autopilot users into fresh Kalshi entries, and tell them.
+
+    Runs on its own fast job (`KALSHI_AUTOPILOT_POLL_SEC`, seconds), not the
+    60s watchdog scan — the house bot fires on the quarter-hour and every
+    second of detection lag is slip against its entry, so waiting for the
+    scan's turn cost real windows (38s late on the 2026-10-06 18:05 entry).
+
+    Fills get a DM each time (their money moved); the money-blockers —
+    nothing allocated, budget too small — get one nudge per process lifetime;
+    market-shaped refusals (slipped, stale, unfilled) stay silent because the
+    next window is minutes away and the user can do nothing about them.
+    Never raises — it shares an executor with everything else.
+    """
+    import kalshi_execute
+    import notify
+    import strategy_catalog
+
+    if not bot_config.POOL_ENABLED:
+        return
+    try:
+        results = kalshi_execute.autopilot_sweep()
+    except Exception:
+        logger.exception("kalshi autopilot sweep failed")
+        return
+    for r in results:
+        uid = int(r["telegram_id"])
+        strategy = str(r["strategy"])
+        strat = strategy_catalog.get(strategy)
+        label = strat.label if strat else strategy
+        if r.get("ok"):
+            try:
+                notify.send_pool_dm(
+                    uid,
+                    f"Autopilot entered you — {int(r['contracts'])} × "
+                    f"{str(r['side']).upper()} on {r['market_ticker']} at an "
+                    f"average {float(r['avg_cents']):.0f}¢ "
+                    f"(${float(r['cost_usd']):,.2f} all-in, fee included).\n\n"
+                    "The window settles on the quarter hour — you'll get the "
+                    "result here either way. /portfolio any time.",
+                )
+            except Exception:
+                logger.exception("autopilot fill DM failed for %s", uid)
+            continue
+        reason = str(r.get("reason"))
+        logger.info(
+            "autopilot: %s/%s on #%s refused (%s)",
+            uid, strategy, r.get("position_id"), reason,
+        )
+        if reason not in (
+            "no_allocation", "budget_too_small", "not_funded",
+            "below_min_equity",
+        ):
+            continue
+        nudge_key = (uid, strategy, reason)
+        if nudge_key in _autopilot_nudged:
+            continue
+        _autopilot_nudged.add(nudge_key)
+        detail = (
+            f"nothing is deployed to this lane — /allocate {strategy} <amount>"
+            if reason == "no_allocation" else
+            "your deployment can't cover one contract at current prices — "
+            f"top it up with /allocate {strategy} <amount>"
+            if reason == "budget_too_small" else
+            "your account isn't funded — tap Fund to top up"
+            if reason == "not_funded" else
+            "your balance is under the account minimum"
+        )
+        try:
+            notify.send_pool_dm(
+                uid,
+                f"Autopilot is armed for {label}, but it couldn't size an "
+                f"entry: {detail}. It stays on and takes the next window "
+                "once that's fixed.",
+            )
+        except Exception:
+            logger.exception("autopilot nudge DM failed for %s", uid)
 
 
 def _kalshi_settle_sweep() -> None:
@@ -1299,6 +1530,29 @@ def _kalshi_settle_sweep() -> None:
             )
 
     try:
+        recovered = kalshi_execute.recover_placing_sweep()
+    except Exception:
+        logger.exception("kalshi placing recover failed")
+        recovered = []
+    for result in recovered:
+        if int(result.get("contracts") or 0) <= 0:
+            continue
+        try:
+            notify.send_pool_dm(
+                int(result["telegram_id"]),
+                f"Autopilot entered you — {int(result['contracts'])} × "
+                f"{str(result['side']).upper()} on {result['market_ticker']} at an "
+                f"average {float(result['avg_cents']):.0f}¢ "
+                f"(${float(result['cost_usd']):,.2f} all-in, fee included).\n\n"
+                "The window settles on the quarter hour — you'll get the "
+                "result here either way. /portfolio any time.",
+            )
+        except Exception:
+            logger.exception(
+                "kalshi recover fill DM failed for %s", result.get("telegram_id")
+            )
+
+    try:
         stuck = pool.stale_kalshi_placing(
             minutes=float(bot_config.KALSHI_ACCEPT_MAX_AGE_MIN)
         )
@@ -1309,6 +1563,7 @@ def _kalshi_settle_sweep() -> None:
         row_id = int(row["id"])
         if row_id in _kalshi_placing_alerted:
             continue
+        # Still placing after recover — now page a human.
         _kalshi_placing_alerted.add(row_id)
         try:
             notify.send_pool_admin_alert(
@@ -1345,6 +1600,42 @@ def _treasury_confirm_sweep() -> None:
             )
         except Exception:
             logger.exception("treasury confirm FYI failed")
+
+
+def _treasury_deploy_retry_sweep() -> None:
+    """Auto-retry deploy legs stuck in pending_send (usually after a gas fix)."""
+    import notify
+    import treasury
+
+    try:
+        results = treasury.retry_pending_deploy_sends(admin_id=0)
+    except Exception:
+        logger.exception("treasury deploy-retry sweep failed")
+        return
+    for row in results:
+        tid = row.get("transfer_id")
+        if row.get("ok"):
+            gas = row.get("gas_topup") or {}
+            gas_bit = (
+                f" (gas top-up ${float(gas.get('usdc_spent') or 0):,.2f} USDC→ETH)"
+                if gas.get("topped_up") else ""
+            )
+            try:
+                notify.send_pool_admin_alert(
+                    f"Auto-retried deploy transfer #{tid}: "
+                    f"${float(row.get('amount_usd') or 0):,.2f} → "
+                    f"{row.get('to_loc')}{gas_bit}.\n"
+                    f"tx {row.get('txid')}"
+                )
+            except Exception:
+                logger.exception("deploy-retry FYI failed for #%s", tid)
+        else:
+            # Stay quiet on still-blocked retries — the original Send card
+            # already explained why. Log only.
+            logger.info(
+                "deploy-retry #%s still blocked: %s",
+                tid, row.get("detail") or row.get("reason"),
+            )
 
 
 def _pool_sweep(spots: dict[str, float] | None = None) -> None:
@@ -1389,8 +1680,12 @@ def _pool_sweep(spots: dict[str, float] | None = None) -> None:
     _wallet_verify_sweep()
     _payout_sweep()
     _settle_sweep()
+    # Kalshi autopilot runs on its own fast job (main.kalshi_autopilot_job),
+    # not here — on this 60s scan it saw entries up to a minute late and the
+    # slip gate refused what the house had just filled.
     _kalshi_settle_sweep()
     _treasury_confirm_sweep()
+    _treasury_deploy_retry_sweep()
 
     global _pool_last_recon
     if config.EXECUTION_MODE != "live":

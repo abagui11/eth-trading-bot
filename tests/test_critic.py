@@ -6,6 +6,7 @@ from critic import (
     AuditFinding,
     RefineResult,
     build_signals_block,
+    chat_reply_is_market_commentary,
     compose_rationale,
     findings_require_retry,
     list_context_conflicts,
@@ -328,3 +329,145 @@ def test_watchdog_rationale_skips_context_conflict():
     text = "[Watchdog — m5_ob_fib_short]\n\nPrice at M5 OB fib 0.25 tranche."
     findings = verify_deterministic(text, ctx, suggestion=suggestion)
     assert not any(f.code == "CONTEXT_CONFLICT_UNACKNOWLEDGED" for f in findings)
+
+
+# --- chat replies: only market commentary gets fact-checked -----------------
+
+def test_chat_market_commentary_detection():
+    assert chat_reply_is_market_commentary(
+        "Price is sitting in a bullish M5 OB 1,554-1,586; no valid SFP yet."
+    )
+    # Account answers: hex address, balances, menu pointers — not market.
+    assert not chat_reply_is_market_commentary(
+        "Yes — your payout wallet 0x1234567890abcdef1234567890abcdef12345678 "
+        "is registered (pending). Wallet: $1,250.00 undeployed."
+    )
+    assert not chat_reply_is_market_commentary(
+        "You haven't registered one yet. Send /wallet 0x<your address>."
+    )
+    assert not chat_reply_is_market_commentary(
+        "Sorry, something went wrong processing your message."
+    )
+    assert not chat_reply_is_market_commentary("")
+
+
+def test_refine_chat_reply_hands_account_facts_to_the_critic(monkeypatch):
+    """A history answer ("entry 70c…") is market-shaped enough to be audited;
+    the user's account block must ride along as ground truth so true claims
+    about their own trades are not flagged against the market snapshot."""
+    import audit
+    import critic
+
+    captured: dict = {}
+
+    def fake_audit_text(text, ctx, **kwargs):
+        captured.update(kwargs)
+        return critic.AuditVerdict(
+            source="chat", user_id=42, text_excerpt=text[:40]
+        )
+
+    monkeypatch.setattr(critic, "audit_text", fake_audit_text)
+    monkeypatch.setattr(
+        audit, "get_snapshot",
+        lambda cid: {"snapshot": {}, "suggestion": {},
+                     "marked_chart_paths": {}, "cycle_id": "c1"},
+    )
+    monkeypatch.setattr(audit, "market_context_from_dict", lambda d: object())
+    monkeypatch.setattr(audit, "suggestion_from_dict", lambda d: object())
+    monkeypatch.setattr(audit, "log_chat_audit", lambda *a, **k: None)
+
+    reply = (
+        "Your last wick trade: entry 70c on KXBTCD, settled +$3.70. "
+        "Lifetime on the lane: $-5.60 across 2 settled trades."
+    )
+    account = "=== Your account ===\nYour settled Kalshi trades..."
+    out, verdict = critic.refine_chat_reply(
+        42, "what did my past trades look like", reply,
+        cycle_id="c1", account_context=account,
+    )
+    assert out == reply
+    assert not verdict.sanitized
+    assert captured.get("extra_ground_truth") == account
+
+
+def test_verify_llm_review_includes_account_ground_truth(monkeypatch):
+    """The extra ground-truth section reaches the LLM critic's prompt."""
+    import critic
+
+    sent: dict = {}
+
+    class _Block:
+        type = "text"
+        text = '{"claims": []}'
+
+    class _Resp:
+        content = [_Block()]
+        usage = None
+
+    class _Messages:
+        def create(self, **kwargs):
+            sent.update(kwargs)
+            return _Resp()
+
+    class _Client:
+        def __init__(self, **kwargs):
+            self.messages = _Messages()
+
+    monkeypatch.setattr(critic.anthropic, "Anthropic", _Client)
+    monkeypatch.setattr(critic.analyze, "log_anthropic_usage", lambda *a, **k: None)
+
+    ctx = _base_context()
+    critic.verify_llm(
+        "Your entry was 70c and it settled +$3.70.",
+        ctx,
+        extra_ground_truth="Your settled Kalshi trades: ...",
+    )
+    prompt = sent["messages"][0]["content"][0]["text"]
+    assert "Authoritative user account facts" in prompt
+    assert "Your settled Kalshi trades" in prompt
+    # Without it, no account section appears.
+    critic.verify_llm("Spot is at $1,600.", ctx)
+    prompt2 = sent["messages"][0]["content"][0]["text"]
+    assert "Authoritative user account facts" not in prompt2
+
+
+def test_refine_chat_reply_passes_account_answers_through(monkeypatch):
+    """A wallet answer must never be swapped for an SFP/OB market summary."""
+    import audit
+    import critic
+
+    logged: list[tuple] = []
+    monkeypatch.setattr(
+        audit, "log_chat_audit",
+        lambda uid, q, r, **kw: logged.append((uid, q, r)) or 1,
+    )
+    # Neither the snapshot lookup nor the LLM critic may run for this reply.
+    monkeypatch.setattr(
+        audit, "get_snapshot",
+        lambda *a, **k: (_ for _ in ()).throw(AssertionError("snapshot read")),
+    )
+    monkeypatch.setattr(
+        audit, "get_latest_snapshot",
+        lambda *a, **k: (_ for _ in ()).throw(AssertionError("snapshot read")),
+    )
+    monkeypatch.setattr(
+        critic, "verify_llm",
+        lambda *a, **k: (_ for _ in ()).throw(AssertionError("LLM critic ran")),
+    )
+
+    reply = (
+        "Yes — your payout wallet 0x1234567890abcdef1234567890abcdef12345678 "
+        "is registered and verified."
+    )
+    out, verdict = critic.refine_chat_reply(
+        42, "is my wallet registered", reply, cycle_id="c1"
+    )
+    assert out == reply
+    assert not verdict.sanitized
+    assert not verdict.has_issues
+    assert logged == [(42, "is my wallet registered", reply)]
+
+    err = "Sorry, something went wrong processing your message."
+    out, verdict = critic.refine_chat_reply(42, "is my wallet registered", err)
+    assert out == err
+    assert not verdict.sanitized

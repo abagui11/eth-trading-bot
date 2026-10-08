@@ -25,6 +25,7 @@ from __future__ import annotations
 import logging
 import os
 import sqlite3
+import time
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
@@ -46,6 +47,7 @@ _BOT_LABELS = {
     "eva_wick_hype": "HYPE",
     "eva_wick_1h_ladder": "1h ladder · 4/2/1 once per hour",
     "eva_wick_1h_flat": "1h flat · 1/1 every fire",
+    "eva_wick_improved": "EVA wick improved",
     "eva_wick_btc_xrp": "BTC→XRP",
     "eva_wick_btc_sol": "BTC→SOL",
     "eva_wick_btc_hype": "BTC→HYPE",
@@ -87,7 +89,11 @@ _CROSS_BOTS: dict[str, tuple[str, str, str]] = {
     "eva_wick_eth_hype": ("ETH", "HYPE", "KXHYPE15M"),
 }
 
-# Every shadow family that stays out of the sleeves' shared feeds.
+# Every shadow family that stays out of the sleeves' shared feeds. An altcoin
+# clone that has been released live (named in KALSHI_LIVE_BOTS, mirroring the
+# bot repo's ALT_WICK_LIVE_RELEASED) is promoted out of this set at payload
+# time: real-money trades belong in the main table and feeds, not in a shadow
+# card that brands itself paper.
 _SHADOW_BOTS: tuple[str, ...] = (*_ALT_BOTS, *_HOURLY_BOTS, *_CROSS_BOTS)
 
 # Short grey subtitles under each bot name in the comparison table (≤4 lines).
@@ -107,6 +113,20 @@ _BOT_BLURBS = {
         "Last 2 minutes only. If the favorite touched 90¢ then dips to 75–85¢, "
         "buy the favored side before quotes freeze and hold to settlement. "
         "Paper trading this epoch."
+    ),
+    "eva_wick_sol": (
+        "The identical wick rule on the SOL 15m series — same 67–80¢ band, "
+        "same 4–10 minute clock, held to settlement. Started as a paper "
+        "clone on 09-30; released to the live account 2026-10-01. Book "
+        "counts from the 09-30 switch-on, so its race is younger than the "
+        "sleeves'."
+    ),
+    "eva_wick_improved": (
+        "The live wick rule with one pre-registered filter: 65–75¢ entries "
+        "must have the bot's own fair model agreeing by ≥4¢ — the band where "
+        "the recorded book's losses concentrate. Mirrors every other live "
+        "entry 1:1 at the same price, so this row is a direct A/B against "
+        "EVA wick. Paper forward test since 2026-10-07."
     ),
     "eva_wick_1h_ladder": (
         "When the live wick rule fires, buy the same side of the hourly "
@@ -148,7 +168,7 @@ _BOT_BLURBS = {
 }
 
 # Bots always shown in the comparison, even before their first trade.
-_EXPERIMENT_BOTS = ("eva_streak", "eva_wick", "eva_arb")
+_EXPERIMENT_BOTS = ("eva_streak", "eva_wick", "eva_arb", "eva_wick_improved")
 # Retired books stay in the ledger for analysis but off the dashboard.
 _RETIRED_BOTS = ("eva_wick_fade_v1",)
 
@@ -253,6 +273,14 @@ def _position_row(row: sqlite3.Row) -> dict[str, Any]:
     }
 
 
+# The dip study below walks every recorded window's quote path (hundreds of
+# per-ticker scans over a quotes table that grows by one row per 5 seconds),
+# which is ~100ms of pure recompute of append-only history. A short TTL keeps
+# refresh bursts and the index render from paying it every time.
+_lastmin_cache: dict[str, Any] = {"at": 0.0, "payload": None}
+_LASTMIN_CACHE_TTL_SEC = 60.0
+
+
 def lastmin_payload(max_windows: int = 400) -> dict[str, Any] | None:
     """Eva #3 arb logger evidence: dip setups seen vs how they settled.
 
@@ -260,6 +288,12 @@ def lastmin_payload(max_windows: int = 400) -> dict[str, Any] | None:
     and later printed back inside 75-85c. No trading — this only answers
     "how often would that buy have settled in the money?".
     """
+    now = time.time()
+    if (
+        _lastmin_cache["payload"] is not None
+        and now - _lastmin_cache["at"] < _LASTMIN_CACHE_TTL_SEC
+    ):
+        return _lastmin_cache["payload"]
     conn = _connect(lastmin_db_path())
     if conn is None:
         return None
@@ -303,17 +337,24 @@ def lastmin_payload(max_windows: int = 400) -> dict[str, Any] | None:
         return None
     finally:
         conn.close()
-    return {
+    payload = {
         "windows": int(windows_total or 0),
         "quotes": int(quotes_total or 0),
         "dips": dips,
         "dip_wins": dip_wins,
         "dip_win_rate": (dip_wins / dips) if dips else None,
     }
+    _lastmin_cache.update(at=now, payload=payload)
+    return payload
 
 
-def performance_payload(limit: int = 15) -> dict[str, Any] | None:
-    """Kalshi multi-bot snapshot for the hub tab; None when not mounted."""
+def performance_payload(limit: int = 15, offset: int = 0) -> dict[str, Any] | None:
+    """Kalshi multi-bot snapshot for the hub tab; None when not mounted.
+
+    Open/closed trade feeds are live books only (``KALSHI_LIVE_BOTS``). The
+    comparison table still shows paper sleeves for the experiment. ``offset``
+    paginates the closed feed for the Load more control.
+    """
     conn = _connect(kalshi_db_path())
     if conn is None:
         return None
@@ -321,11 +362,21 @@ def performance_payload(limit: int = 15) -> dict[str, Any] | None:
     alt_start = alt_epoch()
     hourly_start = hourly_epoch()
     cross_start = cross_epoch()
+    live_set = set(live_bots())
+    # Altcoin clones released to the live account are promoted into the main
+    # table and trade feeds; the ones still earning their record stay shadow.
+    released = tuple(b for b in _ALT_BOTS if b in live_set)
+    shadow_bots = tuple(b for b in _SHADOW_BOTS if b not in released)
+    shadow_alts = tuple(b for b in _ALT_BOTS if b not in released)
+    page = max(1, min(int(limit), 100))
+    skip = max(0, int(offset))
     try:
         states = conn.execute(
             "SELECT bot_id, starting_usd, cash_usd, realized_pnl_usd"
             " FROM paper_state ORDER BY bot_id"
         ).fetchall()
+        # Open rows for sleeve equity still need every book; the live feed
+        # below is a filtered view of the same list.
         open_rows = conn.execute(
             "SELECT * FROM paper_positions WHERE status = 'open'"
             " ORDER BY opened_at DESC LIMIT 40"
@@ -337,18 +388,33 @@ def performance_payload(limit: int = 15) -> dict[str, Any] | None:
         alt_ph = ",".join("?" * len(_ALT_BOTS))
         hourly_ph = ",".join("?" * len(_HOURLY_BOTS))
         cross_ph = ",".join("?" * len(_CROSS_BOTS))
-        shadow_ph = ",".join("?" * len(_SHADOW_BOTS))
-        closed_rows = conn.execute(
-            "SELECT * FROM paper_positions WHERE status != 'open'"
-            f" AND opened_at >= ? AND bot_id NOT IN ({shadow_ph})"
-            " ORDER BY closed_at DESC LIMIT ?",
-            (epoch, *_SHADOW_BOTS, max(1, min(int(limit), 100))),
-        ).fetchall()
-        alt_first = conn.execute(
-            f"SELECT MIN(opened_at) FROM paper_positions"
-            f" WHERE bot_id IN ({alt_ph})",
-            tuple(_ALT_BOTS),
-        ).fetchone()[0]
+        shadow_ph = ",".join("?" * len(shadow_bots))
+        # Closed feed: live books only. Paper sleeves stay in the comparison
+        # table but do not crowd the trade list the operator watches.
+        if live_set:
+            live_ph = ",".join("?" * len(live_set))
+            live_ids = tuple(sorted(live_set))
+            closed_total = int(conn.execute(
+                "SELECT COUNT(*) FROM paper_positions WHERE status != 'open'"
+                f" AND opened_at >= ? AND bot_id IN ({live_ph})",
+                (epoch, *live_ids),
+            ).fetchone()[0] or 0)
+            closed_rows = conn.execute(
+                "SELECT * FROM paper_positions WHERE status != 'open'"
+                f" AND opened_at >= ? AND bot_id IN ({live_ph})"
+                " ORDER BY closed_at DESC LIMIT ? OFFSET ?",
+                (epoch, *live_ids, page, skip),
+            ).fetchall()
+        else:
+            closed_total = 0
+            closed_rows = []
+        alt_first = None
+        if shadow_alts:
+            alt_first = conn.execute(
+                "SELECT MIN(opened_at) FROM paper_positions"
+                f" WHERE bot_id IN ({','.join('?' * len(shadow_alts))})",
+                shadow_alts,
+            ).fetchone()[0]
         hourly_first = conn.execute(
             f"SELECT MIN(opened_at) FROM paper_positions"
             f" WHERE bot_id IN ({hourly_ph})",
@@ -384,7 +450,7 @@ def performance_payload(limit: int = 15) -> dict[str, Any] | None:
             "SELECT COUNT(*) FROM paper_positions"
             " WHERE status != 'open' AND opened_at < ?"
             f" AND bot_id NOT IN ({shadow_ph})",
-            (epoch, *_SHADOW_BOTS),
+            (epoch, *shadow_bots),
         ).fetchone()[0]
     except sqlite3.Error:
         logger.exception("Kalshi ledger query failed")
@@ -392,7 +458,6 @@ def performance_payload(limit: int = 15) -> dict[str, Any] | None:
     finally:
         conn.close()
 
-    live_set = set(live_bots())
     open_list = [_position_row(r) for r in open_rows]
     closed_list = [_position_row(r) for r in closed_rows]
     for p in open_list + closed_list:
@@ -417,7 +482,8 @@ def performance_payload(limit: int = 15) -> dict[str, Any] | None:
         n_open = sum(1 for p in open_list if p["bot_id"] == bot_id)
         if bot_id in _RETIRED_BOTS:
             continue
-        is_alt = bot_id in _ALT_BOTS
+        is_released = bot_id in released
+        is_alt = bot_id in _ALT_BOTS and not is_released
         is_hourly = bot_id in _HOURLY_BOTS
         is_cross = bot_id in _CROSS_BOTS
         # Idle leftover books (old control/lottery rows) stay off the tab.
@@ -425,6 +491,7 @@ def performance_payload(limit: int = 15) -> dict[str, Any] | None:
             closed == 0
             and n_open == 0
             and bot_id not in _EXPERIMENT_BOTS
+            and not is_released
             and not is_alt
             and not is_hourly
             and not is_cross
@@ -459,7 +526,14 @@ def performance_payload(limit: int = 15) -> dict[str, Any] | None:
             "early_exits": int(a["early_exits"] or 0) if a else 0,
             "win_rate": (wins / decided) if decided else None,
         }
-        if is_alt:
+        if is_released:
+            # Promoted clone: a main-table row next to the BTC/ETH sleeve.
+            # "EVA wick · SOL" rather than the alt card's bare asset tag,
+            # because in the comparison table the rule name carries meaning.
+            row["label"] = f"EVA wick · {_BOT_LABELS.get(bot_id, bot_id)}"
+            row["series"] = _ALT_BOTS[bot_id]
+            bots.append(row)
+        elif is_alt:
             row["series"] = _ALT_BOTS[bot_id]
             alt_bots.append(row)
         elif is_hourly:
@@ -506,8 +580,12 @@ def performance_payload(limit: int = 15) -> dict[str, Any] | None:
         "hidden_closed": int(hidden_n or 0),
         "totals": totals,
         "bots": bots,
-        "open": [p for p in open_list if p["bot_id"] not in _SHADOW_BOTS],
+        # Live books only — paper sleeves stay in the comparison table.
+        "open": [p for p in open_list if p["bot_id"] in live_set],
         "closed": closed_list,
+        "closed_total": closed_total,
+        "closed_offset": skip,
+        "closed_has_more": (skip + len(closed_list)) < closed_total,
         "altcoins": {
             "available": bool(alt_bots),
             "epoch": alt_start,
@@ -517,7 +595,7 @@ def performance_payload(limit: int = 15) -> dict[str, Any] | None:
             "first_trade": alt_first,
             "first_trade_label": _fmt_ts(alt_first) + " ET" if alt_first else None,
             "bots": alt_bots,
-            "open": [p for p in open_list if p["bot_id"] in _ALT_BOTS],
+            "open": [p for p in open_list if p["bot_id"] in shadow_alts],
         },
         "hourly": {
             "available": bool(hourly_bots),
@@ -541,5 +619,7 @@ def performance_payload(limit: int = 15) -> dict[str, Any] | None:
             "bots": cross_bots,
             "open": [p for p in open_list if p["bot_id"] in _CROSS_BOTS],
         },
-        "lastmin": lastmin_payload(),
+        # Pagination only needs more closed rows; the dip card never changes
+        # from one Load-more click to the next, so offset pages skip it.
+        "lastmin": lastmin_payload() if skip == 0 else None,
     }

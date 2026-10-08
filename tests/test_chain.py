@@ -172,5 +172,157 @@ class ConfirmPayoutTests(unittest.TestCase):
         self.assertEqual(result["reason"], "lookup_failed")
 
 
+# ---------------------------------------------------------------------------
+# JSON-RPC source — what keeps Base readable without a paid indexer
+# ---------------------------------------------------------------------------
+
+BASE = 8453
+WALLET = "0xab1b6cc522c3ec7bdea22598f6e510e7e752479d"
+LATEST = 52_000_000
+
+
+def _topic(address: str) -> str:
+    return "0x" + "0" * 24 + address[2:].lower()
+
+
+def transfer_log(*, sender=THEIRS, recipient=WALLET, amount_units=600_000_000,
+                 block=LATEST - 30, txid=TXID) -> dict:
+    """An eth_getLogs entry for a USDC Transfer, the way a node returns it."""
+    return {
+        "address": chain.USDC_CONTRACTS[BASE],
+        "topics": [chain._TRANSFER_TOPIC, _topic(sender), _topic(recipient)],
+        "data": hex(amount_units),
+        "blockNumber": hex(block),
+        "transactionHash": txid,
+    }
+
+
+class RpcScanTests(unittest.TestCase):
+    def setUp(self) -> None:
+        chain._etherscan_unsupported.clear()
+        for p in (
+            patch.object(config, "BASE_RPC_URL", "https://rpc.test"),
+            patch.object(config, "RPC_LOG_RANGE", 500),
+        ):
+            p.start()
+            self.addCleanup(p.stop)
+
+    def _rpc(self, logs_by_call=None, *, latest=LATEST):
+        """A fake node: eth_blockNumber, eth_getLogs (per chunk), eth_call."""
+        calls: list[tuple[str, list]] = []
+        logs_by_call = list(logs_by_call or [])
+
+        def fake(method, params, *, chain_id):
+            calls.append((method, params))
+            if method == "eth_blockNumber":
+                return hex(latest)
+            if method == "eth_getLogs":
+                return logs_by_call.pop(0) if logs_by_call else []
+            if method == "eth_call":
+                return hex(1_234_560_000)
+            raise AssertionError(method)
+
+        return fake, calls
+
+    def test_log_becomes_a_transfer_row_with_confirmations(self) -> None:
+        """Same row shape as the Etherscan path, so the watcher does not care
+        which source answered. Confirmations are tip - block + 1."""
+        fake, _ = self._rpc([[transfer_log(block=LATEST - 11)]])
+        with patch.object(chain, "_rpc", side_effect=fake):
+            rows, tip = chain.scan_inbound_usdc(WALLET, chain_id=BASE,
+                                                from_block=LATEST - 100)
+        self.assertEqual(tip, LATEST)
+        self.assertEqual(len(rows), 1)
+        row = rows[0]
+        self.assertEqual(row["from"], THEIRS)
+        self.assertEqual(row["to"], WALLET)
+        self.assertEqual(row["amount_usd"], 600.0)
+        self.assertEqual(row["confirmations"], 12)
+        self.assertEqual(row["txid"], TXID)
+
+    def test_scan_is_chunked_to_the_endpoint_range_cap(self) -> None:
+        """Base's public node refuses eth_getLogs over 500 blocks. A single
+        oversized request would fail every sweep after any downtime."""
+        fake, calls = self._rpc()
+        with patch.object(chain, "_rpc", side_effect=fake):
+            chain.scan_inbound_usdc(WALLET, chain_id=BASE,
+                                    from_block=LATEST - 1200)
+        ranges = [
+            (int(p[0]["fromBlock"], 16), int(p[0]["toBlock"], 16))
+            for m, p in calls if m == "eth_getLogs"
+        ]
+        self.assertEqual(len(ranges), 3)
+        for lo, hi in ranges:
+            self.assertLessEqual(hi - lo + 1, 500)
+        self.assertEqual(ranges[0][0], LATEST - 1200)
+        self.assertEqual(ranges[-1][1], LATEST)
+        # Filtered at the node on the USDC contract and our address as `to`.
+        first = calls[1][1][0]
+        self.assertEqual(first["address"], chain.USDC_CONTRACTS[BASE])
+        self.assertEqual(first["topics"][2], _topic(WALLET))
+
+    def test_only_transfers_into_our_address_count(self) -> None:
+        fake, _ = self._rpc([[
+            transfer_log(),
+            transfer_log(sender=WALLET, recipient=THEIRS, txid="0x" + "b" * 64),
+        ]])
+        with patch.object(chain, "_rpc", side_effect=fake):
+            rows, _ = chain.scan_inbound_usdc(WALLET, chain_id=BASE,
+                                              from_block=LATEST - 10)
+        self.assertEqual([r["txid"] for r in rows], [TXID])
+
+    def test_recent_inbound_uses_rpc_when_etherscan_does_not_serve_chain(self) -> None:
+        """Etherscan's plan refusal is remembered; the next pass goes
+        straight to RPC and hands back a cursor to resume from."""
+        refusal = {
+            "status": "0", "message": "NOTOK",
+            "result": "Free API access is not supported for this chain. Please upgrade",
+        }
+        with patch.object(config, "ETHERSCAN_API_KEY", "k"), \
+             patch("chain.requests.get") as get:
+            get.return_value.status_code = 200
+            get.return_value.json.return_value = refusal
+            with self.assertRaises(chain.ChainError):
+                chain.usdc_transfers(WALLET, chain_id=BASE)
+            self.assertFalse(chain.etherscan_available(BASE))
+            self.assertTrue(chain.etherscan_available(1))
+            self.assertTrue(chain.readable(BASE))
+
+        fake, calls = self._rpc([[transfer_log()]])
+        with patch.object(config, "ETHERSCAN_API_KEY", "k"), \
+             patch.object(chain, "_rpc", side_effect=fake), \
+             patch.object(chain, "_request",
+                          side_effect=AssertionError("etherscan called")):
+            rows, cursor = chain.recent_inbound_usdc(WALLET, chain_id=BASE,
+                                                     cursor_block=None)
+        self.assertEqual(len(rows), 1)
+        self.assertIsNotNone(cursor)
+        self.assertLess(cursor, LATEST)          # resumes a little behind tip
+        self.assertGreater(cursor, LATEST - 100)
+
+    def test_recent_inbound_prefers_etherscan_where_it_works(self) -> None:
+        with patch.object(config, "ETHERSCAN_API_KEY", "k"), \
+             patch.object(chain, "_request", return_value=[transfer()]), \
+             patch.object(chain, "_rpc",
+                          side_effect=AssertionError("rpc called")):
+            rows, cursor = chain.recent_inbound_usdc(OURS, chain_id=1)
+        self.assertEqual(len(rows), 1)
+        self.assertIsNone(cursor)
+
+    def test_balance_falls_back_to_rpc(self) -> None:
+        chain._etherscan_unsupported[BASE] = float("inf")
+        fake, _ = self._rpc()
+        with patch.object(config, "ETHERSCAN_API_KEY", "k"), \
+             patch.object(chain, "_rpc", side_effect=fake):
+            self.assertEqual(chain.usdc_balance(WALLET, chain_id=BASE), 1234.56)
+
+    def test_no_source_at_all_raises_rather_than_reading_empty(self) -> None:
+        with patch.object(config, "ETHERSCAN_API_KEY", None), \
+             patch.object(config, "BASE_RPC_URL", None):
+            self.assertFalse(chain.readable(BASE))
+            with self.assertRaises(chain.ChainError):
+                chain.recent_inbound_usdc(WALLET, chain_id=BASE)
+
+
 if __name__ == "__main__":
     unittest.main()

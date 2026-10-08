@@ -60,6 +60,16 @@ def _optional(key: str) -> str | None:
     return value.strip()
 
 
+def _optional_int(key: str) -> int | None:
+    value = os.getenv(key)
+    if value is None or value.strip() == "":
+        return None
+    try:
+        return int(value.strip())
+    except ValueError:
+        raise RuntimeError(f"{key} must be an integer, got {value!r}")
+
+
 def _optional_bool(key: str, default: bool = False) -> bool:
     value = os.getenv(key)
     if value is None or value.strip() == "":
@@ -170,11 +180,67 @@ MOONPAY_WIDGET_URL_TEMPLATE: str | None = _optional("MOONPAY_WIDGET_URL_TEMPLATE
 # --- Phase 1 test wallet — shared deposit/routing wallet, pre-MoonPay-approval.
 # One operator-controlled EOA that (a) receives user USDC deposits directly,
 # attributed by sender address, and (b) funds the venues (Coinbase / Kalshi)
-# through operator-approved treasury transfers. The private key never lives on
-# this box: the bot only *reads* the address on-chain.
+# through operator-approved treasury transfers.
 TEST_WALLET_ADDRESS: str | None = _optional("TEST_WALLET_ADDRESS")
-# Chain the test wallet lives on. 8453 = Base (default), 1 = Ethereum mainnet.
+# Optional hot-wallet signer for that EOA. Unset = the bot only *reads* the
+# address and every treasury leg is sent by hand. Set = an admin can tap
+# "Send" on a journaled test_wallet → venue leg and the bot signs the USDC
+# transfer itself. Guardrails live in signer.py / treasury.execute_transfer:
+# the key must derive to TEST_WALLET_ADDRESS, the destination must be one of
+# the two venue deposit addresses below (nothing else is ever a valid `to`),
+# and both caps must clear. Keep this key funded only with tester capital.
+TEST_WALLET_PRIVATE_KEY: str | None = _optional("TEST_WALLET_PRIVATE_KEY")
+# Numeric chain each venue deposit address lives on (8453 Base, 1 Ethereum).
+# No default: USDC sent on the wrong chain to an exchange address is gone.
+POOL_DEPOSIT_CHAIN_ID: int | None = _optional_int("POOL_DEPOSIT_CHAIN_ID")
+KALSHI_DEPOSIT_ADDRESS: str | None = _optional("KALSHI_DEPOSIT_ADDRESS")
+KALSHI_DEPOSIT_CHAIN_ID: int | None = _optional_int("KALSHI_DEPOSIT_CHAIN_ID")
+# Signer caps: per leg, and rolling 24h across every signer-sent leg.
+TREASURY_SEND_MAX_USD: float = float(_optional("TREASURY_SEND_MAX_USD") or "2000")
+TREASURY_SEND_DAILY_MAX_USD: float = float(
+    _optional("TREASURY_SEND_DAILY_MAX_USD") or "5000"
+)
+# Send deploy legs the moment they are journaled, no admin tap. Only
+# test_wallet → venue legs created by a user's deploy; the same allowlist and
+# caps apply, and anything the signer refuses falls back to the Send card.
+# Off = every leg waits for an admin tap.
+TREASURY_AUTO_SEND_DEPLOYS: bool = _optional_bool("TREASURY_AUTO_SEND_DEPLOYS", True)
+# When a venue send is short of native gas, swap USDC → ETH via Uniswap on
+# that chain (from the test wallet's USDC float) up to these bounds, then
+# retry. Needs a dust of ETH already present to pay for the approve+swap
+# itself — a completely empty wallet still needs a one-time bootstrap.
+GAS_TOPUP_ENABLED: bool = _optional_bool("GAS_TOPUP_ENABLED", True)
+GAS_TOPUP_TARGET_ETH: float = float(_optional("GAS_TOPUP_TARGET_ETH") or "0.015")
+GAS_TOPUP_MAX_USD: float = float(_optional("GAS_TOPUP_MAX_USD") or "25")
+# Assumed ETH ceiling for minOut floor (slippage safety, not a price feed).
+GAS_TOPUP_ETH_PRICE_CEILING_USD: float = float(
+    _optional("GAS_TOPUP_ETH_PRICE_CEILING_USD") or "6000"
+)
+# Optional extra USDC kept out of deployable (on top of undeployed claims).
+# Default 0 — gas top-ups already refuse to spend into undeployed+leg reserves.
+TREASURY_GAS_RESERVE_USD: float = float(
+    _optional("TREASURY_GAS_RESERVE_USD") or "0"
+)
+# Primary chain for the test wallet. 8453 = Base (default), 1 = Ethereum mainnet.
 TEST_WALLET_CHAIN_ID: int = int(_optional("TEST_WALLET_CHAIN_ID") or "8453")
+# Every chain deposits are watched on. An EOA is the same address on every
+# EVM chain, so USDC sent on Base or Ethereum lands in the same wallet; the
+# sweep and the treasury balance read cover each listed chain. The primary is
+# always included.
+_chain_ids = [
+    int(x) for x in (_optional("TEST_WALLET_CHAIN_IDS") or "8453,1").split(",")
+    if x.strip()
+]
+TEST_WALLET_CHAIN_IDS: tuple[int, ...] = tuple(
+    dict.fromkeys([TEST_WALLET_CHAIN_ID, *_chain_ids])
+)
+# JSON-RPC endpoints per chain, read-only. Used wherever Etherscan does not
+# cover a chain — its free plan stopped serving Base in late Sept 2026 — so
+# the deposit watcher keeps working without a paid indexer. Public endpoints
+# cap eth_getLogs ranges (Base's is 500 blocks); the scan chunks to fit.
+BASE_RPC_URL: str | None = _optional("BASE_RPC_URL") or "https://mainnet.base.org"
+ETH_RPC_URL: str | None = _optional("ETH_RPC_URL") or "https://ethereum-rpc.publicnode.com"
+RPC_LOG_RANGE: int = int(_optional("RPC_LOG_RANGE") or "500")
 # Card on-ramp widget for the test wallet (any provider that can pin the
 # destination address and echo an external customer id back on its webhook).
 # Unset until a provider account exists — the Fund surface then offers the
@@ -257,15 +323,6 @@ ANALYTICS_PASSWORD: str = _optional("ANALYTICS_PASSWORD") or "evatradesforyou"
 # of DM-per-subscriber; Account traffic (portfolio, deposits, personal fill
 # notices) stays in DMs. Unset = today's DM broadcast, so dev boxes without a
 # forum keep working.
-def _optional_int(key: str) -> int | None:
-    value = os.getenv(key)
-    if value is None or value.strip() == "":
-        return None
-    try:
-        return int(value.strip())
-    except ValueError:
-        raise RuntimeError(f"{key} must be an integer, got {value!r}")
-
 
 # Telegram ids allowed to Admit users and credit deposits. Env rather than
 # code so an operator can be added without a deploy; merged with

@@ -58,6 +58,7 @@ class _Harness(unittest.TestCase):
             patch.object(bot_config, "POOL_RISK_PCT", 0.007),
             patch.object(bot_config, "POOL_MIN_EQUITY_USD", 500.0),
             patch.object(bot_config, "POOL_ADMIN_TELEGRAM_IDS", (ADMIN,)),
+            patch.object(bot_config, "POOL_DEPLOY_FEE_USD", 0.0),
             patch.object(execute, "_notify_ops"),
             patch.object(execute, "_pool_dm"),
             patch.object(execute, "_SETTLE_SLEEP", 0),

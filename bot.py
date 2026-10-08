@@ -143,6 +143,11 @@ def _is_me_query(text: str) -> bool:
     return bool(_ME_QUERY.search(text))
 
 
+def _is_pool_user(telegram_id: int) -> bool:
+    """Approved tester on the live pool path (not personal demo)."""
+    return bool(bot_config.POOL_ENABLED and pool.is_approved(telegram_id))
+
+
 async def _reply(update: Update, text: str, *, markdown: bool = False,
                  **kwargs) -> None:
     """Reply, optionally rendering the copy's markdown.
@@ -184,7 +189,9 @@ async def _send(context: ContextTypes.DEFAULT_TYPE, chat_id: int, text: str,
 async def _notify_admins_new_user(context: ContextTypes.DEFAULT_TYPE, user) -> None:
     """Ping every pool admin with an Admit/Deny card for a new requester."""
     name = f"@{user.username}" if user.username else (user.full_name or "unknown")
-    text = f"New user wants in: {name} (id {user.id})"
+    text = telegram_ui.format_admin_message(
+        f"New user wants in: {name} (id {user.id})"
+    )
     for admin_id in pool.admin_ids():
         try:
             await context.bot.send_message(
@@ -194,6 +201,27 @@ async def _notify_admins_new_user(context: ContextTypes.DEFAULT_TYPE, user) -> N
             )
         except Exception:
             logger.exception("Admin access ping failed for %s", admin_id)
+
+
+async def _send_admin(
+    context: ContextTypes.DEFAULT_TYPE,
+    text: str,
+    *,
+    reply_markup=None,
+    disable_web_page_preview: bool = False,
+) -> None:
+    """DM every pool admin with the *admin* tag so ops traffic is unmistakable."""
+    body = telegram_ui.format_admin_message(text)
+    for admin_id in pool.admin_ids():
+        try:
+            kwargs: dict = {}
+            if reply_markup is not None:
+                kwargs["reply_markup"] = reply_markup
+            if disable_web_page_preview:
+                kwargs["disable_web_page_preview"] = True
+            await context.bot.send_message(admin_id, body, **kwargs)
+        except Exception:
+            logger.exception("admin DM failed for %s", admin_id)
 
 
 async def _handle_gated_user(
@@ -271,6 +299,410 @@ def _pool_intent_reply(result: dict, *, risk_label: str = "risk") -> str:
 def _deploy_prompt_reply(strategy_key: str, user_id: int) -> tuple[str, object]:
     """(text, keyboard) asking the tester to allocate before accepting."""
     return menu.strategy_detail(user_id, strategy_key)
+
+
+def _deploy_risk_copy(strategy_key: str, amount: float) -> str:
+    """User-facing per-Accept risk line for a freshly set deployment.
+
+    Kalshi lanes use the cost-cap (`POOL_KALSHI_RISK_PCT`) — a binary
+    contract's spend is its entire risk. ICT/Mill keep the stop-risk
+    fraction that mirrors the house HQ clip (`POOL_RISK_PCT`).
+    """
+    strat = strategy_catalog.STRATEGIES[strategy_key]
+    if strat.venue == "kalshi":
+        pct = float(bot_config.POOL_KALSHI_RISK_PCT)
+        risk = amount * pct
+        return (
+            f"Each Accept spends at most ${risk:,.2f} "
+            f"({pct * 100:.0f}% of the deployment) on that window's "
+            "contracts — the cost is the entire risk."
+        )
+    pct = float(bot_config.POOL_RISK_PCT)
+    risk = amount * pct
+    return (
+        f"Each Accept on its cards now risks about ${risk:,.2f} "
+        f"({pct * 100:.1f}% of the deployment) at the stop."
+    )
+
+
+def _deploy_fee_copy(amount: float, fee_usd: float) -> str:
+    """Confirm line: full allocation to venue, fee kept as gas float."""
+    fee = float(fee_usd or 0)
+    if fee <= 0:
+        return ""
+    return (
+        f"Network fee: ${fee:,.2f} taken from your wallet (kept for gas). "
+        f"${float(amount):,.2f} goes to the strategy."
+    )
+
+
+def _append_deploy_fee_copy(text: str, amount: float, fee_usd: float) -> str:
+    if "Network fee:" in text:
+        return text
+    line = _deploy_fee_copy(amount, fee_usd)
+    if not line:
+        return text
+    return f"{text}\n\n{line}"
+
+
+async def _route_deployed_capital(
+    context: ContextTypes.DEFAULT_TYPE,
+    *,
+    user_id: int,
+    strategy_key: str,
+    delta_usd: float,
+    previous_usd: float | None = None,
+) -> dict:
+    """After an allocation change, journal + auto-send the venue move.
+
+    Returns ``{ok: True, ...}`` on a journaled leg, or ``{ok: False,
+    reason, user_message?}``. On ``intake_short`` / ``intake_unreadable``
+    the soft-lock is rolled back to ``previous_usd`` so Portfolio never
+    shows capital as deployed when it cannot leave the intake wallet.
+
+    A successful deploy also debits ``POOL_DEPLOY_FEE_USD`` from undeployed
+    cash (fee stays in the intake wallet as house gas float).
+    """
+    strat = strategy_catalog.STRATEGIES.get(strategy_key)
+    if strat is None or not strat.venue:
+        return {"ok": False, "reason": "no_venue"}
+    try:
+        import treasury
+
+        move = treasury.journal_deploy_move(
+            telegram_id=user_id,
+            strategy=strategy_key,
+            delta_usd=delta_usd,
+            admin_id=user_id,
+        )
+    except Exception:
+        logger.exception("deploy routing journal failed")
+        return {"ok": False, "reason": "journal_error"}
+    if not move.get("ok"):
+        reason = str(move.get("reason") or "")
+        if reason in ("intake_short", "intake_unreadable"):
+            if previous_usd is not None:
+                try:
+                    pool.set_allocation(user_id, strategy_key, float(previous_usd))
+                except Exception:
+                    logger.exception(
+                        "failed to roll back allocation for user %s %s",
+                        user_id, strategy_key,
+                    )
+            need = float(move.get("need_usd") or abs(delta_usd) or 0)
+            have = float(move.get("deployable_usd") or 0)
+            on_chain = float(move.get("on_chain_usd") or 0)
+            undeployed = float(move.get("undeployed_claims_usd") or 0)
+            user_message = (
+                f"Could not deploy ${need:,.2f} into {strat.label} — the "
+                f"intake wallet only has ${have:,.2f} free to send right now "
+                f"(${on_chain:,.2f} on-chain, ${undeployed:,.2f} reserved for "
+                "other undeployed balances). Your allocation was not changed. "
+                "Fund more USDC on Ethereum, or try a smaller amount."
+            )
+            await _send_admin(
+                context,
+                f"Deploy blocked for user {user_id} → {strat.label}: "
+                f"need ${need:,.2f}, deployable ${have:,.2f} "
+                f"(on-chain ${on_chain:,.2f}, undeployed claims "
+                f"${undeployed:,.2f}). Soft-lock rolled back.",
+            )
+            return {
+                "ok": False,
+                "reason": reason,
+                "user_message": user_message,
+                **move,
+            }
+        if reason not in ("no_change", "no_venue", "no_intake_wallet"):
+            logger.warning("deploy routing not journaled: %s", move)
+        return {"ok": False, **move}
+    transfer_id = int(move["transfer_id"])
+    amount = float(move["amount_usd"])
+    from_loc = str(move["from_loc"])
+    to_loc = str(move["to_loc"])
+    fee_usd = 0.0
+    if move.get("verb") == "deploy":
+        try:
+            fee_result = pool.charge_deploy_fee(
+                user_id,
+                strategy=strategy_key,
+                transfer_id=transfer_id,
+            )
+        except Exception:
+            logger.exception(
+                "deploy fee charge failed user=%s transfer=#%s",
+                user_id, transfer_id,
+            )
+            fee_result = {"ok": False, "reason": "exception"}
+        if fee_result.get("ok"):
+            fee_usd = float(fee_result.get("fee_usd") or 0)
+        else:
+            logger.warning(
+                "deploy fee not charged user=%s transfer=#%s: %s",
+                user_id, transfer_id, fee_result,
+            )
+            await _send_admin(
+                context,
+                f"*admin* Deploy fee missed for user {user_id} → "
+                f"{strat.label} transfer #{transfer_id}: "
+                f"{fee_result.get('reason') or fee_result}",
+            )
+        fee_note = (
+            f" Network fee ${fee_usd:,.2f} kept as gas float."
+            if fee_usd > 0 else ""
+        )
+        headline = (
+            f"Deploy routing: user {user_id} deployed ${amount:,.2f} "
+            f"into {strat.label}.{fee_note}"
+        )
+    else:
+        headline = (
+            f"Undeploy routing: user {user_id} pulled ${amount:,.2f} "
+            f"out of {strat.label}."
+        )
+
+    # Deploys go out on their own when the signer can take the leg: the
+    # user has already decided, and an admin tap only added latency between
+    # "deployed" and the money being at the venue. Caps, allowlist, and the
+    # atomic claim are all still enforced inside execute_transfer; anything
+    # it refuses falls through to the manual card with the reason.
+    if (
+        move.get("verb") == "deploy"
+        and bool(getattr(config, "TREASURY_AUTO_SEND_DEPLOYS", False))
+    ):
+        try:
+            check = treasury.signer_check(transfer_id)
+        except Exception:
+            logger.exception("auto-send check failed for #%s", transfer_id)
+            check = {"ok": False}
+        if check.get("ok"):
+            await _treasury_send(
+                context, None, transfer_id, admin_id=user_id,
+                headline=headline, auto=True,
+            )
+            return {
+                "ok": True,
+                "transfer_id": transfer_id,
+                "auto_sent": True,
+                "fee_usd": fee_usd,
+                "amount_usd": amount,
+            }
+
+    text, keyboard = _transfer_leg_card(
+        headline, transfer_id=transfer_id, amount=amount,
+        from_loc=from_loc, to_loc=to_loc,
+    )
+    await _send_admin(context, text, reply_markup=keyboard)
+    return {
+        "ok": True,
+        "transfer_id": transfer_id,
+        "auto_sent": False,
+        "fee_usd": fee_usd,
+        "amount_usd": amount,
+    }
+
+
+def _transfer_leg_card(
+    headline: str, *, transfer_id: int, amount: float, from_loc: str, to_loc: str,
+) -> tuple[str, object | None]:
+    """Admin card for one journaled leg: Send button when the signer can
+    take it, otherwise the manual /transfer_sent instructions."""
+    import chain
+    import treasury
+
+    chain_visible = to_loc in ("coinbase", "test_wallet") or (
+        to_loc == "kalshi"
+        and bool(getattr(config, "KALSHI_DEPOSIT_ADDRESS", None))
+    )
+    confirm_bit = (
+        " — it confirms itself once the chain shows it"
+        if chain_visible
+        else f" then /transfer_confirm {transfer_id} once Kalshi shows it"
+    )
+    try:
+        check = treasury.signer_check(transfer_id)
+    except Exception:
+        logger.exception("signer check failed for transfer #%s", transfer_id)
+        check = {"ok": False, "reason": "signer_error"}
+
+    dest = check.get("destination") if check.get("ok") else None
+    if dest:
+        text = (
+            f"{headline}\n\n"
+            f"Journaled transfer #{transfer_id}: ${amount:,.2f} USDC "
+            f"{from_loc} → {to_loc} ({dest['address'][:6]}…{dest['address'][-4:]} "
+            f"on {chain.chain_name(dest['chain_id'])}).\n\n"
+            f"Tap Send and the bot signs it from the test wallet{confirm_bit}. "
+            f"Or send by hand and /transfer_sent {transfer_id} <txid>."
+        )
+        return text, telegram_ui.treasury_send_keyboard(
+            transfer_id, amount_usd=amount, to_loc=to_loc
+        )
+
+    # Signer not taking this leg. Only say why when it is a cap — an
+    # unconfigured signer is the normal manual path, not an error.
+    reason = str(check.get("reason") or "")
+    why = ""
+    if reason == "over_leg_cap":
+        why = f" (over the signer's ${float(check.get('cap_usd') or 0):,.0f} per-leg cap — send by hand)"
+    elif reason == "over_daily_cap":
+        why = (
+            f" (signer daily cap ${float(check.get('cap_usd') or 0):,.0f}, "
+            f"${float(check.get('used_usd') or 0):,.0f} used — send by hand)"
+        )
+    text = (
+        f"{headline}\n\n"
+        f"Move ${amount:,.2f} USDC {from_loc} → {to_loc}{why}. "
+        f"Journaled pending transfer #{transfer_id}: "
+        f"/transfer_sent {transfer_id} <txid> after you send{confirm_bit}."
+    )
+    return text, None
+
+
+def _signer_refusal(result: dict) -> str:
+    """Operator-facing line for a refused signer send."""
+    reason = str(result.get("reason") or "")
+    if reason == "not_found":
+        return "No such transfer."
+    if reason == "not_pending":
+        return f"Transfer is already {result.get('status')} — nothing to send."
+    if reason == "already_claimed":
+        tx = result.get("txid")
+        return (
+            f"Already sent{f' (tx {tx})' if tx else ' — broadcast in progress'}."
+        )
+    if reason == "not_from_test_wallet":
+        return "The signer only sends from the test wallet; this leg starts elsewhere."
+    if reason.startswith("signer_no_key") or reason == "signer_bad_key":
+        return "Signer is not configured (TEST_WALLET_PRIVATE_KEY)."
+    if reason == "signer_key_address_mismatch":
+        return "Signer refused: the configured key does not belong to TEST_WALLET_ADDRESS."
+    if reason == "no_allowlisted_destination":
+        return (
+            f"No deposit address/chain configured for {result.get('to_loc')} "
+            "(POOL_DEPOSIT_ADDRESS + POOL_DEPOSIT_CHAIN_ID, or "
+            "KALSHI_DEPOSIT_ADDRESS + KALSHI_DEPOSIT_CHAIN_ID)."
+        )
+    if reason == "over_leg_cap":
+        return (
+            f"${float(result.get('amount_usd') or 0):,.2f} is over the signer's "
+            f"${float(result.get('cap_usd') or 0):,.0f} per-leg cap — send by hand."
+        )
+    if reason == "over_daily_cap":
+        return (
+            f"Signer daily cap ${float(result.get('cap_usd') or 0):,.0f}: "
+            f"${float(result.get('used_usd') or 0):,.2f} used in the last 24h — "
+            "send by hand or wait."
+        )
+    if reason in ("signer_refused", "signer_error"):
+        return f"Signer refused: {result.get('detail')}"
+    return f"Could not send ({reason or 'unknown'})."
+
+
+async def _treasury_send(
+    context: ContextTypes.DEFAULT_TYPE,
+    query,
+    transfer_id: int,
+    *,
+    admin_id: int,
+    headline: str | None = None,
+    auto: bool = False,
+) -> None:
+    """Sign and broadcast a journaled leg, then tell the admins.
+
+    Three callers: the Send button (`query` set), `/transfer_send` (no query,
+    DM the admin), and the automatic deploy path (`auto=True`: no human
+    asked, so every admin gets the outcome, and a refusal falls back to the
+    manual card with the Send button so it can be retried once fixed).
+    """
+    import chain
+    import treasury
+
+    loop = asyncio.get_running_loop()
+    try:
+        result = await loop.run_in_executor(
+            None, lambda: treasury.execute_transfer(transfer_id, admin_id=admin_id)
+        )
+    except Exception:
+        logger.exception("treasury send crashed for #%s", transfer_id)
+        result = {"ok": False, "reason": "signer_error", "detail": "internal error"}
+
+    if result.get("ok"):
+        gas = result.get("gas_topup") or {}
+        gas_bit = ""
+        if gas.get("topped_up"):
+            gas_bit = (
+                f"\nGas top-up: ${float(gas.get('usdc_spent') or 0):,.2f} USDC → "
+                f"ETH on {chain.chain_name(int(gas.get('chain_id') or result['chain_id']))}."
+            )
+        outcome = (
+            f"Sent ${float(result['amount_usd']):,.2f} USDC on "
+            f"{chain.chain_name(int(result['chain_id']))} — {result['explorer']}\n"
+            f"Transfer #{transfer_id} is 'sent'; it confirms once the chain shows "
+            f"{chain.MIN_CONFIRMATIONS} blocks."
+            f"{gas_bit}"
+        )
+    else:
+        outcome = _signer_refusal(result)
+
+    if auto:
+        if result.get("ok"):
+            text = f"{headline}\n\nAuto-sent to the venue. {outcome}"
+            keyboard = None
+        else:
+            row = treasury.get_transfer(transfer_id) or {}
+            text, keyboard = _transfer_leg_card(
+                f"{headline}\n\nAuto-send did not go out: {outcome}",
+                transfer_id=transfer_id,
+                amount=float(row.get("amount_usd") or 0.0),
+                from_loc=str(row.get("from_loc") or "test_wallet"),
+                to_loc=str(row.get("to_loc") or ""),
+            )
+        for other in pool.admin_ids():
+            try:
+                await context.bot.send_message(
+                    other,
+                    telegram_ui.format_admin_message(text),
+                    reply_markup=keyboard,
+                    disable_web_page_preview=True,
+                )
+            except Exception:
+                logger.debug("auto-send notice failed for %s", other, exc_info=True)
+        return
+
+    # Strip the button from the card so a second tap is not even possible,
+    # then report under it.
+    try:
+        if query is not None and query.message is not None:
+            await query.edit_message_reply_markup(reply_markup=None)
+    except Exception:
+        logger.debug("send card unbutton failed", exc_info=True)
+    target = (
+        query.message.chat_id
+        if query is not None and query.message is not None
+        else admin_id
+    )
+    try:
+        await context.bot.send_message(
+            target,
+            telegram_ui.format_admin_message(outcome),
+            disable_web_page_preview=True,
+        )
+    except Exception:
+        logger.exception("treasury send outcome DM failed")
+    # Every admin hears about money moving, not just the one who tapped.
+    if result.get("ok"):
+        for other in pool.admin_ids():
+            if other == target:
+                continue
+            try:
+                await context.bot.send_message(
+                    other,
+                    telegram_ui.format_admin_message(f"Admin {admin_id}: {outcome}"),
+                    disable_web_page_preview=True,
+                )
+            except Exception:
+                logger.debug("send fan-out failed for %s", other, exc_info=True)
 
 
 def _pool_hq_accept(offer_id: str, user_id: int) -> tuple[str, object | None]:
@@ -462,6 +894,12 @@ def _pool_kalshi_accept(
             "your reservation is held while we check. You'll hear back here "
             "shortly; nothing further to do."
         ), None
+    if reason == "already_recorded":
+        return (
+            "You're already in this window — autopilot (or an earlier "
+            "Accept) took it for you. One entry per window; the result "
+            "lands here at settlement."
+        ), None
     if reason in ("not_enabled", "ledger_unavailable"):
         return (
             "Kalshi ideas are feed-only for now — accepting into this lane "
@@ -591,6 +1029,10 @@ async def _handle_chart(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
         await _reply(update, "Sorry, I could not send the chart image right now.")
         return
 
+    user = update.effective_user
+    if user is not None and _is_pool_user(user.id):
+        await _reply(update, view.watch_summary[:4096])
+        return
     spot = research.get_spot_price()
     pnl = paper.format_pnl_footer(spot)
     await _reply(update, f"{view.watch_summary}\n\n{pnl}"[:4096])
@@ -1029,19 +1471,30 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
             except ValueError:
                 return
 
+            moved: dict[str, float] = {}
+
             def _alloc() -> str:
                 bal = pool.wallet_balance(user_id)
                 # Deploy from undeployed wallet, not total available cash.
                 base = float(bal.get("wallet_usd") or 0)
                 current = pool.get_allocation(user_id, key)
+                # Leave room for the flat deploy fee so 100% still ships a
+                # full venue allocation without failing the fee check.
+                fee = pool.deploy_fee_usd()
+                deployable_base = max(0.0, base - fee) if fee > 0 else base
                 # Percent of (wallet + current) so 100% can re-commit everything
                 # already sitting on this strategy plus free wallet.
-                amount = round((base + current) * pct / 100.0, 2)
+                amount = round((deployable_base + current) * pct / 100.0, 2)
                 if amount <= 0:
                     return (
                         "No wallet USDC to deploy — tap Fund to top up."
                     )
                 result = pool.set_allocation(user_id, key, amount)
+                if result.get("ok"):
+                    moved["delta"] = float(result.get("delta_usd") or 0.0)
+                    moved["previous"] = float(result.get("previous_usd") or 0.0)
+                    moved["amount"] = float(result.get("amount_usd") or amount)
+                    moved["fee"] = float(result.get("fee_usd") or 0.0)
                 if not result.get("ok"):
                     reason = result.get("reason")
                     if reason == "below_min_deploy":
@@ -1050,20 +1503,38 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
                             f"${float(result.get('minimum_usd') or 0):,.0f}."
                         )
                     if reason in ("exceeds_wallet", "exceeds_cash"):
+                        fee_need = float(result.get("fee_usd") or 0)
+                        fee_bit = (
+                            f" (includes ${fee_need:,.2f} network fee)"
+                            if fee_need > 0 else ""
+                        )
                         return (
-                            "Not enough wallet USDC for that deploy — "
+                            "Not enough wallet USDC for that deploy"
+                            f"{fee_bit} — "
                             f"max about ${float(result.get('max_usd') or 0):,.2f}."
                         )
                     return f"Could not deploy ({reason})."
                 pool.subscribe_strategy(user_id, key)
-                risk = amount * float(bot_config.POOL_RISK_PCT)
+                fee_charged = float(moved.get("fee") or 0)
+                if pct >= 100 and fee_charged > 0:
+                    pct_line = (
+                        f"100% of wallet after the ${fee_charged:,.2f} "
+                        "network fee"
+                    )
+                elif fee_charged > 0:
+                    pct_line = (
+                        f"{pct}% of wallet available after the "
+                        f"${fee_charged:,.2f} network fee"
+                    )
+                else:
+                    pct_line = f"{pct}% of wallet available"
                 text = (
                     f"Deployed ${amount:,.2f} into {strat.label} "
-                    f"({pct}% of wallet available).\n\n"
-                    f"Each Accept on its cards now risks about ${risk:,.2f} "
-                    f"({bot_config.POOL_RISK_PCT * 100:.1f}% of the "
-                    "deployment) at the stop."
+                    f"({pct_line}).\n\n"
+                    + _deploy_risk_copy(key, amount)
                 )
+                if fee_charged > 0 and float(moved.get("delta") or 0) > 0:
+                    text += "\n\n" + _deploy_fee_copy(amount, fee_charged)
                 if not strategy_catalog.is_executable(key):
                     text += (
                         "\n\nIdea feed only for now — accepting into this "
@@ -1076,6 +1547,78 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
             except Exception:
                 logger.exception("subscribe alloc failed for %s", key)
                 reply = "Could not allocate — try again."
+            else:
+                # Deployed money has to physically reach the venue before
+                # Accepts can size against it — journal the move and card
+                # admins while the user still thinks their money is working.
+                if reply.startswith("Deployed ") and moved:
+                    try:
+                        routed = await _route_deployed_capital(
+                            context,
+                            user_id=user_id,
+                            strategy_key=key,
+                            delta_usd=moved["delta"],
+                            previous_usd=moved.get("previous"),
+                        )
+                        if not routed.get("ok") and routed.get("user_message"):
+                            reply = str(routed["user_message"])
+                        elif routed.get("ok"):
+                            reply = _append_deploy_fee_copy(
+                                reply,
+                                float(moved.get("amount") or 0),
+                                float(routed.get("fee_usd") or 0),
+                            )
+                    except Exception:
+                        logger.exception(
+                            "post-deploy capital routing failed"
+                        )
+        elif action == "auto" and len(parts) > 3 and parts[3] in ("on", "off"):
+
+            def _toggle_autopilot() -> tuple[str, object | None]:
+                if not strategy_catalog.is_executable(key):
+                    return (
+                        "This lane can't execute with real capital yet, so "
+                        "autopilot has nothing to fly. You're still "
+                        "subscribed to its ideas.",
+                        None,
+                    )
+                turning_on = parts[3] == "on"
+                pool.set_autopilot(user_id, key, turning_on)
+                markup = telegram_ui.alloc_keyboard(key, autopilot=turning_on)
+                if not turning_on:
+                    return (
+                        f"Autopilot OFF for {strat.label}. You'll keep "
+                        "getting its cards — only trades you Accept yourself "
+                        "will enter.",
+                        markup,
+                    )
+                alloc = pool.get_allocation(user_id, key)
+                pct = float(bot_config.POOL_KALSHI_RISK_PCT) * 100
+                text = (
+                    f"Autopilot ON for {strat.label} — every trade this lane "
+                    "takes is now entered for you automatically, within a "
+                    "minute of the bot's own entry.\n\n"
+                    "Each entry is your own position, sized like a manual "
+                    f"Accept: at most {pct:.0f}% of your deployment buys "
+                    "that window's contracts, and the cost is the entire "
+                    "risk. You get a DM on every fill and every settlement. "
+                    "Tap the button again any time to turn it off."
+                )
+                if alloc <= 0:
+                    text += (
+                        "\n\nNothing is deployed to this lane yet, so "
+                        "autopilot is idle — pick an amount below and it "
+                        "goes to work on the next window."
+                    )
+                return text, markup
+
+            try:
+                reply, reply_markup = await loop.run_in_executor(
+                    None, _toggle_autopilot
+                )
+            except Exception:
+                logger.exception("autopilot toggle failed for %s", key)
+                reply = "Could not change autopilot — try again."
         elif action == "skip":
             reply = (
                 f"No allocation set for {strat.label} — you'll still get its "
@@ -1107,7 +1650,13 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
             and strategy_catalog.is_executable(strategy_key)
             and _pool_live(user_id)
         )
-        if executable:
+        if action == "reject":
+            reply, keyboard = (
+                "Skipped — nothing reserved. Autopilot (if on) still rides "
+                "the next window; turn it off under Strategies.",
+                None,
+            )
+        elif executable:
             loop = asyncio.get_running_loop()
             try:
                 reply, keyboard = await loop.run_in_executor(
@@ -1222,6 +1771,16 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
             except Exception:
                 logger.debug("Deny DM failed for %s", target_id, exc_info=True)
             await context.bot.send_message(chat_id, f"Denied {target_id}.")
+        return
+
+    if data.startswith(telegram_ui.CB_TREASURY_SEND_PREFIX):
+        if not pool.is_admin(user_id):
+            return
+        try:
+            transfer_id = int(data[len(telegram_ui.CB_TREASURY_SEND_PREFIX):])
+        except ValueError:
+            return
+        await _treasury_send(context, query, transfer_id, admin_id=user_id)
         return
 
     if data.startswith(telegram_ui.CB_POOL_UNSUB_PREFIX):
@@ -1892,6 +2451,17 @@ async def cmd_help(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     )
 
 
+def _autopilot_state(user_id: int, key: str) -> bool | None:
+    """Autopilot toggle state for the subscribe prompt.
+
+    None hides the toggle — only lanes an Accept can actually execute get
+    the offer, so autopilot is never promised where it cannot act.
+    """
+    if not strategy_catalog.is_executable(key):
+        return None
+    return pool.autopilot_enabled(user_id, key)
+
+
 def _subscribe_and_prompt(user_id: int, key: str) -> tuple[str, object]:
     """Subscribe (idempotent) and build the allocation question (sync)."""
     strat = strategy_catalog.STRATEGIES[key]
@@ -1907,7 +2477,17 @@ def _subscribe_and_prompt(user_id: int, key: str) -> tuple[str, object]:
     text = header + "\n\n" + strategy_catalog.allocation_prompt(
         key, p, current_alloc=alloc
     )
-    return text[:4096], telegram_ui.alloc_keyboard(key)
+    autopilot = _autopilot_state(user_id, key)
+    if autopilot is not None:
+        text += (
+            "\n\nAutopilot is ON — every trade this lane takes is entered "
+            "for you automatically from your deployment."
+            if autopilot else
+            "\n\nPrefer hands-free? Autopilot enters you into every trade "
+            "this lane takes, sized exactly like an Accept — your own "
+            "position, your own deployment, no tap needed."
+        )
+    return text[:4096], telegram_ui.alloc_keyboard(key, autopilot=autopilot)
 
 
 def _subscribe_picker_text(user_id: int) -> str:
@@ -1918,7 +2498,7 @@ def _subscribe_picker_text(user_id: int) -> str:
         "and you can allocate capital to it now or later.",
         "",
     ]
-    for key in strategy_catalog.ORDER:
+    for key in strategy_catalog.VISIBLE:
         strat = strategy_catalog.STRATEGIES[key]
         mark = "✓ " if key in subs else ""
         line = f"{mark}{strat.label} — {strat.pitch}"
@@ -1988,25 +2568,39 @@ async def cmd_allocate(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
     key = args[0].lower()
 
     loop = asyncio.get_running_loop()
+    moved: dict[str, float] = {}
 
     def _apply() -> str:
         p = pool.portfolio(user.id)
         if not p.get("ok"):
             return "Fund your account first — /deposit."
         if args[1].lower() == "all":
-            amount = float(p.get("available_usd") or 0)
+            # Leave room for the flat deploy fee on a full recommit.
+            fee = pool.deploy_fee_usd()
+            wallet = float(p.get("wallet_usd") or 0)
+            current = float(pool.get_allocation(user.id, key) or 0)
+            amount = round(max(0.0, wallet - fee) + current, 2)
         else:
             try:
                 amount = float(args[1].replace("$", "").replace(",", ""))
             except ValueError:
                 return "Amount must be a number, e.g. /allocate ict 250."
         result = pool.set_allocation(user.id, key, amount)
+        if result.get("ok"):
+            moved["delta"] = float(result.get("delta_usd") or 0.0)
+            moved["previous"] = float(result.get("previous_usd") or 0.0)
+            moved["amount"] = float(result.get("amount_usd") or amount)
         if not result.get("ok"):
             reason = result.get("reason")
-            if reason == "exceeds_cash":
+            if reason == "exceeds_cash" or reason == "exceeds_wallet":
+                fee_need = float(result.get("fee_usd") or 0)
+                fee_bit = (
+                    f" (includes ${fee_need:,.2f} network fee)"
+                    if fee_need > 0 else ""
+                )
                 return (
-                    f"That's more than your cash "
-                    f"(${float(result.get('cash_usd') or 0):,.2f}). "
+                    f"That's more than your wallet{fee_bit} "
+                    f"(max about ${float(result.get('max_usd') or result.get('cash_usd') or 0):,.2f}). "
                     "Allocate up to your balance."
                 )
             if reason == "not_funded":
@@ -2014,13 +2608,10 @@ async def cmd_allocate(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
             return f"Could not allocate ({reason})."
         pool.subscribe_strategy(user.id, key)
         strat = strategy_catalog.STRATEGIES[key]
-        risk = amount * float(bot_config.POOL_RISK_PCT)
         lines = [
             f"Allocated ${amount:,.2f} to {strat.label}.",
             "",
-            f"Each Accept on its cards now risks about ${risk:,.2f} "
-            f"({bot_config.POOL_RISK_PCT * 100:.1f}% of the allocation) at "
-            "the stop.",
+            _deploy_risk_copy(key, amount),
         ]
         if not strategy_catalog.is_executable(key):
             lines.append(
@@ -2035,6 +2626,27 @@ async def cmd_allocate(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         logger.exception("allocate failed")
         text = "Could not allocate — try again."
     await _reply(update, text)
+    if text.startswith("Allocated ") and moved:
+        try:
+            routed = await _route_deployed_capital(
+                context,
+                user_id=user.id,
+                strategy_key=key,
+                delta_usd=moved["delta"],
+                previous_usd=moved.get("previous"),
+            )
+            if not routed.get("ok") and routed.get("user_message"):
+                await _reply(update, str(routed["user_message"]))
+            elif routed.get("ok") and float(routed.get("fee_usd") or 0) > 0:
+                await _reply(
+                    update,
+                    _deploy_fee_copy(
+                        float(moved.get("amount") or 0),
+                        float(routed.get("fee_usd") or 0),
+                    ),
+                )
+        except Exception:
+            logger.exception("post-allocate capital routing failed")
 
 
 async def cmd_brain(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -2091,6 +2703,46 @@ async def cmd_status(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
 
     if not access.is_allowed(user.id):
         await _handle_gated_user(update, context)
+        return
+
+    # Pool users: their book + latest idea — never the house Paper PnL footer.
+    if _is_pool_user(user.id):
+        if update.message is not None:
+            await update.message.chat.send_action("typing")
+        loop = asyncio.get_running_loop()
+
+        def _load_pool_status() -> str:
+            spots = research.get_spot_prices()
+            lines = [telegram_ui.format_portfolio(pool.portfolio(user.id, spots))]
+            latest = ledger.get_latest_trade_suggestion() or ledger.get_latest_suggestion()
+            if latest:
+                product = latest.get("product_id") or "ETH-USD"
+                tps = ", ".join(
+                    f"{tp:,.2f}" for tp in latest.get("take_profits", [])
+                ) or "n/a"
+                lines.extend(
+                    [
+                        "",
+                        "--- Latest suggestion ---",
+                        f"Cycle: {latest['cycle_id']} ({latest.get('ts', '')})",
+                        f"Asset: {bot_config.product_label(product)}",
+                        f"Action: {latest['action']}",
+                        f"Entry: {latest.get('entry')} | SL: {latest.get('stop_loss')} | TP: {tps}",
+                    ]
+                )
+            return "\n".join(lines)
+
+        try:
+            body = await loop.run_in_executor(None, _load_pool_status)
+        except Exception:
+            logger.exception("Pool status failed for %s", user.id)
+            await _reply(update, "Could not load your status right now.")
+            return
+        await _reply(
+            update,
+            body[:4096],
+            reply_markup=telegram_ui.pool_account_keyboard(),
+        )
         return
 
     spots = research.get_spot_prices()
@@ -2216,7 +2868,14 @@ async def cmd_portfolio(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
 
     def _load() -> str:
         spots = research.get_spot_prices()
-        return telegram_ui.format_portfolio(pool.portfolio(user.id, spots))
+        p = pool.portfolio(user.id, spots)
+        if p.get("ok"):
+            try:
+                import counterfactual
+                p["autopilot_what_if"] = counterfactual.autopilot_what_if(user.id)
+            except Exception:
+                logger.exception("Autopilot what-if failed for %s", user.id)
+        return telegram_ui.format_portfolio(p)
 
     try:
         text = await loop.run_in_executor(None, _load)
@@ -2329,20 +2988,16 @@ async def cmd_deposit(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
         if inbound > amount
         else ""
     )
-    for admin_id in pool.admin_ids():
-        try:
-            await context.bot.send_message(
-                admin_id,
-                f"Deposit request #{request_id}: {name} (id {user.id}) says they "
-                f"sent ${amount:,.2f}.{txid_line}{wallet_line}{inbound_line}\n\n"
-                "FYI only — the watcher credits this automatically the moment "
-                "the transfer settles on Coinbase, and tells them. Credit below "
-                "only if you want it booked before it has arrived, which gives "
-                "them a claim the venue cannot yet cover.",
-                reply_markup=telegram_ui.pool_admin_deposit_keyboard(request_id),
-            )
-        except Exception:
-            logger.exception("Deposit admin ping failed for %s", admin_id)
+    await _send_admin(
+        context,
+        f"Deposit request #{request_id}: {name} (id {user.id}) says they "
+        f"sent ${amount:,.2f}.{txid_line}{wallet_line}{inbound_line}\n\n"
+        "FYI only — the watcher credits this automatically the moment "
+        "the transfer settles on Coinbase, and tells them. Credit below "
+        "only if you want it booked before it has arrived, which gives "
+        "them a claim the venue cannot yet cover.",
+        reply_markup=telegram_ui.pool_admin_deposit_keyboard(request_id),
+    )
 
 
 def _format_idea_scan(rows: list[dict], telegram_id: int) -> str:
@@ -2769,6 +3424,12 @@ async def cmd_wallet(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
             "Send your deposit from this wallet — that's what confirms it's "
             "yours, and withdrawals return here and nowhere else. Check it "
             "carefully; /wallet shows it any time.\n\n"
+            "If this is an exchange deposit address (Coinbase.com, Binance, "
+            "Kraken…) rather than a wallet you hold the keys to, re-register "
+            "with your own wallet before funding — exchanges send from their "
+            "own addresses, so the deposit won't match and we can't pay out "
+            "to an exchange.\n\n"
+            f"If something doesn't work, reach out at {config.EVA_WEBSITE_URL}\n\n"
             "Next: /deposit",
         )
         return
@@ -2784,22 +3445,18 @@ async def cmd_wallet(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
         "exists for exactly this reason.",
     )
     name = f"@{user.username}" if user.username else str(user.id)
-    for admin_id in pool.admin_ids():
-        try:
-            await context.bot.send_message(
-                admin_id,
-                f"Payout address change: {name} (id {user.id})\n\n"
-                f"from `{result.get('previous')}`\n"
-                f"to   `{result['address']}`\n\n"
-                "Confirm out-of-band that this is really them before approving "
-                "— re-pointing the payout address is what an account takeover "
-                f"would do first. Approval holds their withdrawals {hours:.0f}h.",
-                reply_markup=telegram_ui.pool_admin_wallet_keyboard(
-                    int(result["request_id"])
-                ),
-            )
-        except Exception:
-            logger.exception("Wallet-change admin ping failed for %s", admin_id)
+    await _send_admin(
+        context,
+        f"Payout address change: {name} (id {user.id})\n\n"
+        f"from `{result.get('previous')}`\n"
+        f"to   `{result['address']}`\n\n"
+        "Confirm out-of-band that this is really them before approving "
+        "— re-pointing the payout address is what an account takeover "
+        f"would do first. Approval holds their withdrawals {hours:.0f}h.",
+        reply_markup=telegram_ui.pool_admin_wallet_keyboard(
+            int(result["request_id"])
+        ),
+    )
 
 
 async def cmd_withdraw(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -2933,27 +3590,19 @@ async def cmd_withdraw(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         markdown=True,
     )
 
-    for admin in pool.admin_ids():
-        try:
-            await context.bot.send_message(
-                admin,
-                f"Withdrawal #{wid}: *${amount:,.2f}* for "
-                f"`{user.id}` ({user.username or 'no handle'})\n"
-                f"To: `{result['address']}`\n"
-                f"Balance after hold: ${float(result['cash_usd']):,.2f}"
-                + ("\n\n_Auto-approved — within caps, destination verified. "
-                   "Sending on the next pass._" if auto else ""),
-                parse_mode="Markdown",
-                # No Approve/Deny on an auto-approved payout: those buttons
-                # only act on a `requested` row, so offering them would be
-                # offering control that is not there.
-                reply_markup=(
-                    None if auto
-                    else telegram_ui.pool_admin_withdrawal_keyboard(wid)
-                ),
-            )
-        except Exception:
-            logger.exception("Withdrawal admin card failed for %s", admin)
+    await _send_admin(
+        context,
+        f"Withdrawal #{wid}: ${amount:,.2f} for "
+        f"{user.id} ({user.username or 'no handle'})\n"
+        f"To: {result['address']}\n"
+        f"Balance after hold: ${float(result['cash_usd']):,.2f}"
+        + ("\n\nAuto-approved — within caps, destination verified. "
+           "Sending on the next pass." if auto else ""),
+        reply_markup=(
+            None if auto
+            else telegram_ui.pool_admin_withdrawal_keyboard(wid)
+        ),
+    )
 
 
 def _withdrawal_refusal(result: dict, maximum: float) -> str:
@@ -3050,8 +3699,13 @@ async def cmd_assign(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
                 f"   hash {row['txid']}  seen {row['first_seen_at']}"
             )
         for row in pending_tw:
+            network = ""
+            if row.get("chain_id"):
+                import chain
+
+                network = f" ({chain.chain_name(int(row['chain_id']))})"
             lines.append(
-                f"${float(row['amount_usd']):,.2f} — test wallet\n"
+                f"${float(row['amount_usd']):,.2f} — test wallet{network}\n"
                 f"   hash {row['txid']}  from {row['sender']}  "
                 f"seen {row['first_seen_at']}"
             )
@@ -3077,14 +3731,40 @@ async def cmd_assign(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
         return
 
     amount = float(result["amount_usd"])
-    await _reply(update, f"Assigned ${amount:,.2f} to {target}.")
-    try:
-        await context.bot.send_message(
-            target,
-            f"Deposit received: ${amount:,.2f} USDC.\n"
-            f"Cash balance: ${float(result.get('cash_usd') or 0):,.2f}.\n\n"
-            "You can Accept trade cards now — /portfolio any time.",
+    # A test-wallet arrival assigned by hand came from an address the user
+    # never registered — almost always an exchange withdrawal. Say so to both
+    # sides now, not when /withdraw refuses them later.
+    unproven = (
+        "sender_is_registered" in result and not result["sender_is_registered"]
+    )
+    admin_note = (
+        f"Assigned ${amount:,.2f} to {target}."
+        + (
+            f"\n\nSender {result.get('sender')} is not their registered wallet "
+            "— withdrawals stay blocked until a deposit arrives from the "
+            "wallet they registered (or they re-register the real sender, "
+            "if it is a wallet they control and not an exchange)."
+            if unproven else ""
         )
+    )
+    await _reply(update, admin_note)
+    user_note = (
+        f"Deposit received: ${amount:,.2f} USDC.\n"
+        f"Cash balance: ${float(result.get('cash_usd') or 0):,.2f}.\n\n"
+        "You can Accept trade cards now — /portfolio any time."
+    )
+    if unproven:
+        user_note += (
+            "\n\nOne thing to sort out: this deposit did not come from the "
+            "wallet you registered — it looks like it was sent from an "
+            "exchange account. Your money is credited and safe, but "
+            "withdrawals only go to a wallet we've seen you deposit from, "
+            "and we can't pay out to an exchange's address. To unlock "
+            "withdrawals, send any amount (even the minimum) from your own "
+            "wallet — the one you registered with /wallet."
+        )
+    try:
+        await context.bot.send_message(target, user_note)
     except Exception:
         logger.exception("Assign DM failed for %s", target)
 
@@ -3108,10 +3788,11 @@ async def cmd_treasury(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
 async def cmd_transfer(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Admin: /transfer <from> <to> <amount> — journal an intended move.
 
-    The bot never moves funds; the operator does, from the wallet or venue UI.
     This records the intention first so a movement without a journal row is
-    impossible to do by the book — then /transfer_sent with the hash, and the
-    chain sweep (or /transfer_confirm for Kalshi) closes it out.
+    impossible to do by the book. Then either the operator moves the funds
+    and /transfer_sent's the hash, or — for test_wallet → venue legs with the
+    signer configured — taps Send on the card / runs /transfer_send <id>.
+    The chain sweep (or /transfer_confirm for Kalshi) closes it out.
     """
     user = update.effective_user
     if user is None or update.message is None or not pool.is_admin(user.id):
@@ -3138,12 +3819,31 @@ async def cmd_transfer(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
     if not result.get("ok"):
         await _reply(update, f"Refused ({result.get('reason')}).")
         return
-    await _reply(
-        update,
-        f"Transfer #{result['transfer_id']} journaled: {args[0]} → {args[1]} "
-        f"${amount:,.2f}.\nMove the funds, then /transfer_sent "
-        f"{result['transfer_id']} <txid> (txid optional for Kalshi legs).",
+    transfer_id = int(result["transfer_id"])
+    text, keyboard = _transfer_leg_card(
+        f"Transfer #{transfer_id} journaled.",
+        transfer_id=transfer_id, amount=amount,
+        from_loc=str(args[0]).lower(), to_loc=str(args[1]).lower(),
     )
+    await _reply(update, text, reply_markup=keyboard)
+
+
+async def cmd_transfer_send(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Admin: /transfer_send <id> — have the signer broadcast a journaled
+    test_wallet → venue leg. Same path as the Send button."""
+    user = update.effective_user
+    if user is None or update.message is None or not pool.is_admin(user.id):
+        return
+    args = context.args or []
+    if not args:
+        await _reply(update, "Usage: /transfer_send <id>")
+        return
+    try:
+        transfer_id = int(args[0])
+    except ValueError:
+        await _reply(update, "Transfer id must be a number.")
+        return
+    await _treasury_send(context, None, transfer_id, admin_id=user.id)
 
 
 async def _transfer_state_cmd(
@@ -3356,10 +4056,25 @@ async def cmd_users(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         if status == "approved":
             cash = float(row.get("cash_usd") or 0)
             reserved = float(row.get("reserved_usd") or 0)
+            deploys = {
+                str(k): float(v)
+                for k, v in (row.get("deployments") or {}).items()
+                if float(v) >= 0.01
+            }
+            deployed = sum(deploys.values())
             lines.append(
                 f"  {tid}  {handle_s}  cash ${cash:,.2f}"
                 + (f"  reserved ${reserved:,.2f}" if reserved >= 0.01 else "")
+                + (f"  deployed ${deployed:,.2f}" if deployed >= 0.01 else "")
             )
+            if deploys:
+                # Strategy keys, not labels — matches what /assign takes.
+                lines.append(
+                    "      "
+                    + " · ".join(
+                        f"{k} ${v:,.2f}" for k, v in sorted(deploys.items())
+                    )
+                )
         else:
             lines.append(f"  {tid}  {handle_s}")
     lines.append("")
@@ -3540,9 +4255,15 @@ async def on_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
             )
             return
 
+        moved: dict[str, float] = {}
+
         def _deploy() -> str:
             pool.subscribe_strategy(user.id, str(deploy_key))
             result = pool.set_allocation(user.id, str(deploy_key), amount)
+            if result.get("ok"):
+                moved["delta"] = float(result.get("delta_usd") or 0.0)
+                moved["previous"] = float(result.get("previous_usd") or 0.0)
+                moved["amount"] = float(result.get("amount_usd") or amount)
             if not result.get("ok"):
                 reason = result.get("reason")
                 if reason == "below_min_deploy":
@@ -3550,21 +4271,43 @@ async def on_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
                         f"Minimum deploy is ${float(result.get('minimum_usd') or 0):,.0f}."
                     )
                 if reason in ("exceeds_wallet", "exceeds_cash"):
+                    fee_need = float(result.get("fee_usd") or 0)
+                    fee_bit = (
+                        f" (includes ${fee_need:,.2f} network fee)"
+                        if fee_need > 0 else ""
+                    )
                     return (
-                        f"Not enough wallet USDC — available about "
-                        f"${float(result.get('wallet_usd') or result.get('max_usd') or 0):,.2f}."
+                        f"Not enough wallet USDC{fee_bit} — available about "
+                        f"${float(result.get('max_usd') or result.get('wallet_usd') or 0):,.2f}."
                     )
                 return f"Could not deploy ({reason})."
             label = strategy_catalog.STRATEGIES[str(deploy_key)].label
-            risk = amount * float(bot_config.POOL_RISK_PCT)
             return (
                 f"Deployed ${amount:,.2f} into {label}.\n\n"
-                f"Each Accept now risks about ${risk:,.2f} "
-                f"({bot_config.POOL_RISK_PCT * 100:.1f}%). "
-                "Cards for this strategy will arrive here."
+                + _deploy_risk_copy(str(deploy_key), amount)
+                + "\nCards for this strategy will arrive here."
             )
 
         text = await asyncio.get_running_loop().run_in_executor(None, _deploy)
+        if text.startswith("Deployed ") and moved:
+            try:
+                routed = await _route_deployed_capital(
+                    context,
+                    user_id=user.id,
+                    strategy_key=str(deploy_key),
+                    delta_usd=moved["delta"],
+                    previous_usd=moved.get("previous"),
+                )
+                if not routed.get("ok") and routed.get("user_message"):
+                    text = str(routed["user_message"])
+                elif routed.get("ok"):
+                    text = _append_deploy_fee_copy(
+                        text,
+                        float(moved.get("amount") or amount),
+                        float(routed.get("fee_usd") or 0),
+                    )
+            except Exception:
+                logger.exception("post-typed-deploy capital routing failed")
         await _reply(
             update, text, reply_markup=telegram_ui.pool_main_keyboard()
         )
@@ -3583,14 +4326,20 @@ async def on_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         return
 
     if _is_me_query(user_text):
-        await _handle_me(update, context)
+        if _is_pool_user(user.id):
+            await cmd_portfolio(update, context)
+        else:
+            await _handle_me(update, context)
         return
 
     await update.message.chat.send_action("typing")
 
     loop = asyncio.get_running_loop()
     try:
-        reply = await loop.run_in_executor(None, chat.answer, user_text)
+        reply = await loop.run_in_executor(
+            None,
+            lambda: chat.answer(user_text, telegram_id=user.id),
+        )
     except Exception:
         logger.exception("Chat handler failed")
         reply = "Sorry, something went wrong processing your message."
@@ -3600,11 +4349,20 @@ async def on_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         cycle_id = str(latest["cycle_id"]) if latest else None
 
         def _refine_chat() -> tuple[str, object]:
+            # The user's account block rides along as audit ground truth, so a
+            # true answer about their own trades ("entry 70c, +$3.70") is not
+            # flagged against a market snapshot that cannot know it.
+            try:
+                account_ctx = chat.account_facts(user.id)
+            except Exception:
+                logger.exception("chat audit: account facts failed for %s", user.id)
+                account_ctx = None
             return critic.refine_chat_reply(
                 user.id,
                 user_text,
                 reply,
                 cycle_id=cycle_id,
+                account_context=account_ctx,
             )
 
         reply, verdict = await loop.run_in_executor(None, _refine_chat)
@@ -3749,6 +4507,7 @@ def build_application() -> Application:
     app.add_handler(CommandHandler("assign", cmd_assign))
     app.add_handler(CommandHandler("treasury", cmd_treasury))
     app.add_handler(CommandHandler("transfer", cmd_transfer))
+    app.add_handler(CommandHandler("transfer_send", cmd_transfer_send))
     app.add_handler(CommandHandler("transfer_sent", cmd_transfer_sent))
     app.add_handler(CommandHandler("transfer_confirm", cmd_transfer_confirm))
     app.add_handler(CommandHandler("transfer_cancel", cmd_transfer_cancel))

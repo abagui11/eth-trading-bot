@@ -17,3 +17,9 @@ feedparser==6.0.11
 # Live execution: CDP JWT signing for the Coinbase Deribit gateway
 PyJWT==2.10.1
 cryptography>=42.0.0
+# Treasury hot-wallet signer (signer.py): EIP-1559 USDC transfers from the
+# test wallet to the two venue deposit addresses. Only used when
+# TEST_WALLET_PRIVATE_KEY is set.
+eth-account>=0.13,<0.14
+eth-abi>=5.0,<7
+eth-utils>=4.0,<6

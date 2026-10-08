@@ -77,6 +77,9 @@ class AltcoinSectionTests(unittest.TestCase):
             positions=[
                 _closed(1, "eva_wick", "KXBTC15M-A",
                         "2026-09-29T10:00:00Z", "2026-09-29T10:15:00Z", 2.0),
+                # Paper sleeve trade — must not appear in the live-only feed.
+                _closed(10, "eva_streak", "KXETH15M-PAPER",
+                        "2026-09-29T12:00:00Z", "2026-09-29T12:15:00Z", 1.0),
                 # Altcoin trades are newer, so an unfiltered feed would show
                 # only these.
                 _closed(2, "eva_wick_xrp", "KXXRP15M-A",
@@ -88,6 +91,7 @@ class AltcoinSectionTests(unittest.TestCase):
                         "2026-09-30T11:00:00Z", "2026-09-30T11:15:00Z", 5.0),
                 _open(5, "eva_wick_sol", "KXSOL15M-B", "2026-09-30T11:30:00Z"),
                 _open(6, "eva_wick", "KXBTC15M-B", "2026-09-30T11:30:00Z"),
+                _open(7, "eva_streak", "KXETH15M-OPEN", "2026-09-30T11:45:00Z"),
             ],
         )
         self._patches = [
@@ -130,6 +134,38 @@ class AltcoinSectionTests(unittest.TestCase):
             ["KXBTC15M-B"],
         )
 
+    def test_paper_sleeve_trades_stay_out_of_the_live_feed(self) -> None:
+        """Open/closed lists are live books only — streak stays in comparison."""
+        bots = {p["bot_id"] for p in self.payload["closed"]} | {
+            p["bot_id"] for p in self.payload["open"]
+        }
+        self.assertEqual(bots, {"eva_wick"})
+        self.assertNotIn(
+            "KXETH15M-PAPER",
+            [p["market_ticker"] for p in self.payload["closed"]],
+        )
+        # Comparison table still shows the paper sleeve.
+        self.assertIn(
+            "eva_streak",
+            [b["bot_id"] for b in self.payload["bots"]],
+        )
+
+    def test_closed_feed_paginates(self) -> None:
+        with patch.object(
+            kalshi_bridge, "live_bots", lambda: ("eva_wick", "eva_wick_sol"),
+        ):
+            page1 = kalshi_bridge.performance_payload(limit=1, offset=0)
+            page2 = kalshi_bridge.performance_payload(limit=1, offset=1)
+        self.assertEqual(page1["closed_total"], 2)
+        self.assertTrue(page1["closed_has_more"])
+        self.assertEqual(len(page1["closed"]), 1)
+        self.assertEqual(len(page2["closed"]), 1)
+        self.assertNotEqual(
+            page1["closed"][0]["market_ticker"],
+            page2["closed"][0]["market_ticker"],
+        )
+        self.assertFalse(page2["closed_has_more"])
+
     def test_records_match_the_ledger(self) -> None:
         by_id = {b["bot_id"]: b for b in self.payload["altcoins"]["bots"]}
         xrp = by_id["eva_wick_xrp"]
@@ -151,19 +187,38 @@ class AltcoinSectionTests(unittest.TestCase):
         for row in self.payload["altcoins"]["bots"]:
             self.assertEqual(row["mode"], "paper")
 
-    def test_whitelisted_clone_renders_live(self) -> None:
-        """SOL was released 2026-10-01; the hub whitelist mirrors the bot's."""
+    def test_released_clone_is_promoted_to_the_main_table(self) -> None:
+        """SOL was released 2026-10-01: a real-money book belongs in the main
+        comparison and trade feeds, not in a shadow card that brands itself
+        paper. Unreleased clones stay where they are."""
         with patch.object(
             kalshi_bridge, "live_bots", lambda: ("eva_wick", "eva_wick_sol"),
         ):
             payload = kalshi_bridge.performance_payload(limit=15)
-        modes = {r["bot_id"]: r["mode"] for r in payload["altcoins"]["bots"]}
-        self.assertEqual(modes.get("eva_wick_sol"), "live")
-        for bot_id, mode in modes.items():
-            if bot_id != "eva_wick_sol":
-                self.assertEqual(mode, "paper")
-        # Clones stay in their own table, out of the main live totals.
-        self.assertEqual(payload["totals"]["label"], "EVA wick")
+        sol = next(b for b in payload["bots"] if b["bot_id"] == "eva_wick_sol")
+        self.assertEqual(sol["mode"], "live")
+        self.assertEqual(sol["label"], "EVA wick · SOL")
+        # Stats still count from the altcoin switch-on, not the sleeve epoch.
+        self.assertEqual((sol["closed"], sol["wins"]), (1, 1))
+        # The shadow card keeps only the books still earning their record.
+        self.assertEqual(
+            [b["bot_id"] for b in payload["altcoins"]["bots"]],
+            ["eva_wick_xrp", "eva_wick_hype"],
+        )
+        # SOL trades join the shared feeds alongside BTC/ETH...
+        self.assertEqual(
+            [p["market_ticker"] for p in payload["closed"]],
+            ["KXSOL15M-A", "KXBTC15M-A"],
+        )
+        self.assertEqual(
+            sorted(p["market_ticker"] for p in payload["open"]),
+            ["KXBTC15M-B", "KXSOL15M-B"],
+        )
+        # ...and leave the altcoin card's own open list.
+        self.assertEqual(payload["altcoins"]["open"], [])
+        # Live totals now count both real-money books.
+        self.assertEqual(payload["totals"]["label"], "EVA wick + EVA wick · SOL")
+        self.assertAlmostEqual(payload["totals"]["epoch_pnl_usd"], 7.0)
 
     def test_epoch_is_when_the_books_were_switched_on(self) -> None:
         """Not the first trade — the windows they skipped are part of the record."""

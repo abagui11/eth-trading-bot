@@ -456,10 +456,18 @@ POOL_MIN_EQUITY_USD: float = 10.0
 # still legitimately fill, so the backstop can never race a real fill and drop
 # a tester out of a trade they were promised. 0 disables.
 POOL_INTENT_TTL_MIN: int = 150
-# Smallest MoonPay / card deposit we'll credit (USDC on Base).
-POOL_MIN_DEPOSIT_USD: float = 20.0
+# Smallest deposit we'll credit (USDC on Base/Ethereum). Aligned with
+# POOL_MIN_DEPLOY_USD / POOL_MIN_WITHDRAWAL_USD so Fund, Deploy, and
+# Withdraw all quote the same $50 floor in user-facing copy.
+POOL_MIN_DEPOSIT_USD: float = 50.0
 # Minimum dollars a user must deploy into a strategy before Accepts size from it.
 POOL_MIN_DEPLOY_USD: float = 50.0
+# Flat network fee charged on each deploy that journals a test_wallet → venue
+# send. Debited from undeployed wallet cash (never shrinks the strategy
+# allocation). Stays in the intake wallet as house gas float so USDC→ETH
+# top-ups and mainnet sends do not cannibalize other testers' undeployed
+# balances. 0 disables. Undeploys are free.
+POOL_DEPLOY_FEE_USD: float = 5.0
 # Soft floor: Accepts blocked when strategy-available balance is under this
 # (0.7% risk sizing needs enough notional for venue minimums).
 POOL_MIN_ACCEPT_USD: float = 10.0
@@ -483,6 +491,13 @@ KALSHI_ACCEPT_SLIP_CENTS: int = 3
 KALSHI_ACCEPT_MAX_AGE_MIN: float = 10.0
 # Blast-radius cap per Accept, in contracts, regardless of allocation size.
 KALSHI_MAX_CONTRACTS_PER_ACCEPT: int = 100
+# Autopilot sweep cadence, seconds (its own job, decoupled from the 60s
+# watchdog scan). The house bot fires on the quarter-hour and the mirror's ask
+# drifts away from the house entry within seconds, so detection lag is pure
+# slip: at 60s the 2026-10-06 18:05 window was seen 38s late and refused.
+# The sweep is two local SQLite reads when there is nothing fresh. 0 disables
+# the dedicated job (autopilot then only runs if something else sweeps it).
+KALSHI_AUTOPILOT_POLL_SEC: int = 5
 
 # Telegram ids allowed to Admit users, credit deposits, and run /credit //debit.
 # Merged with POOL_ADMIN_TELEGRAM_IDS from .env (set it there so an operator can

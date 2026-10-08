@@ -1107,13 +1107,16 @@
         <p class="sub" style="margin-bottom:10px">
           Three sleeves race from the same start line
           (<span id="kalshi-epoch">{{ kalshi.experiment_epoch_label }}</span>):
-          the <strong>LIVE</strong> book trades real Kalshi money (51
+          the <strong>LIVE</strong> books trade real Kalshi money (51
           contracts/trade against a $725 bankroll since 10/01; 8&nbsp;ct
           09/17&ndash;09/28, 16&nbsp;ct to 10/01), the paper bots shadow the
           same markets on ledger-only fills, and the arb sleeve logs
-          last-2-min dips without trading. The ledger is pre-fee, so book
-          equity runs above shard-2 cash by accumulated taker fees; seeds
-          move only when real capital does (+$500 on 10/01).
+          last-2-min dips without trading. The SOL wick clone was released
+          live on 10/01 and sits in this table with its BTC/ETH sibling; its
+          book counts from its own 09/30 switch-on, so its race is younger.
+          The ledger is pre-fee, so book equity runs above shard-2 cash by
+          accumulated taker fees; seeds move only when real capital does
+          (+$500 on 10/01).
         </p>
         {% set kt = kalshi.totals %}
         <p class="sub news-section" style="margin-bottom:6px">
@@ -1139,6 +1142,16 @@
             <div class="value" id="kalshi-closed-count">{{ kt.closed }}{% if kt.win_rate is not none %} · {{ (kt.win_rate * 100)|round|int }}% win{% endif %}</div>
           </div>
         </div>
+
+        <p class="sub news-section">Growth by book</p>
+        <p class="sub" style="margin-bottom:8px">Size-agnostic: every trade is
+          normalized to its per-contract P&amp;L and replayed at a constant
+          100 contracts on a $2,500 reference book, so the 8-contract era and
+          the 100-contract era count equally and books are directly
+          comparable. Assumes per-contract edge holds at size (unmeasured
+          above ~50 ct). Click legend entries to isolate; drag to zoom.</p>
+        <div id="kalshi-equity-chart" style="height:300px"></div>
+        <p class="sub" id="kalshi-equity-empty" hidden>No settled Kalshi trades yet to chart.</p>
 
         <p class="sub news-section">Bot comparison (since experiment start)</p>
         <div class="table-scroll">
@@ -1178,8 +1191,8 @@
           {% if kalshi.hidden_closed %}{{ kalshi.hidden_closed }} pre-experiment trades hidden from these numbers.{% endif %}
         </p>
 
-        <p class="sub news-section">Open positions (all bots)</p>
-        <p class="sub" id="kalshi-open-empty"{% if kalshi.open %} hidden{% endif %}>No open positions. The bot only enters when a wick setup lines up with EVA's lean.</p>
+        <p class="sub news-section">Open positions (live books)</p>
+        <p class="sub" id="kalshi-open-empty"{% if kalshi.open %} hidden{% endif %}>No open live positions.</p>
         <div class="table-scroll" id="kalshi-open-table"{% if not kalshi.open %} hidden{% endif %}>
           <table>
             <thead>
@@ -1188,7 +1201,7 @@
             <tbody id="kalshi-open">
               {% for p in kalshi.open %}
               {% set ticker = p.market_ticker or '' %}
-              {% set asset = 'btc' if 'BTC' in ticker else ('eth' if 'ETH' in ticker else '') %}
+              {% set asset = 'btc' if 'BTC' in ticker else ('eth' if 'ETH' in ticker else ('sol' if 'SOL' in ticker else ('xrp' if 'XRP' in ticker else ('hype' if 'HYPE' in ticker else '')))) %}
               <tr>
                 <td>{{ p.opened_at }}</td>
                 <td><span class="kalshi-market">{% if asset %}<span class="kalshi-asset-dot kalshi-asset-dot--{{ asset }}" aria-hidden="true"></span>{% endif %}{{ ticker }}</span></td>
@@ -1196,14 +1209,14 @@
                 <td>{{ p.contracts }}</td>
                 <td>{{ "%.1f"|format(p.entry_cents) }}¢</td>
                 <td>${{ "%.2f"|format(p.cost_usd) }}</td>
-                <td>{{ p.bot_id }}{% if p.mode == 'live' %} · LIVE{% endif %}</td>
+                <td>{{ p.bot_id }} · LIVE</td>
               </tr>
               {% endfor %}
             </tbody>
           </table>
         </div>
-        <p class="sub news-section">Closed positions (all bots, since experiment start)</p>
-        <p class="sub" id="kalshi-closed-empty"{% if kalshi.closed %} hidden{% endif %}>No settled positions yet. Trades appear here after windows settle (or early TP/SL exits).</p>
+        <p class="sub news-section">Closed positions (live books)</p>
+        <p class="sub" id="kalshi-closed-empty"{% if kalshi.closed %} hidden{% endif %}>No settled live positions yet.</p>
         <div class="table-scroll" id="kalshi-closed-table"{% if not kalshi.closed %} hidden{% endif %}>
           <table>
             <thead>
@@ -1212,7 +1225,7 @@
             <tbody id="kalshi-closed">
               {% for p in kalshi.closed %}
               {% set ticker = p.market_ticker or '' %}
-              {% set asset = 'btc' if 'BTC' in ticker else ('eth' if 'ETH' in ticker else '') %}
+              {% set asset = 'btc' if 'BTC' in ticker else ('eth' if 'ETH' in ticker else ('sol' if 'SOL' in ticker else ('xrp' if 'XRP' in ticker else ('hype' if 'HYPE' in ticker else '')))) %}
               <tr>
                 <td>{{ p.closed_at }}</td>
                 <td><span class="kalshi-market">{% if asset %}<span class="kalshi-asset-dot kalshi-asset-dot--{{ asset }}" aria-hidden="true"></span>{% endif %}{{ ticker }}</span></td>
@@ -1221,12 +1234,17 @@
                 <td>{{ "%.1f"|format(p.entry_cents) }}¢</td>
                 <td>{{ 'early exit' if p.result == 'flat' else p.result }}</td>
                 <td class="{{ 'pos' if p.pnl_usd is not none and p.pnl_usd >= 0 else 'neg' }}">{% if p.pnl_usd is not none %}{{ "%+.2f"|format(p.pnl_usd) }}{% else %}—{% endif %}</td>
-                <td>{{ p.bot_id }}{% if p.mode == 'live' %} · LIVE{% endif %}</td>
+                <td>{{ p.bot_id }} · LIVE</td>
               </tr>
               {% endfor %}
             </tbody>
           </table>
         </div>
+        <button type="button" class="load-more" id="kalshi-load-more"
+          data-offset="{{ kalshi.closed|length }}"
+          {% if not (kalshi.closed_has_more if kalshi.closed_has_more is defined else false) %}hidden{% endif %}>
+          Load more closed trades
+        </button>
         {% else %}
         <p class="sub">Kalshi ledger not mounted on this host (set <code>KALSHI_DB</code>).</p>
         {% endif %}
@@ -1256,15 +1274,17 @@
           <p class="sub news-section">Altcoin shadow books — the same wick rule, thinner markets</p>
           <p class="sub" style="margin-bottom:10px">
             The mid-window favourite rule was measured on BTC and ETH only.
-            These three books run <strong>the identical rule</strong> — same
+            These books run <strong>the identical rule</strong> — same
             67–80¢ band, same 4–10 minute clock, held to settlement — on the
-            XRP, SOL and HYPE 15m series, to find out whether the
+            thinner altcoin 15m series, to find out whether the
             favourite-longshot mispricing it feeds on belongs to these markets
             generally or only to the two we happened to measure. There is no
             backtest behind them; they start from zero and earn a record
-            forward. <strong>Paper only, and paper by construction</strong> —
-            these bot ids cannot route a real order even if they are added to
-            the live whitelist.
+            forward, on paper. A clone that earns its record can be released
+            to the live account (bot repo
+            <code>ALT_WICK_LIVE_RELEASED</code> + the live whitelist), and
+            once released it moves up to the main table — SOL made that jump
+            on 10/01, which is why it is no longer listed here.
           </p>
           <p class="sub" style="margin-bottom:10px">
             Priced like the live book so the rows are comparable: entry is the
@@ -2077,6 +2097,9 @@
     }
 
     var kalshiPollStarted = false;
+    var kalshiClosedPaged = false; // true once Load more has extended the closed list
+    var KALSHI_PAGE = 15;
+    var KALSHI_CHART_COLORS = ['#1F5673', '#B4503C', '#0E7A52', '#8C7A2B'];
     function esc(s) {
       return String(s == null ? '' : s).replace(/[&<>"']/g, function (c) {
         return { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c];
@@ -2090,8 +2113,88 @@
       if (table) table.hidden = !hasRows;
       if (empty) empty.hidden = hasRows;
     }
+    function kalshiMarketCell(ticker) {
+      var t = String(ticker || '');
+      var asset = '';
+      if (t.indexOf('BTC') >= 0) asset = 'btc';
+      else if (t.indexOf('ETH') >= 0) asset = 'eth';
+      else if (t.indexOf('SOL') >= 0) asset = 'sol';
+      else if (t.indexOf('XRP') >= 0) asset = 'xrp';
+      else if (t.indexOf('HYPE') >= 0) asset = 'hype';
+      var dot = asset
+        ? '<span class="kalshi-asset-dot kalshi-asset-dot--' + asset + '" aria-hidden="true"></span>'
+        : '';
+      return '<span class="kalshi-market">' + dot + esc(t) + '</span>';
+    }
+    function kalshiClosedRow(p) {
+      var pnl = p.pnl_usd == null ? '—' : (p.pnl_usd >= 0 ? '+' : '') + Number(p.pnl_usd).toFixed(2);
+      var cls = p.pnl_usd != null && p.pnl_usd >= 0 ? 'pos' : 'neg';
+      var result = p.result === 'flat' ? 'early exit' : p.result;
+      return '<tr><td>' + esc(p.closed_at) + '</td><td>' + kalshiMarketCell(p.market_ticker) +
+        '</td><td>' + esc(p.side) + '</td><td>' + p.contracts +
+        '</td><td>' + Number(p.entry_cents).toFixed(1) + '¢</td><td>' + esc(result) +
+        '</td><td class="' + cls + '">' + pnl + '</td><td>' +
+        esc(p.bot_id) + ' · LIVE</td></tr>';
+    }
+    function kalshiSetLoadMore(data) {
+      var btn = document.getElementById('kalshi-load-more');
+      if (!btn) return;
+      var shown = document.querySelectorAll('#kalshi-closed tr').length;
+      btn.dataset.offset = String(shown);
+      var more = !!data.closed_has_more;
+      btn.hidden = !more;
+      btn.disabled = false;
+      btn.textContent = more ? 'Load more closed trades' : 'No more trades';
+    }
+    function renderKalshiEquity(equity) {
+      var host = document.getElementById('kalshi-equity-chart');
+      var empty = document.getElementById('kalshi-equity-empty');
+      if (!host) return;
+      var books = (equity && equity.books) || [];
+      if (!books.length) {
+        if (empty) empty.hidden = false;
+        host.hidden = true;
+        return;
+      }
+      if (empty) empty.hidden = true;
+      host.hidden = false;
+      function draw() {
+        if (!window.Plotly) return;
+        var traces = books.map(function (b, i) {
+          var sign = b.total < 0 ? '\u2212' : '+';
+          return {
+            name: b.label + ' (' + sign + Math.abs(b.total).toFixed(2) + '%)',
+            x: (b.equity || []).map(function (p) { return new Date(p[0]); }),
+            y: (b.equity || []).map(function (p) { return p[1]; }),
+            mode: 'lines',
+            line: { shape: 'hv', width: 1.6, color: KALSHI_CHART_COLORS[i % KALSHI_CHART_COLORS.length] },
+            hovertemplate: b.label + '<br>%{x|%b %d %H:%M} · %{y:.2f}%<extra></extra>',
+          };
+        });
+        Plotly.newPlot(host, traces, {
+          paper_bgcolor: 'rgba(0,0,0,0)',
+          plot_bgcolor: 'rgba(0,0,0,0)',
+          font: { family: 'IBM Plex Mono, ui-monospace, monospace', size: 11, color: '#0D1112' },
+          margin: { l: 56, r: 16, t: 4, b: 36 },
+          hovermode: 'closest',
+          legend: { orientation: 'h', y: -0.18, font: { size: 10 } },
+          yaxis: { title: 'growth (%)', zeroline: true, zerolinecolor: '#C9CFCC', gridcolor: '#ECEFEE', ticksuffix: '%' },
+          xaxis: { gridcolor: '#ECEFEE' },
+        }, { displaylogo: false, responsive: true });
+      }
+      if (window.Plotly) draw();
+      else {
+        var tries = 0;
+        var timer = setInterval(function () {
+          if (window.Plotly || tries++ > 100) {
+            clearInterval(timer);
+            if (window.Plotly) draw();
+          }
+        }, 100);
+      }
+    }
     async function refreshKalshiBook() {
-      var res = await fetch('/api/kalshi/performance?limit=15');
+      var res = await fetch('/api/kalshi/performance?limit=' + KALSHI_PAGE);
       if (!res.ok) throw new Error('HTTP ' + res.status);
       var data = await res.json();
       if (!data.available) return;
@@ -2143,37 +2246,56 @@
           ? data.hidden_closed + ' pre-experiment trades hidden from these numbers.'
           : '';
       }
-      var botCell = function (p) {
-        return esc(p.bot_id) + (p.mode === 'live' ? ' · LIVE' : '');
-      };
-      var marketCell = function (ticker) {
-        var t = String(ticker || '');
-        var asset = t.indexOf('BTC') >= 0 ? 'btc' : (t.indexOf('ETH') >= 0 ? 'eth' : '');
-        var dot = asset
-          ? '<span class="kalshi-asset-dot kalshi-asset-dot--' + asset + '" aria-hidden="true"></span>'
-          : '';
-        return '<span class="kalshi-market">' + dot + esc(t) + '</span>';
-      };
       var openHtml = (data.open || []).map(function (p) {
-        return '<tr><td>' + esc(p.opened_at) + '</td><td>' + marketCell(p.market_ticker) +
+        return '<tr><td>' + esc(p.opened_at) + '</td><td>' + kalshiMarketCell(p.market_ticker) +
           '</td><td>' + esc(p.side) + '</td><td>' + p.contracts +
           '</td><td>' + Number(p.entry_cents).toFixed(1) + '¢</td><td>$' +
-          Number(p.cost_usd).toFixed(2) + '</td><td>' + botCell(p) + '</td></tr>';
+          Number(p.cost_usd).toFixed(2) + '</td><td>' + esc(p.bot_id) +
+          ' · LIVE</td></tr>';
       }).join('');
       kalshiSetTable('kalshi-open', 'kalshi-open-table', 'kalshi-open-empty', openHtml, (data.open || []).length > 0);
-      var closedHtml = (data.closed || []).map(function (p) {
-        var pnl = p.pnl_usd == null ? '—' : (p.pnl_usd >= 0 ? '+' : '') + Number(p.pnl_usd).toFixed(2);
-        var cls = p.pnl_usd != null && p.pnl_usd >= 0 ? 'pos' : 'neg';
-        var result = p.result === 'flat' ? 'early exit' : p.result;
-        return '<tr><td>' + esc(p.closed_at) + '</td><td>' + marketCell(p.market_ticker) +
-          '</td><td>' + esc(p.side) + '</td><td>' + p.contracts +
-          '</td><td>' + Number(p.entry_cents).toFixed(1) + '¢</td><td>' + esc(result) +
-          '</td><td class="' + cls + '">' + pnl + '</td><td>' + botCell(p) + '</td></tr>';
-      }).join('');
-      kalshiSetTable('kalshi-closed', 'kalshi-closed-table', 'kalshi-closed-empty', closedHtml, (data.closed || []).length > 0);
+      // Don't wipe a paged closed list on the 60s poll — only refresh page 1
+      // until the operator has asked for more.
+      if (!kalshiClosedPaged) {
+        var closedHtml = (data.closed || []).map(kalshiClosedRow).join('');
+        kalshiSetTable('kalshi-closed', 'kalshi-closed-table', 'kalshi-closed-empty', closedHtml, (data.closed || []).length > 0);
+        kalshiSetLoadMore(data);
+      }
+      if (data.equity) renderKalshiEquity(data.equity);
       renderWickVariants(data.wick_variants);
       renderAltBooks(data.altcoins);
       renderCrossBooks(data.cross);
+    }
+    async function loadMoreKalshiClosed() {
+      var btn = document.getElementById('kalshi-load-more');
+      if (!btn || btn.disabled) return;
+      var offset = Number(btn.dataset.offset || 0);
+      btn.disabled = true;
+      btn.textContent = 'Loading…';
+      try {
+        var res = await fetch('/api/kalshi/performance?limit=' + KALSHI_PAGE + '&offset=' + offset);
+        if (!res.ok) throw new Error('HTTP ' + res.status);
+        var data = await res.json();
+        var rows = data.closed || [];
+        if (!rows.length) {
+          btn.hidden = true;
+          btn.textContent = 'No more trades';
+          return;
+        }
+        kalshiClosedPaged = true;
+        var body = document.getElementById('kalshi-closed');
+        if (body) body.insertAdjacentHTML('beforeend', rows.map(kalshiClosedRow).join(''));
+        var table = document.getElementById('kalshi-closed-table');
+        var empty = document.getElementById('kalshi-closed-empty');
+        if (table) table.hidden = false;
+        if (empty) empty.hidden = true;
+        kalshiSetLoadMore(data);
+      } catch (e) {
+        btn.disabled = false;
+        btn.textContent = 'Load more closed trades';
+        var st = document.getElementById('kalshi-status');
+        if (st) st.textContent = 'Load more failed: ' + e.message;
+      }
     }
     function renderCrossBooks(cross) {
       var card = document.getElementById('kalshi-cross-card');
@@ -2301,6 +2423,10 @@
           if (panel && !panel.hidden) refreshKalshi();
         }, 30000);
       }
+    }
+    var kalshiLoadMoreBtn = document.getElementById('kalshi-load-more');
+    if (kalshiLoadMoreBtn) {
+      kalshiLoadMoreBtn.addEventListener('click', loadMoreKalshiClosed);
     }
 
     var evaLabPollStarted = false;

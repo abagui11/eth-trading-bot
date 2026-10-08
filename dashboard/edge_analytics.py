@@ -18,6 +18,7 @@ from __future__ import annotations
 import logging
 import random
 import sqlite3
+import threading
 import time
 from collections import defaultdict
 from datetime import datetime, timezone
@@ -49,16 +50,23 @@ SCALING_SIZES = (1, 2, 5, 10, 25, 50, 100, 200, 500, 1000, 2000)
 
 # Sleeve / seed used to turn $ P&L into percent growth. Lab has no formal
 # sleeve — $1k notional so the curve is readable as book %. Kalshi seeds
-# match paper_state starting_usd per book: the live wick book was reseeded
-# +$500 on 2026-10-01 when the deposit landed (seed change, not a reset —
-# same operation as the 09-30 shadow reseed), so its percent denominator
-# moves with it; streak/arb saw no new capital and keep the 09-17 baseline.
+# match paper_state starting_usd per book: the live wick book is reseeded
+# as each house deposit lands (+$500 and +$1,750 on 2026-10-01, +$7,500
+# on 2026-10-06 — gross deposits, seed changes not resets, same operation
+# as the 09-30 shadow reseed), so its percent denominator moves with the
+# capital; streak/arb saw no new capital and keep the 09-17 baseline.
 # Mill house paper is already stored as pnl_pct (same unit as the daily
 # "you'd be up X%" digest); base 100 makes cum/base*100 = cum of those %.
 HQ_PAPER_BASE_USD = 5000.0
 KALSHI_SEEDS_USD = {
+    # House book, gross-deposit convention (operator-confirmed ~$10k):
     # 246.75 (09-17 epoch) + $500 (10-01 05:33Z) + $1,750 (10-01 ~18:45Z)
-    "eva_wick": 2496.75,
+    # + $7,500 (10-06, sent directly to Kalshi). Rail fees (e.g. $3.75 on
+    # 10-06) live in the documented book-vs-account gap, never booked as
+    # P&L. User deploy money on the shared venue account (treasury
+    # transfers #4/#5 — user 2037245798's $500 wick deploy as two $250
+    # legs) is pool capital, tracked in pool/treasury, NOT in this seed.
+    "eva_wick": 9996.75,
     "eva_streak": 246.75,
     "eva_arb": 246.75,
     "eva_wick_sol": 225.0,  # alt clone ledger seed; real money shares shard 2
@@ -66,7 +74,21 @@ KALSHI_SEEDS_USD = {
 LAB_NOTIONAL_USD = 1000.0
 MILL_PAPER_PCT_BASE = 100.0
 
+# Kalshi tab chart reference: every trade is normalized to per-contract P&L
+# and replayed at this constant size, so the 8ct era and the 100ct era count
+# equally and the books are directly comparable. The seeds above stay in use
+# on the Investor Analytics side, where the question is actual account
+# growth; here the question is the rule's performance agnostic of size.
+# 100 ct / $2,500 matched the live wick configuration when the reference was
+# set (2026-10-05); it stays FIXED through later size steps (200 ct since
+# 2026-10-06) because moving it would rescale the whole history — it is a
+# normalization constant, not a mirror of current size.
+KALSHI_UNIT_REF_CT = 100
+KALSHI_UNIT_REF_BOOK_USD = 2500.0
+
 _cache: dict[str, Any] = {"at": 0.0, "payload": None}
+_edge_refresh_lock = threading.Lock()
+_edge_refreshing = False
 
 
 def _base_usd(key: str) -> float | None:
@@ -449,12 +471,134 @@ _LABELS = {
 }
 _ORDER = list(_LABELS)
 
+# Lightweight equity cache for the public Kalshi tab chart (no bootstrap).
+_equity_cache: dict[str, Any] = {"at": 0.0, "payload": None}
+_EQUITY_CACHE_TTL_SEC = 60.0
+
+
+def kalshi_equity_curves() -> dict[str, Any]:
+    """Size-agnostic percent curves for the Kalshi tab.
+
+    Each trade contributes ``pnl / contracts`` — its per-contract truth —
+    scaled to a constant reference (KALSHI_UNIT_REF_CT contracts on a
+    KALSHI_UNIT_REF_BOOK_USD book): the whole history replayed at today's
+    live size. The previous seed-divided curves lied twice: the books' seeds
+    differ 10× (reversal's +$203 outcharted wick's +$1,165), and the clip
+    scale-ups (8→100 ct) made recent trades move the curve ~12× faster than
+    the early era. Assumes per-contract edge is size-independent, which is
+    unmeasured above ~50 ct — the same caveat the scaling card carries.
+
+    No password and no day-clustered bootstrap; just the step series so the
+    tab can render the chart without unlocking Investor Analytics.
+    """
+    now = time.time()
+    if (
+        _equity_cache["payload"] is not None
+        and now - _equity_cache["at"] < _EQUITY_CACHE_TTL_SEC
+    ):
+        return _equity_cache["payload"]
+    books_rows: dict[str, list[Any]] = {}
+    try:
+        import kalshi_bridge
+
+        kpath = kalshi_bridge.kalshi_db_path()
+        if not kpath or not Path(kpath).exists():
+            payload = {"available": False, "books": []}
+            _equity_cache.update(at=now, payload=payload)
+            return payload
+        conn = sqlite3.connect(f"file:{kpath}?mode=ro", uri=True, timeout=5.0)
+        try:
+            for bot, epoch in KALSHI_EPOCH.items():
+                books_rows[f"kalshi:{bot}"] = conn.execute(
+                    "SELECT closed_at, pnl_usd, contracts FROM paper_positions "
+                    "WHERE bot_id = ? AND opened_at >= ? "
+                    "AND pnl_usd IS NOT NULL AND closed_at IS NOT NULL "
+                    "AND contracts > 0",
+                    (bot, epoch),
+                ).fetchall()
+        finally:
+            conn.close()
+    except Exception:
+        logger.exception("kalshi equity curves unavailable")
+        return {"available": False, "books": []}
+
+    scale = 100.0 * KALSHI_UNIT_REF_CT / KALSHI_UNIT_REF_BOOK_USD
+    books_out: list[dict[str, Any]] = []
+    for key in _ORDER:
+        if not key.startswith("kalshi:"):
+            continue
+        rows = books_rows.get(key) or []
+        if not rows:
+            continue
+        label, group = _LABELS[key]
+        rows_s = sorted(rows, key=lambda r: str(r[0]))
+        cum_unit = 0.0
+        equity: list[list[float]] = []
+        for t, p, ct in rows_s:
+            cum_unit += float(p) / int(ct)
+            equity.append([_epoch_ms(_iso(t)), round(cum_unit * scale, 2)])
+        books_out.append({
+            "key": key,
+            "label": label,
+            "group": group,
+            "total": round(cum_unit * scale, 2),
+            "unit_usd_per_ct": round(cum_unit, 2),
+            "ref_ct": KALSHI_UNIT_REF_CT,
+            "ref_usd": KALSHI_UNIT_REF_BOOK_USD,
+            "equity": equity,
+        })
+    payload = {
+        "available": True,
+        "books": books_out,
+        "method": (
+            f"Per-contract P&L replayed at a constant {KALSHI_UNIT_REF_CT} ct "
+            f"on a ${KALSHI_UNIT_REF_BOOK_USD:,.0f} reference book — "
+            "size-agnostic; assumes per-contract edge holds at size "
+            "(unmeasured above ~50 ct)."
+        ),
+    }
+    _equity_cache.update(at=now, payload=payload)
+    return payload
+
 
 def build_edge_payload() -> dict[str, Any]:
-    now = time.time()
-    if _cache["payload"] is not None and now - _cache["at"] < CACHE_TTL_SEC:
-        return _cache["payload"]
+    """Cached Investor Analytics payload, refreshed off the request path.
 
+    The bootstrap costs ~2.5s; making the first visitor after every TTL
+    expiry pay it is what made the tab feel slow. Stale-while-revalidate:
+    expired cache is served immediately while one daemon thread recomputes.
+    Only the very first call (empty cache) blocks.
+    """
+    global _edge_refreshing
+    now = time.time()
+    if _cache["payload"] is not None:
+        if now - _cache["at"] >= CACHE_TTL_SEC:
+            with _edge_refresh_lock:
+                already = _edge_refreshing
+                _edge_refreshing = True
+            if not already:
+                threading.Thread(
+                    target=_refresh_edge_cache, name="edge-refresh", daemon=True
+                ).start()
+        return _cache["payload"]
+    payload = _compute_edge_payload()
+    _cache.update(at=time.time(), payload=payload)
+    return payload
+
+
+def _refresh_edge_cache() -> None:
+    global _edge_refreshing
+    try:
+        payload = _compute_edge_payload()
+        _cache.update(at=time.time(), payload=payload)
+    except Exception:
+        logger.exception("edge payload background refresh failed")
+    finally:
+        with _edge_refresh_lock:
+            _edge_refreshing = False
+
+
+def _compute_edge_payload() -> dict[str, Any]:
     rng = random.Random(20260925)
     conn = sqlite3.connect(f"file:{config.LEDGER_DB}?mode=ro", uri=True)
     try:
@@ -513,11 +657,17 @@ def build_edge_payload() -> dict[str, Any]:
         "scaling": scaling,
         "method": (
             "One position = one observation (HQ paper ladder legs collapsed). "
-            "Charts and Return % are percent growth of each book's sleeve/seed "
+            "Charts and Return % here are percent growth of each book's "
+            "sleeve/seed — actual account growth, size-dependent by design. "
+            "(The Kalshi tab's public chart instead replays per-contract P&L "
+            "at a constant reference size — same trades, size-agnostic view.) "
+            "Seeds: "
             f"(HQ paper ${HQ_PAPER_BASE_USD:.0f}, HQ live "
             f"${float(bot_config.LIVE_HQ_EQUITY_USD):.0f}, Kalshi wick "
             f"${KALSHI_SEEDS_USD['eva_wick']:.2f} — reseeded +$500 and "
-            "+$1,750 on 2026-10-01 as each deposit landed — streak/arb "
+            "+$1,750 on 2026-10-01 and +$7,500 on 2026-10-06 as each "
+            "house deposit landed; subscriber deploys to the venue are pool "
+            "capital, never in this seed — streak/arb "
             f"${KALSHI_SEEDS_USD['eva_streak']:.2f}, SOL wick "
             f"${KALSHI_SEEDS_USD['eva_wick_sol']:.2f} (paper until 2026-10-01, "
             "live at 25 ct since; one continuous book), "
@@ -539,5 +689,4 @@ def build_edge_payload() -> dict[str, Any]:
             "read as directional measurements, not conclusive statistics."
         ),
     }
-    _cache.update(at=now, payload=payload)
     return payload

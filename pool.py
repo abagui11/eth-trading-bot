@@ -259,10 +259,14 @@ CREATE TABLE IF NOT EXISTS pool_meta (
 
 -- Strategy subscriptions: which idea streams this tester receives. Keys are
 -- strategy_catalog wire keys (ict / mill / kalshi_reversal / kalshi_wick).
+-- autopilot=1 means the sweep enters this tester into every fresh live entry
+-- the lane's bot takes — their own position, sized exactly like a manual
+-- Accept — instead of waiting for a tap on each card.
 CREATE TABLE IF NOT EXISTS pool_strategy_subs (
     telegram_id INTEGER NOT NULL,
     strategy TEXT NOT NULL,
     created_at TEXT NOT NULL,
+    autopilot INTEGER NOT NULL DEFAULT 0,
     PRIMARY KEY (telegram_id, strategy)
 );
 
@@ -309,7 +313,8 @@ CREATE TABLE IF NOT EXISTS pool_testwallet_deposits (
     first_seen_at TEXT NOT NULL,
     credited_at TEXT,
     alerted_at TEXT,
-    note TEXT
+    note TEXT,
+    chain_id INTEGER                -- 8453 Base, 1 Ethereum; same EOA on both
 );
 
 -- Card on-ramp sessions (provider account still pending). One row per widget
@@ -353,6 +358,28 @@ CREATE TABLE IF NOT EXISTS pool_kalshi_positions (
 );
 CREATE UNIQUE INDEX IF NOT EXISTS pool_kalshi_intent_once
     ON pool_kalshi_positions (intent_ref);
+
+-- Autopilot attempt journal: one row per (entry, user) mirror attempt,
+-- refusals included. Pure telemetry -- no money moves through this table.
+-- It exists so the slip gate can eventually be set from a recorded
+-- distribution of ask-vs-entry gaps instead of a guess (eva-quant-evidence):
+-- the order book is not otherwise recorded anywhere, so without this row the
+-- question "what would a 5c gate have filled?" is unanswerable after the fact.
+CREATE TABLE IF NOT EXISTS pool_kalshi_attempts (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    telegram_id INTEGER NOT NULL,
+    strategy TEXT NOT NULL,
+    position_id INTEGER NOT NULL,       -- house bot's paper_positions.id
+    market_ticker TEXT,
+    side TEXT,                          -- yes | no
+    entry_cents REAL,                   -- house bot's recorded fill
+    ask_cents REAL,                     -- hub's re-quote at attempt time
+    lag_sec REAL,                       -- house entry -> this attempt
+    outcome TEXT NOT NULL,              -- filled | slipped | unfilled | ...
+    created_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS pool_kalshi_attempts_pos
+    ON pool_kalshi_attempts (position_id);
 """
 
 _FROZEN_KEY = "intents_frozen"
@@ -369,6 +396,12 @@ def _now() -> str:
 # deployed ledger without this.
 _ADDED_COLUMNS = (
     ("pool_intents", "attempt", "INTEGER NOT NULL DEFAULT 1"),
+    ("pool_strategy_subs", "autopilot", "INTEGER NOT NULL DEFAULT 0"),
+    ("pool_testwallet_deposits", "chain_id", "INTEGER"),
+    # Which rail paid a withdrawal: 'coinbase' (venue send) or 'test_wallet'
+    # (signer), and the chain the signer used — the settle sweep needs both.
+    ("pool_withdrawals", "source", "TEXT"),
+    ("pool_withdrawals", "chain_id", "INTEGER"),
 )
 
 
@@ -597,9 +630,11 @@ def is_admin(telegram_id: int) -> bool:
 # ---------------------------------------------------------------------------
 
 _SUBS_SEEDED_KEY = "strategy_subs_seeded"
-# Streams that existed before /subscribe shipped. Existing testers were
-# receiving both, so the one-time seed keeps their world unchanged.
-_LEGACY_STRATEGIES = ("ict", "mill")
+# Streams that existed before /subscribe shipped. The seed used to include
+# "mill" too, which silently subscribed every approved tester to the Trade
+# Mill firehose ([SPIKE]/[CASCADE]/... cards). Mill is opt-in only now —
+# nobody receives it without an explicit /subscribe.
+_LEGACY_STRATEGIES = ("ict",)
 
 
 def subscribe_strategy(telegram_id: int, strategy: str) -> bool:
@@ -641,12 +676,72 @@ def strategy_subscriber_ids(strategy: str) -> set[int]:
     return {int(r["telegram_id"]) for r in rows}
 
 
+def set_autopilot(telegram_id: int, strategy: str, enabled: bool) -> bool:
+    """Flip autopilot for one lane, subscribing implicitly if needed.
+
+    Autopilot never changes HOW an entry is sized or booked — it only removes
+    the tap. Each entry is still this user's own position reserved from their
+    own lane allocation; a user with autopilot on and nothing allocated sits
+    idle rather than riding anyone else's capital.
+    """
+    with _connect() as conn:
+        conn.execute(
+            "INSERT OR IGNORE INTO pool_strategy_subs "
+            "(telegram_id, strategy, created_at) VALUES (?, ?, ?)",
+            (int(telegram_id), str(strategy), _now()),
+        )
+        conn.execute(
+            "UPDATE pool_strategy_subs SET autopilot = ? "
+            "WHERE telegram_id = ? AND strategy = ?",
+            (1 if enabled else 0, int(telegram_id), str(strategy)),
+        )
+    logger.info(
+        "pool: autopilot %s for %s/%s",
+        "ON" if enabled else "OFF", telegram_id, strategy,
+    )
+    return bool(enabled)
+
+
+def autopilot_enabled(telegram_id: int, strategy: str) -> bool:
+    with _connect() as conn:
+        row = conn.execute(
+            "SELECT autopilot FROM pool_strategy_subs "
+            "WHERE telegram_id = ? AND strategy = ?",
+            (int(telegram_id), str(strategy)),
+        ).fetchone()
+    return bool(row and row["autopilot"])
+
+
+def autopilot_user_ids(strategy: str) -> list[int]:
+    """Approved users whose allocation rides every trade this lane takes."""
+    with _connect() as conn:
+        rows = conn.execute(
+            "SELECT s.telegram_id FROM pool_strategy_subs s "
+            "JOIN approved_users a ON a.telegram_id = s.telegram_id "
+            "WHERE s.strategy = ? AND s.autopilot = 1 "
+            "AND a.status = 'approved' ORDER BY s.telegram_id",
+            (str(strategy),),
+        ).fetchall()
+    return [int(r["telegram_id"]) for r in rows]
+
+
+def deploy_fee_usd() -> float:
+    """Flat network fee charged on a deploy that journals a venue send."""
+    return max(0.0, round(float(getattr(bot_config, "POOL_DEPLOY_FEE_USD", 0) or 0), 2))
+
+
 def set_allocation(telegram_id: int, strategy: str, amount_usd: float) -> dict[str, Any]:
     """Deploy capital to one strategy (soft lock of wallet cash for sizing).
 
     Allocations do not move cash in the journal — cash stays the claim on the
     pooled venue — but they lock undeployed wallet balance for Accept sizing
     and Portfolio/Wallet display. Capped so sum(allocs) cannot exceed cash.
+
+    An *increase* must also leave room for ``POOL_DEPLOY_FEE_USD`` in undeployed
+    cash: the full ``amount`` still goes to the venue; the fee is debited later
+    (after the treasury journal succeeds) and stays in the intake wallet as
+    house gas float. Undeploys and no-change reallocations do not require fee
+    room.
     """
     amount = round(float(amount_usd), 2)
     if amount < 0:
@@ -656,6 +751,7 @@ def set_allocation(telegram_id: int, strategy: str, amount_usd: float) -> dict[s
         return {"ok": False, "reason": "not_funded"}
     # Drop stale soft-locks above cash before sizing the new deploy.
     clamp_allocations_to_cash(telegram_id)
+    account = get_account(telegram_id) or account
     cash = float(account["cash_usd"])
     current = get_allocation(telegram_id, strategy)
     others = sum(
@@ -664,13 +760,19 @@ def set_allocation(telegram_id: int, strategy: str, amount_usd: float) -> dict[s
     wallet_free = max(0.0, cash - others - float(account.get("reserved_usd") or 0))
     # User can reallocate up to (wallet_free + current) into this strategy.
     max_for_strategy = round(wallet_free + current, 2)
-    if amount > max_for_strategy + 1e-9:
+    fee = deploy_fee_usd() if amount > current + 1e-9 else 0.0
+    # Fee comes from undeployed cash on top of the allocation, so the max
+    # that can ship to the venue is max_for_strategy − fee.
+    max_deploy = round(max(0.0, max_for_strategy - fee), 2) if fee > 0 else max_for_strategy
+    if amount > max_deploy + 1e-9:
         return {
             "ok": False,
             "reason": "exceeds_wallet",
             "cash_usd": cash,
             "wallet_usd": round(max(0.0, cash - others - current), 2),
-            "max_usd": max_for_strategy,
+            "max_usd": max_deploy,
+            "fee_usd": fee,
+            "need_usd": round(amount + fee, 2) if fee > 0 else amount,
         }
     if amount > 0 and amount < float(bot_config.POOL_MIN_DEPLOY_USD) and amount != current:
         # Allow lowering an existing allocation below the minimum; only new
@@ -695,6 +797,106 @@ def set_allocation(telegram_id: int, strategy: str, amount_usd: float) -> dict[s
         "amount_usd": amount,
         "cash_usd": cash,
         "wallet_usd": round(max(0.0, cash - others - amount), 2),
+        # What changed, so the treasury can move exactly this much to (or
+        # back from) the venue: deployed money lives at the venue, undeployed
+        # money stays in the intake wallet.
+        "previous_usd": round(current, 2),
+        "delta_usd": round(amount - current, 2),
+        "fee_usd": fee,
+    }
+
+
+def charge_deploy_fee(
+    telegram_id: int,
+    *,
+    strategy: str,
+    transfer_id: int,
+    fee_usd: float | None = None,
+) -> dict[str, Any]:
+    """Debit the flat deploy network fee from undeployed cash.
+
+    Called only after a successful ``test_wallet → venue`` journal. The fee
+    leaves the tester's claim and stays on-chain in the intake wallet as
+    house gas float — it never shrinks the strategy allocation. Idempotent
+    on ``deploy_fee:<transfer_id>``.
+    """
+    fee = round(
+        float(fee_usd if fee_usd is not None else deploy_fee_usd()), 2
+    )
+    if fee <= 0:
+        return {"ok": True, "fee_usd": 0.0, "skipped": True}
+    ref = f"deploy_fee:{int(transfer_id)}"
+    with _write_txn() as conn:
+        existing = conn.execute(
+            "SELECT amount_usd, cash_after FROM pool_events "
+            "WHERE telegram_id = ? AND kind = 'adjustment' AND ref = ?",
+            (int(telegram_id), ref),
+        ).fetchone()
+        if existing is not None:
+            return {
+                "ok": True,
+                "fee_usd": abs(float(existing["amount_usd"])),
+                "duplicate": True,
+                "cash_usd": float(existing["cash_after"]),
+                "ref": ref,
+            }
+        account = conn.execute(
+            "SELECT cash_usd, reserved_usd FROM pool_accounts WHERE telegram_id = ?",
+            (int(telegram_id),),
+        ).fetchone()
+        if account is None:
+            return {"ok": False, "reason": "no_account"}
+        cash = float(account["cash_usd"])
+        alloc_rows = conn.execute(
+            "SELECT COALESCE(SUM(amount_usd), 0) AS total FROM pool_strategy_allocs "
+            "WHERE telegram_id = ?",
+            (int(telegram_id),),
+        ).fetchone()
+        deployed = float(alloc_rows["total"] if alloc_rows else 0)
+        # Fee must come from undeployed cash so the soft-lock stays intact.
+        undeployed = round(cash - deployed, 2)
+        if fee > undeployed + 1e-9:
+            return {
+                "ok": False,
+                "reason": "insufficient_undeployed",
+                "fee_usd": fee,
+                "undeployed_usd": undeployed,
+                "cash_usd": cash,
+            }
+        booked = _apply_event(
+            conn,
+            int(telegram_id),
+            kind="adjustment",
+            amount_usd=-fee,
+            ref=ref,
+            note=f"deploy fee {strategy} transfer #{int(transfer_id)}",
+        )
+        if not booked:
+            # Race with another writer on the same ref — treat as success.
+            after = conn.execute(
+                "SELECT cash_usd FROM pool_accounts WHERE telegram_id = ?",
+                (int(telegram_id),),
+            ).fetchone()
+            return {
+                "ok": True,
+                "fee_usd": fee,
+                "duplicate": True,
+                "cash_usd": float(after["cash_usd"]) if after else cash,
+                "ref": ref,
+            }
+        after = conn.execute(
+            "SELECT cash_usd FROM pool_accounts WHERE telegram_id = ?",
+            (int(telegram_id),),
+        ).fetchone()
+    logger.info(
+        "pool: deploy fee $%.2f user %s strategy %s transfer #%s",
+        fee, telegram_id, strategy, transfer_id,
+    )
+    return {
+        "ok": True,
+        "fee_usd": fee,
+        "cash_usd": float(after["cash_usd"]),
+        "ref": ref,
     }
 
 
@@ -1074,10 +1276,16 @@ def list_accounts() -> list[dict[str, Any]]:
 
 
 def list_access_roster() -> list[dict[str, Any]]:
-    """Every access-request row, with cash if they have a pool account.
+    """Every access-request row, with cash and deployments if they have a
+    pool account.
 
     Ordered pending first (needs Admit), then approved, then denied — so an
     admin typing /users mid-demo sees who still needs a tap at the top.
+
+    ``deployments`` is the stored per-strategy allocation (strategy → USD).
+    It is read as-is, not clamped — a roster read must stay cheap and
+    side-effect free; stale soft-locks get healed on the user's next
+    Portfolio/Wallet view or deploy.
     """
     with _connect() as conn:
         rows = conn.execute(
@@ -1098,7 +1306,21 @@ def list_access_roster() -> list[dict[str, Any]]:
                 au.telegram_id
             """
         ).fetchall()
-    return [dict(r) for r in rows]
+        alloc_rows = conn.execute(
+            "SELECT telegram_id, strategy, amount_usd FROM pool_strategy_allocs "
+            "WHERE amount_usd > 0"
+        ).fetchall()
+    deploys: dict[int, dict[str, float]] = {}
+    for r in alloc_rows:
+        deploys.setdefault(int(r["telegram_id"]), {})[str(r["strategy"])] = float(
+            r["amount_usd"]
+        )
+    out: list[dict[str, Any]] = []
+    for r in rows:
+        d = dict(r)
+        d["deployments"] = deploys.get(int(r["telegram_id"]), {})
+        out.append(d)
+    return out
 
 
 def _apply_event(
@@ -1661,6 +1883,44 @@ def payout_target(telegram_id: int) -> dict[str, Any]:
     return {"ok": True, "address": str(wallet["address"])}
 
 
+def payout_chains_for(telegram_id: int) -> list[int]:
+    """Chains this user's verified address has proven it controls, most
+    recent first — the only chains a test-wallet payout may use.
+
+    Evidence is a credited test-wallet deposit *from* that address on that
+    chain. An EOA is one address everywhere, but a contract wallet is not,
+    and paying USDC on a chain the user has never touched from that address
+    is how money goes somewhere nobody can reach. Users verified through the
+    Coinbase deposit address proved themselves on Ethereum mainnet.
+    """
+    wallet = get_wallet(telegram_id)
+    if wallet is None:
+        return []
+    address = str(wallet["address"]).strip().lower()
+    chains: list[int] = []
+    with _connect() as conn:
+        rows = conn.execute(
+            "SELECT chain_id FROM pool_testwallet_deposits "
+            "WHERE LOWER(sender) = ? AND status = 'credited' AND chain_id IS NOT NULL "
+            "ORDER BY COALESCE(credited_at, first_seen_at) DESC",
+            (address,),
+        ).fetchall()
+        for row in rows:
+            cid = int(row["chain_id"])
+            if cid not in chains:
+                chains.append(cid)
+        # Verified via the Coinbase deposit address (mainnet sender proof).
+        if str(wallet["status"]) == "verified" and config.POOL_DEPOSIT_ADDRESS:
+            seen_coinbase = conn.execute(
+                "SELECT 1 FROM pool_deposit_requests WHERE telegram_id = ? "
+                "AND status = 'credited' AND txid IS NOT NULL LIMIT 1",
+                (int(telegram_id),),
+            ).fetchone()
+            if seen_coinbase and 1 not in chains:
+                chains.append(1)
+    return chains
+
+
 # ---------------------------------------------------------------------------
 # Deposit requests — user asks, admin credits with one tap
 # ---------------------------------------------------------------------------
@@ -1995,13 +2255,24 @@ def assign_chain_deposit(
 _TESTWALLET_BASELINE_KEY = "testwallet_deposits_baselined"
 
 
+def _testwallet_baseline_key(chain_id: int | None) -> str:
+    # One first-run baseline per chain: Base may have been watched for weeks
+    # before Ethereum is switched on, and the pre-existing history on the
+    # newly watched chain is house history too.
+    if chain_id is None:
+        return _TESTWALLET_BASELINE_KEY
+    return f"{_TESTWALLET_BASELINE_KEY}:{int(chain_id)}"
+
+
 def observe_testwallet_deposits(
     transfers: list[dict[str, Any]],
+    *,
+    chain_id: int | None = None,
 ) -> list[dict[str, Any]]:
     """Credit USDC arriving at the shared test wallet, by sender.
 
-    ``transfers`` is `chain.inbound_usdc` output for TEST_WALLET_ADDRESS,
-    already confirmation-filtered by the caller. Attribution is by the
+    ``transfers`` is inbound-transfer output for TEST_WALLET_ADDRESS on one
+    chain, already confirmation-filtered by the caller. Attribution is by the
     **sender address**: everyone funds one wallet here, so the only honest
     way to tell deposits apart is who sent them, matched against the wallet
     each user registered with /wallet. A transfer from an unregistered
@@ -2013,10 +2284,15 @@ def observe_testwallet_deposits(
     path: money arriving from an address is the one proof of control a user
     cannot fake by typing.
 
+    The wallet is one EOA, so the same address receives on every EVM chain;
+    `chain_id` records which one a transfer landed on (Base and Ethereum are
+    both watched) without changing the attribution rule.
+
     Idempotent by txid; re-running over the same list is a no-op.
     """
     events: list[dict[str, Any]] = []
-    first_run = get_meta(_TESTWALLET_BASELINE_KEY) is None
+    baseline_key = _testwallet_baseline_key(chain_id)
+    first_run = get_meta(baseline_key) is None
     now = _now()
     minimum = float(bot_config.POOL_MIN_DEPOSIT_USD)
 
@@ -2041,11 +2317,12 @@ def observe_testwallet_deposits(
                 baseline = first_run and owner is None
                 conn.execute(
                     "INSERT INTO pool_testwallet_deposits (txid, sender, "
-                    "amount_usd, status, first_seen_at, note) "
-                    "VALUES (?, ?, ?, ?, ?, ?)",
+                    "amount_usd, status, first_seen_at, note, chain_id) "
+                    "VALUES (?, ?, ?, ?, ?, ?, ?)",
                     (txid, sender, amount,
                      "baseline" if baseline else "unmatched", now,
-                     "pre-existing at watcher start" if baseline else None),
+                     "pre-existing at watcher start" if baseline else None,
+                     chain_id),
                 )
                 known = conn.execute(
                     "SELECT * FROM pool_testwallet_deposits WHERE txid = ?",
@@ -2065,6 +2342,7 @@ def observe_testwallet_deposits(
                 "kind": "unmatched", "txid": txid, "sender": sender,
                 "amount_usd": amount, "reason": reason,
                 "alerted": bool(known["alerted_at"]),
+                "chain_id": chain_id,
             })
             continue
 
@@ -2098,10 +2376,11 @@ def observe_testwallet_deposits(
                 "kind": "credited", "txid": txid, "sender": sender,
                 "telegram_id": owner, "amount_usd": amount,
                 "cash_usd": float(result.get("cash_usd") or 0.0),
+                "chain_id": chain_id,
             })
 
     if first_run:
-        set_meta(_TESTWALLET_BASELINE_KEY, now)
+        set_meta(baseline_key, now)
     return events
 
 
@@ -2131,6 +2410,12 @@ def assign_testwallet_deposit(
     address they never registered. Credits the chain's amount through the same
     idempotency ref as the automatic path, so an assign raced against the
     sweep still pays exactly once.
+
+    Deliberately does **not** verify the user's wallet: an admin vouching for
+    whose money it is says nothing about whether the user controls the
+    address it came from — an exchange's hot wallet is the usual case, and a
+    payout sent there would be lost. ``sender_is_registered`` in the result
+    tells the caller whether the user will be able to withdraw.
     """
     clean = normalize_txid(txid)
     if clean is None:
@@ -2165,8 +2450,14 @@ def assign_testwallet_deposit(
         "pool: %s assigned test-wallet tx %s ($%.2f) to %s",
         admin_id, clean, amount, telegram_id,
     )
+    sender = normalize_address(row["sender"]) if row["sender"] else None
+    registered = get_wallet(telegram_id)
     return {"ok": True, "telegram_id": telegram_id, "amount_usd": amount,
-            "cash_usd": result.get("cash_usd")}
+            "cash_usd": result.get("cash_usd"), "sender": sender,
+            "sender_is_registered": bool(
+                sender and registered
+                and str(registered["address"]) == sender
+            )}
 
 
 # ---------------------------------------------------------------------------
@@ -2420,9 +2711,10 @@ def mark_withdrawal_submitting(withdrawal_id: int) -> bool:
 
 
 def mark_withdrawal_submitted(
-    withdrawal_id: int, *, cb_tx_id: str, fee_usd: float, txid: str | None = None
+    withdrawal_id: int, *, cb_tx_id: str, fee_usd: float, txid: str | None = None,
+    source: str = "coinbase", chain_id: int | None = None,
 ) -> dict[str, Any]:
-    """The venue accepted it. True up the fee reserve against the real fee."""
+    """The rail accepted it. True up the fee reserve against the real fee."""
     with _write_txn() as conn:
         row = conn.execute(
             "SELECT * FROM pool_withdrawals WHERE id = ?", (withdrawal_id,)
@@ -2437,8 +2729,10 @@ def mark_withdrawal_submitted(
 
         conn.execute(
             "UPDATE pool_withdrawals SET status = 'submitted', cb_tx_id = ?, "
-            "txid = ?, fee_usd = ?, debited_usd = ? WHERE id = ?",
-            (cb_tx_id, txid, float(fee_usd), actual, withdrawal_id),
+            "txid = ?, fee_usd = ?, debited_usd = ?, source = ?, chain_id = ? "
+            "WHERE id = ?",
+            (cb_tx_id, txid, float(fee_usd), actual, str(source),
+             int(chain_id) if chain_id is not None else None, withdrawal_id),
         )
         if abs(refund) >= 0.01:
             # The reserve is headroom for a gas spike, not a charge. Whatever
@@ -3297,6 +3591,21 @@ def open_kalshi_placing(
             "limit_cents": int(limit_cents)}
 
 
+def attach_kalshi_order(intent_ref: str, order_id: str) -> bool:
+    """Stamp the venue order id onto a placing row as soon as we have it.
+
+    The create response is authoritative even when a follow-up GET 404s; keeping
+    the id on the row lets the recover sweep finish booking without guessing.
+    """
+    with _write_txn() as conn:
+        cur = conn.execute(
+            "UPDATE pool_kalshi_positions SET order_id = ? "
+            "WHERE intent_ref = ? AND status = 'placing'",
+            (str(order_id), str(intent_ref)),
+        )
+        return cur.rowcount > 0
+
+
 def finish_kalshi_open(
     intent_ref: str,
     *,
@@ -3309,8 +3618,10 @@ def finish_kalshi_open(
     """Book what the venue actually did with a 'placing' row.
 
     Zero fills return the whole reserve; a (partial) fill trims the reserve
-    down to the actual cost. Either way the reserve never exceeds what the
-    user genuinely has at the venue once this returns.
+    down to the actual cost. If the fill cost more than the pre-reserve
+    (IOC take), the overage is reserved from cash so reserved never understates
+    what's at the venue. Either way the reserve never exceeds what the user
+    genuinely has at the venue once this returns.
     """
     with _write_txn() as conn:
         row = conn.execute(
@@ -3337,6 +3648,13 @@ def finish_kalshi_open(
             return {"ok": True, "filled": 0}
 
         actual = round(float(cost_usd), 2)
+        overage = round(actual - reserved, 2)
+        if overage > 0:
+            _apply_event(
+                conn, telegram_id, kind="trade_open", amount_usd=overage,
+                ref=f"kalshi:{intent_ref}:overage",
+                note="kalshi fill overage vs pre-reserve",
+            )
         conn.execute(
             "UPDATE pool_kalshi_positions SET status = 'open', contracts = ?, "
             "entry_cents = ?, cost_usd = ?, fee_usd = ?, order_id = ? "
@@ -3408,6 +3726,48 @@ def open_kalshi_rows(status: str = "open") -> list[dict[str, Any]]:
     return [dict(r) for r in rows]
 
 
+def record_kalshi_attempt(
+    telegram_id: int,
+    strategy: str,
+    position_id: int,
+    *,
+    outcome: str,
+    market_ticker: str | None = None,
+    side: str | None = None,
+    entry_cents: float | None = None,
+    ask_cents: float | None = None,
+    lag_sec: float | None = None,
+) -> None:
+    """Journal one autopilot mirror attempt — fills and refusals alike.
+
+    Telemetry only: callers must treat a failure here as non-fatal, an
+    attempt row must never stand between a user and their entry.
+    """
+    with _connect() as conn:
+        conn.execute(
+            "INSERT INTO pool_kalshi_attempts (telegram_id, strategy, "
+            "position_id, market_ticker, side, entry_cents, ask_cents, "
+            "lag_sec, outcome, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            (
+                int(telegram_id), str(strategy), int(position_id),
+                market_ticker, side,
+                float(entry_cents) if entry_cents is not None else None,
+                float(ask_cents) if ask_cents is not None else None,
+                float(lag_sec) if lag_sec is not None else None,
+                str(outcome), _now(),
+            ),
+        )
+
+
+def kalshi_attempt_rows(limit: int = 200) -> list[dict[str, Any]]:
+    with _connect() as conn:
+        rows = conn.execute(
+            "SELECT * FROM pool_kalshi_attempts ORDER BY id DESC LIMIT ?",
+            (int(limit),),
+        ).fetchall()
+    return [dict(r) for r in rows]
+
+
 def stale_kalshi_placing(minutes: float = 10.0) -> list[dict[str, Any]]:
     """Rows stuck in 'placing' — a crash mid-placement, money possibly at the
     venue unbooked. Reported for a human; deliberately never auto-released,
@@ -3436,6 +3796,29 @@ def kalshi_positions_for(
     return [dict(r) for r in rows]
 
 
+def first_deposit_at(telegram_id: int) -> str | None:
+    """ISO timestamp of the user's first recorded deposit, or None."""
+    with _connect() as conn:
+        row = conn.execute(
+            "SELECT MIN(created_at) AS t FROM pool_events "
+            "WHERE telegram_id = ? AND kind = 'deposit'",
+            (telegram_id,),
+        ).fetchone()
+    return str(row["t"]) if row and row["t"] else None
+
+
+def kalshi_lane_realized(telegram_id: int, strategy: str) -> dict[str, Any]:
+    """Settled count + lifetime realized PnL on one Kalshi lane (unbounded SUM)."""
+    with _connect() as conn:
+        row = conn.execute(
+            "SELECT COUNT(*) AS n, COALESCE(SUM(pnl_usd), 0) AS s "
+            "FROM pool_kalshi_positions "
+            "WHERE telegram_id = ? AND strategy = ? AND status = 'settled'",
+            (telegram_id, strategy),
+        ).fetchone()
+    return {"settled": int(row["n"] or 0), "pnl_usd": float(row["s"] or 0.0)}
+
+
 def portfolio(telegram_id: int, spots: dict[str, float] | None = None) -> dict[str, Any]:
     """Everything /portfolio shows: cash, open stakes MTM, realized, history."""
     account = get_account(telegram_id)
@@ -3456,6 +3839,25 @@ def portfolio(telegram_id: int, spots: dict[str, float] | None = None) -> dict[s
             "ORDER BY id DESC LIMIT 10",
             (telegram_id,),
         ).fetchall()
+        first_deposit_row = conn.execute(
+            "SELECT MIN(created_at) AS t FROM pool_events "
+            "WHERE telegram_id = ? AND kind = 'deposit'",
+            (telegram_id,),
+        ).fetchone()
+        # Lifetime realized sums. The row lists above are capped for display;
+        # summing those instead undercounts as soon as an account has more
+        # history than the caps (50 stakes / 20 Kalshi rows) — the PnL line
+        # then quietly disagrees with the cash the journal actually moved.
+        stakes_realized_row = conn.execute(
+            "SELECT COALESCE(SUM(realized_pnl_usd), 0) AS s FROM pool_stakes "
+            "WHERE telegram_id = ?",
+            (telegram_id,),
+        ).fetchone()
+        kalshi_realized_row = conn.execute(
+            "SELECT COALESCE(SUM(pnl_usd), 0) AS s FROM pool_kalshi_positions "
+            "WHERE telegram_id = ? AND status = 'settled'",
+            (telegram_id,),
+        ).fetchone()
 
     open_stakes_out: list[dict[str, Any]] = []
     closed_stakes_out: list[dict[str, Any]] = []
@@ -3496,12 +3898,9 @@ def portfolio(telegram_id: int, spots: dict[str, float] | None = None) -> dict[s
     kalshi_rows = kalshi_positions_for(telegram_id)
     kalshi_open = [r for r in kalshi_rows if r["status"] == "open"]
     kalshi_closed = [r for r in kalshi_rows if r["status"] == "settled"]
-    kalshi_realized = sum(float(r["pnl_usd"] or 0) for r in kalshi_closed)
+    kalshi_realized = float(kalshi_realized_row["s"])
 
-    realized_total = (
-        sum(float(s["realized_pnl_usd"]) for s in map(dict, stake_rows))
-        + kalshi_realized
-    )
+    realized_total = float(stakes_realized_row["s"]) + kalshi_realized
     cash = float(account["cash_usd"])
     reserved = float(account["reserved_usd"])
     # Per-user deployments only — clamp so a stale allocation cannot exceed
@@ -3519,6 +3918,8 @@ def portfolio(telegram_id: int, spots: dict[str, float] | None = None) -> dict[s
         "total_usd": round(cash, 2),
         "deployments": {k: round(v, 2) for k, v in deploys.items() if v > 0},
         "deposited_usd": float(account["deposited_usd"]),
+        "first_deposit_at": first_deposit_row["t"] if first_deposit_row else None,
+        "kalshi_settled_pnl_usd": round(kalshi_realized, 2),
         "realized_pnl_usd": round(realized_total, 2),
         "unrealized_pnl_usd": round(unrealized, 2),
         "open_stakes": open_stakes_out,
@@ -3534,6 +3935,22 @@ def total_tester_cash() -> float:
     with _connect() as conn:
         row = conn.execute("SELECT SUM(cash_usd) AS s FROM pool_accounts").fetchone()
     return float(row["s"] or 0.0)
+
+
+def undeployed_claims_usd() -> float:
+    """Cash that must stay in the intake wallet (not yet allocated to a venue).
+
+    Deploy routing may only move *allocated* dollars on-chain. Everything else
+    is still "undeployed" and has to remain coverable by the test wallet.
+    """
+    total = 0.0
+    for acct in list_accounts():
+        cash = float(acct.get("cash_usd") or 0.0)
+        if cash <= 0:
+            continue
+        deployed = sum(allocations(int(acct["telegram_id"])).values())
+        total += max(0.0, cash - deployed)
+    return round(total, 2)
 
 
 def reconcile(

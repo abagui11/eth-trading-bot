@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 import sqlite3
 from datetime import datetime, timezone
 
@@ -79,10 +80,31 @@ def is_allowed(user_id: int) -> bool:
     return True
 
 
+def _pool_admin_ids() -> set[int]:
+    """Pool admins — ops inbox, not a trade-idea subscriber.
+
+    Admit / deposit / wallet / treasury alerts still reach them via
+    ``pool.admin_ids`` and ``notify.send_pool_admin_alert``. Trade cards,
+    z-moves, and research digests do not.
+    """
+    try:
+        import pool
+
+        return {int(i) for i in pool.admin_ids()}
+    except Exception:
+        return set()
+
+
 def broadcast_recipient_ids() -> list[int]:
-    """Telegram user IDs that receive hourly trade DMs."""
+    """Telegram user IDs that receive hourly trade DMs.
+
+    Pool admins are excluded even when they are also approved accounts —
+    their inbox is for Admit / deposits / admin alerts, not the idea stream.
+    Use a separate tester id (e.g. Ave) for product UX testing.
+    """
     import bot_config
 
+    admins = _pool_admin_ids()
     if bot_config.POOL_ENABLED:
         # Approval-gated product: cards go to admitted users (plus allowlist),
         # not to everyone who ever messaged the bot.
@@ -97,21 +119,26 @@ def broadcast_recipient_ids() -> list[int]:
         except Exception:
             ids = set()
         ids.update(load_allowed_ids())
-        return _drop_truncated_id_typos(ids)
+        return _drop_truncated_id_typos(ids - admins)
     if not config.PAYWALL_ENABLED:
         ids = {row["telegram_id"] for row in list_subscribers()}
         ids.update(load_allowed_ids())
-        return _drop_truncated_id_typos(ids)
-    return _drop_truncated_id_typos(set(load_allowed_ids()))
+        return _drop_truncated_id_typos(ids - admins)
+    return _drop_truncated_id_typos(set(load_allowed_ids()) - admins)
 
 
 def strategy_recipient_ids(strategy: str) -> list[int]:
     """Broadcast recipients for one strategy's idea stream.
 
-    With the pool on, approved testers only receive streams they subscribed
-    to (/subscribe); allowlisted internal ids keep receiving everything so
-    ops never lose sight of a lane. Without the pool, subscriptions do not
-    exist and the full broadcast list is returned unchanged.
+    With the pool on, a stream reaches ONLY the users subscribed to it
+    (/subscribe). There is no allowlist carve-out: an env-allowlisted id that
+    never subscribed — or that unsubscribed — receives nothing from this
+    lane. Pool admins are never on this list. Without the pool, subscriptions
+    do not exist and the full broadcast list is returned unchanged.
+
+    Fail-closed: if the subscription table cannot be read, send to no one
+    rather than spamming every broadcast recipient with a stream they may
+    have opted out of.
     """
     import bot_config
 
@@ -123,27 +150,26 @@ def strategy_recipient_ids(strategy: str) -> list[int]:
 
         subscribed = pool.strategy_subscriber_ids(strategy)
     except Exception:
-        return recipients
-    always = set(load_allowed_ids())
-    return [r for r in recipients if r in subscribed or r in always]
+        logging.getLogger(__name__).exception(
+            "strategy subscription read failed for %s — sending to no one",
+            strategy,
+        )
+        return []
+    return [r for r in recipients if r in subscribed]
 
 
 def internal_recipient_ids() -> list[int]:
-    """Internal ops allowlist for gated HQ trade cards.
+    """Internal allowlist for gated HQ trade cards (non-admin testers/ops).
 
-    Falls back to ALLOWED_TELEGRAM_IDS, then the admin chat, so the HQ lane
-    never silently broadcasts to the public subscriber list.
+    Falls back to ALLOWED_TELEGRAM_IDS. Pool admins are excluded — HQ cards
+    are trade ideas, not Admit/deposit traffic. An empty result means the
+    gated lane has no DM audience (MONITOR / admin alerts still fire).
     """
+    admins = _pool_admin_ids()
     if config.INTERNAL_TELEGRAM_IDS:
-        return _drop_truncated_id_typos(set(config.INTERNAL_TELEGRAM_IDS))
+        return _drop_truncated_id_typos(set(config.INTERNAL_TELEGRAM_IDS) - admins)
     if config.ALLOWED_TELEGRAM_IDS:
-        return _drop_truncated_id_typos(set(config.ALLOWED_TELEGRAM_IDS))
-    admin = config.TELEGRAM_ADMIN_CHAT_ID or config.TELEGRAM_CHAT_ID
-    if admin:
-        try:
-            return [int(str(admin).strip())]
-        except ValueError:
-            return []
+        return _drop_truncated_id_typos(set(config.ALLOWED_TELEGRAM_IDS) - admins)
     return []
 
 
@@ -176,6 +202,18 @@ def register_user(user_id: int, username: str | None = None) -> None:
             import pool
 
             pool.update_username(user_id, username)
+        except Exception:
+            pass
+
+    # Env allowlist bypasses the Admit gate via is_allowed, but does not
+    # open a pool_accounts row — Fund/Wallet/Strategies then refuse as
+    # "pool not open". Grandfather allowlisted ids into the pool once.
+    if bot_config.POOL_ENABLED and user_id in load_allowed_ids():
+        try:
+            import pool
+
+            if not pool.is_approved(user_id):
+                pool.approve_user(user_id, admin_id=0, username=username)
         except Exception:
             pass
 

@@ -10,7 +10,7 @@ from datetime import time as dtime, timezone
 
 from bot import build_application
 from agent import run_cycle
-from watchdog import run_watchdog
+from watchdog import run_kalshi_autopilot, run_watchdog
 import bot_config
 from macro.ingest import poll_feeds
 from zmove import run_zmove_scan
@@ -43,6 +43,23 @@ async def watchdog_job(context) -> None:
         await loop.run_in_executor(None, run_watchdog)
     except Exception:
         logger.exception("Watchdog job failed")
+
+
+async def kalshi_autopilot_job(context) -> None:
+    """Mirror fresh Kalshi lane entries for autopilot users, within seconds.
+
+    Decoupled from the 60s watchdog scan: the house bot fires on the
+    quarter-hour and the mirror's slip gate is measured against the house
+    entry, so detection lag converts directly into refused windows. When
+    nothing is fresh this is two local SQLite reads.
+    """
+    if not bot_config.POOL_ENABLED:
+        return
+    loop = asyncio.get_running_loop()
+    try:
+        await loop.run_in_executor(None, run_kalshi_autopilot)
+    except Exception:
+        logger.exception("Kalshi autopilot job failed")
 
 
 async def eva_day_job(context) -> None:
@@ -238,6 +255,20 @@ def main() -> None:
         logger.info(
             "Daily performance digest enabled — %02d:00 UTC",
             bot_config.DAILY_DIGEST_HOUR_UTC,
+        )
+
+    if bot_config.POOL_ENABLED and bot_config.KALSHI_AUTOPILOT_POLL_SEC > 0:
+        autopilot_interval = max(
+            2, min(int(bot_config.KALSHI_AUTOPILOT_POLL_SEC), 60)
+        )
+        app.job_queue.run_repeating(
+            kalshi_autopilot_job,
+            interval=autopilot_interval,
+            first=15,
+            name="kalshi_autopilot",
+        )
+        logger.info(
+            "Kalshi autopilot sweep enabled — every %ss", autopilot_interval
         )
 
     if bot_config.WATCHDOG_ENABLED:

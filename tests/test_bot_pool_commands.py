@@ -25,9 +25,12 @@ import bot
 import bot_config
 import config
 import demo_card
+import menu
+import moonpay
 import notify
 import pool
 import research
+import strategy_catalog
 import telegram_ui
 import trade_ideas_bridge
 import user_books
@@ -36,6 +39,8 @@ from telegram.error import BadRequest
 ADMIN = 555000
 UID = 777001
 ADDRESS = "0xDdA10FB6e6d726ae1cfB079CD79A4f0Ef7cAF240"
+# Phase 1 shared intake (Fund surface when MoonPay is dark).
+TEST_WALLET = "0xab1b6CC522C3EC7BdEa22598f6e510e7e752479d"
 WALLET = "0x" + "cd" * 20
 
 
@@ -47,6 +52,9 @@ class PoolCommandTests(unittest.TestCase):
             patch.object(config, "LEDGER_DB", db),
             patch.object(config, "POOL_DEPOSIT_ADDRESS", ADDRESS),
             patch.object(config, "POOL_DEPOSIT_CHAIN", "Ethereum mainnet"),
+            # Host .env often has the live test wallet; pin it so Fund tests
+            # do not leak production addresses into assertions.
+            patch.object(config, "TEST_WALLET_ADDRESS", TEST_WALLET),
             patch.object(config, "POOL_FORUM_CHAT_ID", None),
             patch.object(bot_config, "POOL_ENABLED", True),
             patch.object(bot_config, "POOL_ADMIN_TELEGRAM_IDS", (ADMIN,)),
@@ -59,11 +67,15 @@ class PoolCommandTests(unittest.TestCase):
             patch.object(bot_config, "POOL_MIN_WITHDRAWAL_USD", 50.0),
             patch.object(bot_config, "POOL_MAX_WITHDRAWAL_USD", 2500.0),
             patch.object(bot_config, "POOL_WITHDRAWAL_FEE_RESERVE_USD", 3.0),
+            patch.object(bot_config, "POOL_DEPLOY_FEE_USD", 0.0),
             # The quoted maximum nets off the daily caps, so leaving these to
             # whatever the host is configured for makes the withdraw-all
             # arithmetic below depend on the machine it runs on.
             patch.object(bot_config, "POOL_MAX_USER_DAILY_WITHDRAWAL_USD", 2500.0),
             patch.object(bot_config, "POOL_MAX_GLOBAL_DAILY_WITHDRAWAL_USD", 5000.0),
+            # Fund prefers MoonPay when live; keep Phase 1 test-wallet path.
+            patch.object(moonpay, "configured", return_value=False),
+            patch("menu.ensure_deposit_address", return_value={"ok": False}),
         ]
         for p in self._patches:
             p.start()
@@ -330,17 +342,76 @@ class PoolCommandTests(unittest.TestCase):
         update, _ = self._run(bot.cmd_deposit)
         text = self._texts(update)
         self.assertIn("/wallet", text)
-        # The deposit address must NOT be shown yet: a transfer sent before
-        # registration cannot be attributed to anyone.
-        self.assertNotIn(ADDRESS, text)
+        # Shared test-wallet Fund still shows the intake address, but leads
+        # with the registration rule — without it the arrival cannot be
+        # attributed to this user.
+        self.assertIn("register", text.lower())
+        self.assertIn(TEST_WALLET, text)
 
     def test_deposit_shows_the_address_once_a_wallet_exists(self) -> None:
         pool.approve_user(UID, admin_id=ADMIN)
         pool.register_wallet(UID, WALLET)
         update, _ = self._run(bot.cmd_deposit)
         text = self._texts(update)
-        self.assertIn(ADDRESS, text)
-        self.assertIn("Ethereum mainnet", text)
+        self.assertIn(TEST_WALLET, text)
+        self.assertIn("Base", text)
+        self.assertIn(WALLET, text)
+
+    def test_fund_copy_names_every_watched_network_and_warns_off_exchanges(self) -> None:
+        """The copy may only promise networks the sweep actually reads, and
+        must say up front that an exchange withdrawal cannot be matched or
+        paid back — the user learns it here, not when /withdraw refuses."""
+        pool.approve_user(UID, admin_id=ADMIN)
+        pool.register_wallet(UID, WALLET)
+        with patch.object(config, "TEST_WALLET_CHAIN_IDS", (8453, 1)):
+            update, _ = self._run(bot.cmd_deposit)
+        text = self._texts(update)
+        self.assertIn("Base or Ethereum", text)
+        self.assertIn("same address on each", text)
+        self.assertIn("not* from an exchange", text)
+        self.assertIn("Coinbase.com", text)
+        self.assertIn("5 minutes", text)
+        with patch.object(config, "TEST_WALLET_CHAIN_IDS", (8453,)):
+            update, _ = self._run(bot.cmd_deposit)
+        text = self._texts(update)
+        self.assertNotIn("Ethereum", text)
+        self.assertNotIn("same address", text)
+        self.assertIn("5 minutes", text)
+
+    def test_assigning_an_exchange_deposit_tells_both_sides_withdrawals_are_blocked(self) -> None:
+        """The exchange case end to end: unmatched arrival → admin /assign →
+        the user is credited AND told, in the same message, why they cannot
+        withdraw yet and how to fix it. Nobody should learn this from a
+        refused /withdraw weeks later."""
+        pool.approve_user(UID, admin_id=ADMIN)
+        pool.register_wallet(UID, WALLET)
+        pool.observe_testwallet_deposits([], chain_id=8453)  # baseline Base
+        hot_wallet = "0x" + "e" * 40
+        tx = "0x" + "7" * 64
+        pool.observe_testwallet_deposits([{
+            "txid": tx, "from": hot_wallet, "amount_usd": 80.0,
+            "confirmations": 40,
+        }], chain_id=8453)
+        self.assertEqual(len(pool.unmatched_testwallet_deposits()), 1)
+
+        update, context = self._admin_update([tx, str(UID)])
+        asyncio.run(bot.cmd_assign(update, context))
+
+        admin_text = self._texts(update)
+        self.assertIn("Assigned $80.00", admin_text)
+        self.assertIn("not their registered wallet", admin_text)
+        user_dm = str(context.bot.send_message.await_args.args[1])
+        self.assertEqual(context.bot.send_message.await_args.args[0], UID)
+        self.assertIn("Deposit received: $80.00", user_dm)
+        self.assertIn("exchange account", user_dm)
+        self.assertIn("unlock withdrawals", user_dm)
+        self.assertEqual(float(pool.get_account(UID)["cash_usd"]), 80.0)
+        self.assertEqual(pool.get_wallet(UID)["status"], "pending")
+
+    def test_wallet_registration_warns_against_exchange_addresses(self) -> None:
+        pool.approve_user(UID, admin_id=ADMIN)
+        update, _ = self._run(bot.cmd_wallet, [WALLET])
+        self.assertIn("exchange deposit address", self._texts(update))
 
     def test_wallet_registration_and_status(self) -> None:
         pool.approve_user(UID, admin_id=ADMIN)
@@ -369,7 +440,69 @@ class PoolCommandTests(unittest.TestCase):
         pool.credit(UID, 1000.0, admin_id=ADMIN, ref="t")
         with patch("research.get_spot_prices", return_value={}):
             update, _ = self._run(bot.cmd_portfolio)
-        self.assertIn("1,000.00", self._texts(update))
+        text = self._texts(update)
+        self.assertIn("Beginning balance: $1,000.00", text)
+        self.assertIn("net deposits since", text)
+        self.assertIn("Current balance: $1,000.00", text)
+        self.assertIn("Change: $+0.00 (+0.00%)", text)
+
+    def test_wallet_surface_shows_registered_sender(self) -> None:
+        pool.approve_user(UID, admin_id=ADMIN)
+        pool.register_wallet(UID, WALLET)
+        text, _ = menu.wallet_surface(UID)
+        self.assertIn(WALLET, text)
+        self.assertIn("Registered sender", text)
+
+    def test_strategy_detail_offers_autopilot_on_executable_lanes(self) -> None:
+        pool.approve_user(UID, admin_id=ADMIN)
+        pool.credit(UID, 1000.0, admin_id=ADMIN, ref="t")
+        with patch.object(strategy_catalog, "is_executable", return_value=True):
+            _text, keyboard = menu.strategy_detail(UID, "kalshi_wick")
+        payload = str(keyboard.to_dict())
+        self.assertIn("sub:auto:kalshi_wick:on", payload)
+
+    def test_strategy_pickers_show_only_visible_lanes(self) -> None:
+        """Phase 1: Telegram pickers offer the wick lane only. Hidden lanes
+        stay valid — subs, allocations, and deep links keep working."""
+        pool.approve_user(UID, admin_id=ADMIN)
+        pool.subscribe_strategy(UID, "ict")
+        text, keyboard = menu.strategies_surface(UID)
+        payload = str(keyboard.to_dict())
+        self.assertIn("strat:kalshi_wick", payload)
+        for hidden in ("ict", "mill", "kalshi_reversal"):
+            self.assertNotIn(f"strat:{hidden}", payload)
+            self.assertNotIn(strategy_catalog.STRATEGIES[hidden].label, text)
+        self.assertIn("Kalshi 15m Wick", text)
+        self.assertIn("Median ~130 trades/day", text)
+        self.assertIn("loss capped per Accept", text)
+        sub_payload = str(telegram_ui.subscribe_keyboard().to_dict())
+        self.assertIn("choose:kalshi_wick", sub_payload)
+        self.assertNotIn("choose:ict", sub_payload)
+        # Hidden lanes are still real lanes.
+        self.assertTrue(strategy_catalog.is_valid("ict"))
+        self.assertIn("ict", pool.strategy_subscriptions(UID))
+
+    def test_start_welcome_explains_undeployed_risk_and_autopilot(self) -> None:
+        """/start quotes Kalshi's 5% cost cap (not ICT's 0.7%) while wick
+        is the only visible lane — and names undeployed + autopilot."""
+        pool.approve_user(UID, admin_id=ADMIN)
+        text = telegram_ui.format_pool_welcome(wallet_usd=0.0)
+        self.assertIn("undeployed", text)
+        self.assertIn("5%", text)
+        self.assertNotIn("0.7%", text)
+        self.assertIn("autopilot", text.lower())
+        update, _ = self._run(bot.cmd_start)
+        self.assertIn("you're in", self._texts(update))
+        self.assertIn("undeployed", self._texts(update))
+        self.assertIn("5%", self._texts(update))
+
+    def test_allowlist_registers_open_a_pool_account(self) -> None:
+        """Env allowlist used to pass is_allowed without approve_user — Fund
+        then refused. register_user now grandfathers them into the pool."""
+        with patch.object(config, "ALLOWED_TELEGRAM_IDS", (UID,)):
+            access.register_user(UID, "allowlisted")
+        self.assertTrue(pool.is_approved(UID))
+        self.assertIsNotNone(pool.get_account(UID))
 
     def test_users_and_admin_are_admin_only(self) -> None:
         update, _ = self._run(bot.cmd_users)
@@ -381,6 +514,8 @@ class PoolCommandTests(unittest.TestCase):
         pool.request_access(UID, "tester")
         pool.approve_user(UID, admin_id=ADMIN, username="tester")
         pool.credit(UID, 500.0, admin_id=ADMIN, note="demo")
+        result = pool.set_allocation(UID, "kalshi_wick", 200.0)
+        self.assertTrue(result.get("ok"), result)
         pending = 888002
         pool.request_access(pending, "waiting")
 
@@ -395,6 +530,8 @@ class PoolCommandTests(unittest.TestCase):
         self.assertIn(str(UID), text)
         self.assertIn("@tester", text)
         self.assertIn("$500.00", text)
+        self.assertIn("deployed $200.00", text)
+        self.assertIn("kalshi_wick $200.00", text)
         self.assertIn("/credit", text)
         # Pending before approved so the Admit queue is what you see first.
         self.assertLess(text.index("pending"), text.index("approved"))
@@ -455,6 +592,7 @@ class DemoCardTests(unittest.TestCase):
             patch.object(bot_config, "POOL_ADMIN_TELEGRAM_IDS", (ADMIN,)),
             patch.object(bot_config, "POOL_RISK_PCT", 0.007),
             patch.object(bot_config, "POOL_MIN_EQUITY_USD", 500.0),
+            patch.object(bot_config, "POOL_DEPLOY_FEE_USD", 0.0),
         ]
         for p in self._patches:
             p.start()
@@ -481,7 +619,7 @@ class DemoCardTests(unittest.TestCase):
     def test_accept_reserves_the_real_budget(self) -> None:
         context = self._press("yes")
         reply = str(context.bot.send_message.await_args.args[1])
-        self.assertIn("You're in if it fills", reply)
+        self.assertIn("You're in", reply)
 
         intents = pool.pending_intents("demo_abc123")
         self.assertEqual(len(intents), 1)
@@ -560,6 +698,7 @@ class PoolMillAcceptTests(unittest.TestCase):
             patch.object(bot_config, "POOL_ADMIN_TELEGRAM_IDS", (ADMIN,)),
             patch.object(bot_config, "POOL_RISK_PCT", 0.007),
             patch.object(bot_config, "POOL_MIN_EQUITY_USD", 500.0),
+            patch.object(bot_config, "POOL_DEPLOY_FEE_USD", 0.0),
             patch.object(bot_config, "LIVE_MILL_ANY_ACCEPT_FILLS", True),
             patch.object(bot_config, "LIVE_MILL_FILL_TELEGRAM_IDS", (ADMIN,)),
         ]
@@ -629,12 +768,13 @@ class PoolMillAcceptTests(unittest.TestCase):
 
     def test_a_crash_in_the_fill_does_not_strand_the_reserve_silently(self) -> None:
         """Fail-soft, but the tester is told they are still pending rather
-        than told they are in."""
+        than told they are filled."""
         with patch.object(trade_ideas_bridge, "idea_pool_open", return_value=True), \
                 patch.object(trade_ideas_bridge, "request_manual_fill",
                              side_effect=RuntimeError("coinbase 503")):
             reply, _markup = bot._pool_mill_accept(1025, UID)
-        self.assertIn("You're in if it fills", reply)
+        self.assertIn("You're in", reply)
+        self.assertIn("moment it fills", reply)
         self.assertEqual(len(pool.pending_intents("mill_1025")), 1)
 
     def test_an_unallocated_accept_prompts_to_deploy(self) -> None:
@@ -645,7 +785,7 @@ class PoolMillAcceptTests(unittest.TestCase):
                 patch.object(trade_ideas_bridge, "request_manual_fill") as fill:
             reply, markup = bot._pool_mill_accept(1025, UID)
         fill.assert_not_called()
-        self.assertIn("haven't deployed capital", reply)
+        self.assertIn("Allocate to Trade Mill", reply)
         self.assertIsNotNone(markup)
         self.assertEqual(pool.pending_intents("mill_1025"), [])
         self.assertEqual(float(pool.get_account(UID)["reserved_usd"]), 0.0)

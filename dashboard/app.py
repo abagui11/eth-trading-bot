@@ -175,8 +175,12 @@ def create_app() -> FastAPI:
     if static_dir.is_dir():
         app.mount("/static", StaticFiles(directory=str(static_dir)), name="static")
 
+    # Read routes below are sync on purpose (same reasoning as the investor
+    # handlers): their bodies are blocking sqlite reads and payload builds, so
+    # `def` makes FastAPI run them in the threadpool instead of stalling the
+    # event loop — one slow render no longer serializes every other request.
     @app.get("/", response_class=HTMLResponse)
-    async def index(request: Request) -> HTMLResponse:
+    def index(request: Request) -> HTMLResponse:
         import eva_variants_bridge
         import kalshi_bridge
         import trade_ideas_bridge
@@ -248,7 +252,7 @@ def create_app() -> FastAPI:
         )
 
     @app.get("/api/eva/variants")
-    async def api_eva_variants(limit: int = 20) -> dict:
+    def api_eva_variants(limit: int = 20) -> dict:
         """Eva HQ variant experiment: four books, one live."""
         import eva_variants_bridge
 
@@ -257,7 +261,7 @@ def create_app() -> FastAPI:
         )
 
     @app.get("/api/eva/lab")
-    async def api_eva_lab() -> dict:
+    def api_eva_lab() -> dict:
         """Strategy funnel: every book grouped by approval stage."""
         from dashboard import eva_lab as eva_lab_module
 
@@ -268,36 +272,52 @@ def create_app() -> FastAPI:
             return {"available": False}
 
     @app.get("/api/kalshi/performance")
-    async def api_kalshi_performance(limit: int = 15) -> dict:
+    def api_kalshi_performance(
+        limit: int = 15, offset: int = 0
+    ) -> dict:
         """Kalshi 15m bot paper book (read-only colocated ledger)."""
         import kalshi_bridge
 
-        payload = kalshi_bridge.performance_payload(limit=min(max(limit, 1), 100))
+        payload = kalshi_bridge.performance_payload(
+            limit=min(max(limit, 1), 100),
+            offset=max(offset, 0),
+        )
         if not payload:
             return {"available": False}
-        try:
-            from dashboard import kalshi_variants
+        # Variants and the equity chart never change between Load-more clicks;
+        # offset pages only need the extra closed rows.
+        if offset == 0:
+            try:
+                from dashboard import kalshi_variants
 
-            payload["wick_variants"] = kalshi_variants.build_variants_payload(
-                kalshi_bridge.kalshi_db_path(), kalshi_bridge.lastmin_db_path()
-            )
-        except Exception:
-            logger.exception("wick variants payload failed")
-            payload["wick_variants"] = {"available": False, "reason": "error"}
+                payload["wick_variants"] = kalshi_variants.build_variants_payload(
+                    kalshi_bridge.kalshi_db_path(), kalshi_bridge.lastmin_db_path()
+                )
+            except Exception:
+                logger.exception("wick variants payload failed")
+                payload["wick_variants"] = {"available": False, "reason": "error"}
+        if offset == 0:
+            try:
+                from dashboard import edge_analytics
+
+                payload["equity"] = edge_analytics.kalshi_equity_curves()
+            except Exception:
+                logger.exception("kalshi equity curves failed")
+                payload["equity"] = {"available": False, "books": []}
         return payload
 
     @app.get("/api/brain")
-    async def api_brain() -> dict:
+    def api_brain() -> dict:
         """Public intelligence hub snapshot (no HQ ideas, no service token)."""
         return get_brain_payload()
 
     @app.get("/api/yield")
-    async def api_yield() -> dict:
+    def api_yield() -> dict:
         """Yield Generation tab payload (proxied from yield_gen_bot)."""
         return get_yield_payload()
 
     @app.get("/api/trades/live")
-    async def api_live_trades(
+    def api_live_trades(
         limit: int = 50, offset: int = 0, source: str = "hq"
     ) -> dict:
         return {
@@ -314,7 +334,7 @@ def create_app() -> FastAPI:
         }
 
     @app.get("/api/brain/cycle-chart")
-    async def api_brain_cycle_chart() -> FileResponse:
+    def api_brain_cycle_chart() -> FileResponse:
         thesis = intel_store.latest_long_thesis()
         path = (thesis or {}).get("chart_path")
         if not path or not Path(str(path)).exists():
@@ -326,7 +346,7 @@ def create_app() -> FastAPI:
         return FileResponse(str(resolved), media_type="image/png")
 
     @app.get("/api/brain/structure/{product_id}/{timeframe}")
-    async def api_brain_structure(product_id: str, timeframe: str) -> FileResponse:
+    def api_brain_structure(product_id: str, timeframe: str) -> FileResponse:
         """Marked stance-board chart for a product/timeframe (public)."""
         path = stance_chart_path(product_id, timeframe)
         if path is None:
@@ -334,7 +354,7 @@ def create_app() -> FastAPI:
         return FileResponse(path, media_type="image/png")
 
     @app.get("/api/brain/cycle-figure")
-    async def api_brain_cycle_figure() -> dict:
+    def api_brain_cycle_figure() -> dict:
         """Plotly spec for the interactive 4-year cycle chart (public)."""
         thesis = intel_store.latest_long_thesis() or {}
         path = ((thesis.get("thesis") or {}).get("cycle_figure_path")) or ""
@@ -347,7 +367,7 @@ def create_app() -> FastAPI:
         return json.loads(resolved.read_text(encoding="utf-8"))
 
     @app.get("/volume", response_class=HTMLResponse)
-    async def volume_book(request: Request) -> HTMLResponse:
+    def volume_book(request: Request) -> HTMLResponse:
         """Hidden paper book for every public-lane idea (no hub link)."""
         import trade_ideas_bridge
 
@@ -396,7 +416,7 @@ def create_app() -> FastAPI:
         return build_edge_payload()
 
     @app.get("/feed", response_class=HTMLResponse)
-    async def idea_feed(request: Request) -> HTMLResponse:
+    def idea_feed(request: Request) -> HTMLResponse:
         """Public mill stream — same cards for every visitor; Accept needs login."""
         telegram_id = _resolve_telegram_id(request)
         response = templates.TemplateResponse(
@@ -412,7 +432,7 @@ def create_app() -> FastAPI:
         return response
 
     @app.get("/api/ideas/stream")
-    async def api_idea_stream(
+    def api_idea_stream(
         request: Request, limit: int = 40, after_id: int | None = None
     ) -> dict:
         import trade_ideas_bridge
@@ -434,7 +454,7 @@ def create_app() -> FastAPI:
         return payload
 
     @app.get("/api/ideas/funnel")
-    async def api_idea_funnel() -> dict:
+    def api_idea_funnel() -> dict:
         import trade_ideas_bridge
 
         payload = trade_ideas_bridge.idea_funnel()
@@ -477,13 +497,13 @@ def create_app() -> FastAPI:
         }
 
     @app.get("/api/vault/snapshot")
-    async def api_vault_snapshot() -> dict:
+    def api_vault_snapshot() -> dict:
         import vault as hq_vault
 
         return hq_vault.snapshot()
 
     @app.get("/api/vault/stream")
-    async def api_vault_stream(
+    def api_vault_stream(
         request: Request, limit: int = 20, after_id: int | None = None
     ) -> dict:
         import vault as hq_vault
@@ -526,7 +546,7 @@ def create_app() -> FastAPI:
         return result
 
     @app.get("/me", response_class=HTMLResponse)
-    async def me(request: Request) -> Response:
+    def me(request: Request) -> Response:
         telegram_id = _resolve_telegram_id(request)
         if telegram_id is None:
             return templates.TemplateResponse(
@@ -561,50 +581,50 @@ def create_app() -> FastAPI:
         return response
 
     @app.get("/api/spot")
-    async def api_spot() -> dict:
+    def api_spot() -> dict:
         return data.get_live_spot()
 
     @app.get("/api/spots")
-    async def api_spots() -> dict:
+    def api_spots() -> dict:
         return data.get_live_spots()
 
     @app.get("/api/status")
-    async def api_status() -> dict:
+    def api_status() -> dict:
         return data.get_status_payload()
 
     @app.get("/api/positions")
-    async def api_positions() -> list:
+    def api_positions() -> list:
         return data.get_open_positions_payload()
 
     @app.get("/api/trades/paper")
-    async def api_paper_trades(limit: int = 50, offset: int = 0) -> list:
+    def api_paper_trades(limit: int = 50, offset: int = 0) -> list:
         return data.get_closed_trades_payload(
             limit=min(limit, 100), offset=max(offset, 0)
         )
 
     @app.get("/api/trades/archived")
-    async def api_archived_trades(limit: int = 50, offset: int = 0) -> list:
+    def api_archived_trades(limit: int = 50, offset: int = 0) -> list:
         return data.get_archived_trades_payload(
             limit=min(limit, 100), offset=max(offset, 0)
         )
 
     @app.get("/api/cycles")
-    async def api_cycles(limit: int = 30, offset: int = 0) -> list:
+    def api_cycles(limit: int = 30, offset: int = 0) -> list:
         return data.get_cycles(limit=min(limit, 100), offset=max(offset, 0))
 
     @app.get("/api/cycles/{cycle_id}")
-    async def api_cycle_detail(cycle_id: str) -> dict:
+    def api_cycle_detail(cycle_id: str) -> dict:
         detail = data.get_cycle_detail(cycle_id)
         if detail is None:
             raise HTTPException(status_code=404, detail="Cycle not found")
         return detail
 
     @app.get("/api/performance")
-    async def api_performance() -> dict:
+    def api_performance() -> dict:
         return data.get_performance_payload()
 
     @app.get("/api/macro")
-    async def api_macro() -> dict:
+    def api_macro() -> dict:
         return data.get_macro_payload()
 
     @app.get("/api/ops/watchdog-execute")
@@ -725,7 +745,7 @@ def create_app() -> FastAPI:
         return {"ok": True, "result": result}
 
     @app.get("/api/chart/latest")
-    async def api_chart_latest() -> FileResponse:
+    def api_chart_latest() -> FileResponse:
         snapshot = audit.get_latest_snapshot()
         if snapshot is None:
             raise HTTPException(status_code=404, detail="No snapshot")
@@ -735,7 +755,7 @@ def create_app() -> FastAPI:
         return FileResponse(path, media_type="image/png")
 
     @app.get("/api/chart/product/{product_id}/h4")
-    async def api_chart_product_h4(product_id: str) -> FileResponse:
+    def api_chart_product_h4(product_id: str) -> FileResponse:
         """Newest marked H4 PNG for a product (disk fallback when no snapshot)."""
         path = latest_marked_h4_path(product_id)
         if path is None:
@@ -743,7 +763,7 @@ def create_app() -> FastAPI:
         return FileResponse(path, media_type="image/png")
 
     @app.get("/api/live-chart/{trade_id}")
-    async def api_live_chart(trade_id: int) -> FileResponse:
+    def api_live_chart(trade_id: int) -> FileResponse:
         """Annotated Eva close chart. HQ closed trades only."""
         row = live_ledger.get_trade(int(trade_id))
         if (
@@ -758,7 +778,7 @@ def create_app() -> FastAPI:
         return FileResponse(path, media_type="image/png")
 
     @app.get("/api/chart/{cycle_id}")
-    async def api_chart_cycle(
+    def api_chart_cycle(
         cycle_id: str,
         kind: str = "marked",
         tf: str = "H4",

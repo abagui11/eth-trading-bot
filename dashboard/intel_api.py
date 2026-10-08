@@ -248,13 +248,24 @@ async def subscribers(strategy: str | None = None) -> dict:
     """
     if strategy:
         recipients = access.strategy_recipient_ids(strategy)
+        # Autopilot flags travel with the recipient list so Kalshi's eva_relay
+        # can swap Accept/Reject for an "auto-accepted · turn off" button
+        # without a per-user round trip.
+        import pool
+
+        autopilot = [
+            int(uid) for uid in recipients
+            if pool.autopilot_enabled(int(uid), str(strategy))
+        ]
     else:
         recipients = access.broadcast_recipient_ids()
+        autopilot = []
     return {
         "paywall_enabled": config.PAYWALL_ENABLED,
         "strategy": strategy,
         "count": len(recipients),
         "recipients": recipients,
+        "autopilot": autopilot,
     }
 
 

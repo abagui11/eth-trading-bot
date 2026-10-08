@@ -536,8 +536,8 @@ async def broadcast_to_subscribers(
 
     Forum mode (POOL_FORUM_CHAT_ID set, non-internal cards): the card posts
     ONCE into the Trades topic — everyone in the group sees the same message
-    and Accept attributes to whoever tapped it. The admin still gets a DM
-    copy, and pending follow-ups post back into the same topic.
+    and Accept attributes to whoever tapped it. Pending follow-ups post back
+    into the same topic. Pool admins do not get a private trade-card copy.
 
     When the tester pool is on (``POOL_ENABLED``), trade cards stay personal
     DMs even if a forum is configured — each card needs that user's Accept
@@ -566,23 +566,6 @@ async def broadcast_to_subscribers(
             logger.info("Sent suggestion to forum %s topic %s", chat_id, thread_id)
         except Exception:
             logger.exception("Failed to send to forum %s", chat_id)
-
-        admin_chat = config.TELEGRAM_ADMIN_CHAT_ID or config.TELEGRAM_CHAT_ID
-        if admin_chat:
-            try:
-                await send_suggestion_to_chat(
-                    bot,
-                    admin_chat,
-                    suggestion,
-                    chart_paths,
-                    footer,
-                    offer_id=offer_id,
-                    display_summary_text=display_summary_text,
-                    resting=resting,
-                    spot=spot,
-                )
-            except Exception:
-                logger.exception("Failed to send to admin chat %s", admin_chat)
         return sent
 
     recipients = (
@@ -614,31 +597,6 @@ async def broadcast_to_subscribers(
             logger.info("Sent suggestion to user %s", user_id)
         except Exception:
             logger.exception("Failed to send to user %s", user_id)
-
-    admin_chat = config.TELEGRAM_ADMIN_CHAT_ID or config.TELEGRAM_CHAT_ID
-    if admin_chat:
-        try:
-            admin_id = int(str(admin_chat).strip())
-        except ValueError:
-            admin_id = None
-        if admin_id is not None and admin_id not in sent:
-            try:
-                await send_suggestion_to_chat(
-                    bot,
-                    admin_chat,
-                    suggestion,
-                    chart_paths,
-                    footer,
-                    offer_id=offer_id,
-                    telegram_id=admin_id,
-                    display_summary_text=display_summary_text,
-                    resting=resting,
-                    spot=spot,
-                )
-                sent.add(admin_id)
-                logger.info("Sent suggestion to admin chat %s", admin_chat)
-            except Exception:
-                logger.exception("Failed to send to admin chat %s", admin_chat)
 
     return sent
 
@@ -856,7 +814,11 @@ def broadcast_text(
 
 async def broadcast_plain_text_async(text: str) -> None:
     """Research-labelled pushes (z-moves, digests): forum Research topic when
-    configured, otherwise DM every broadcast recipient as before."""
+    configured, otherwise DM every broadcast recipient as before.
+
+    Pool admins are not on the recipient list and do not get an admin-chat
+    copy — those inboxes stay for Admit / deposits / admin alerts.
+    """
     bot = Bot(token=config.TELEGRAM_BOT_TOKEN)
     body = text.strip()[:4096]
 
@@ -869,12 +831,6 @@ async def broadcast_plain_text_async(text: str) -> None:
             )
         except Exception:
             logger.exception("Failed to send plain broadcast to forum %s", chat_id)
-        admin_chat = config.TELEGRAM_ADMIN_CHAT_ID or config.TELEGRAM_CHAT_ID
-        if admin_chat:
-            try:
-                await bot.send_message(chat_id=admin_chat, text=body)
-            except Exception:
-                logger.exception("Plain broadcast admin copy failed")
         return
 
     recipients = access.broadcast_recipient_ids()
@@ -887,18 +843,6 @@ async def broadcast_plain_text_async(text: str) -> None:
             sent.add(user_id)
         except Exception:
             logger.exception("Failed to send plain broadcast to user %s", user_id)
-
-    admin_chat = config.TELEGRAM_ADMIN_CHAT_ID or config.TELEGRAM_CHAT_ID
-    if admin_chat:
-        try:
-            admin_id = int(str(admin_chat).strip())
-        except ValueError:
-            admin_id = None
-        if admin_id is not None and admin_id not in sent:
-            try:
-                await bot.send_message(chat_id=admin_id, text=body)
-            except Exception:
-                logger.exception("Failed to send plain broadcast to admin %s", admin_chat)
 
 
 def broadcast_plain_text(text: str) -> None:
@@ -1143,12 +1087,15 @@ def send_pool_photo_dm_with_keyboard(
 def send_pool_admin_alert(text: str) -> None:
     """Alert every pool admin by DM. Never raises."""
     import pool
+    import telegram_ui
+
+    body = telegram_ui.format_admin_message(text)
 
     async def _run() -> None:
         bot = Bot(token=config.TELEGRAM_BOT_TOKEN)
         for admin_id in pool.admin_ids():
             try:
-                await bot.send_message(chat_id=admin_id, text=text.strip()[:4096])
+                await bot.send_message(chat_id=admin_id, text=body[:4096])
             except Exception:
                 logger.exception("Pool admin alert failed for %s", admin_id)
 

@@ -142,12 +142,14 @@ def parse_args(args: list[str], *, default_id: int) -> dict[str, Any]:
 
 
 def recipients() -> list[int]:
-    """Every approved pool account — who a real card would reach."""
+    """Approved pool accounts that should see a real card — not pool admins."""
     import pool
 
+    admins = set(pool.admin_ids())
     return [
         int(a["telegram_id"]) for a in pool.list_accounts()
         if pool.is_approved(int(a["telegram_id"]))
+        and int(a["telegram_id"]) not in admins
     ]
 
 

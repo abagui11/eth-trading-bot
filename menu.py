@@ -111,22 +111,42 @@ def fund_surface(user_id: int) -> tuple[str, object]:
 
 
 def wallet_surface(user_id: int) -> tuple[str, object]:
-    bits = _wallet_bits(user_id)
-    if not bits.get("address") and moonpay.configured():
-        prov = ensure_deposit_address(user_id)
-        bits["address"] = prov.get("address")
+    """Wallet button: registered sender/payout address + cash split.
+
+    Distinct from Fund — Fund is where money lands; Wallet is the address
+    the user registered (attribution + withdrawals) and their balances.
+    """
+    bal = pool.wallet_balance(user_id)
+    registered = pool.get_wallet(user_id)
+    deposit_address = None
+    if moonpay.configured():
+        bits = _wallet_bits(user_id)
+        if not bits.get("address"):
+            prov = ensure_deposit_address(user_id)
+            bits["address"] = prov.get("address")
+        deposit_address = bits.get("address")
     text = telegram_ui.format_wallet_surface(
-        address=bits.get("address"),
-        wallet_usd=float(bits.get("wallet_usd") or 0),
-        deployed_usd=float(bits.get("deployed_usd") or 0),
-        reserved_usd=float(bits.get("reserved_usd") or 0),
+        registered_address=(registered or {}).get("address"),
+        registered_status=(registered or {}).get("status"),
+        deposit_address=deposit_address,
+        test_wallet=bool(config.TEST_WALLET_ADDRESS) and not moonpay.configured(),
+        wallet_usd=float(bal.get("wallet_usd") or 0),
+        deployed_usd=float(bal.get("deployed_usd") or 0),
+        reserved_usd=float(bal.get("reserved_usd") or 0),
     )
     return text, telegram_ui.wallet_keyboard()
 
 
 def portfolio_surface(user_id: int) -> tuple[str, object]:
     spots = research.get_spot_prices()
-    text = telegram_ui.format_portfolio(pool.portfolio(user_id, spots))
+    p = pool.portfolio(user_id, spots)
+    if p.get("ok"):
+        try:
+            import counterfactual
+            p["autopilot_what_if"] = counterfactual.autopilot_what_if(user_id)
+        except Exception:
+            logger.exception("Autopilot what-if failed for %s", user_id)
+    text = telegram_ui.format_portfolio(p)
     return text, telegram_ui.pool_main_keyboard()
 
 
@@ -139,7 +159,7 @@ def strategies_surface(user_id: int) -> tuple[str, object]:
         f"Minimum deploy ${float(bot_config.POOL_MIN_DEPLOY_USD):,.0f}.",
         "",
     ]
-    for key in strategy_catalog.ORDER:
+    for key in strategy_catalog.VISIBLE:
         strat = strategy_catalog.STRATEGIES[key]
         flags = []
         if key in subs:
@@ -152,6 +172,7 @@ def strategies_surface(user_id: int) -> tuple[str, object]:
         tag = f" ({', '.join(flags)})" if flags else ""
         lines.append(f"• {strat.label}{tag}")
         lines.append(f"  {strat.pitch}")
+        lines.append(f"  {strat.cadence} · {strat.profile}")
     return "\n".join(lines), telegram_ui.strategies_keyboard()
 
 
@@ -187,7 +208,6 @@ def strategy_detail(user_id: int, key: str) -> tuple[str, object | None]:
         f"${float(bot_config.POOL_MIN_DEPLOY_USD):,.0f}. "
         "Or type a dollar amount."
     )
-    # Reuse allocation_prompt style when available
     try:
         text = (
             f"{strat.label}\n\n"
@@ -197,7 +217,19 @@ def strategy_detail(user_id: int, key: str) -> tuple[str, object | None]:
         )
     except Exception:
         pass
-    return text, telegram_ui.alloc_keyboard(key)
+
+    # Same autopilot offer the /subscribe path shows — only on lanes that
+    # can actually execute (is_executable already passed above).
+    autopilot = pool.autopilot_enabled(user_id, key)
+    text += (
+        "\n\nAutopilot is ON — every trade this lane takes is entered "
+        "for you automatically from your deployment."
+        if autopilot else
+        "\n\nPrefer hands-free? Autopilot enters you into every trade "
+        "this lane takes, sized exactly like an Accept — your own "
+        "position, your own deployment, no tap needed."
+    )
+    return text, telegram_ui.alloc_keyboard(key, autopilot=autopilot)
 
 
 def help_surface() -> tuple[str, object]:
@@ -245,10 +277,7 @@ def brain_section(section: str) -> tuple[str, list[str] | None]:
     if section == "news":
         return brain_report.news_html(), None
     if section == "ask":
-        return (
-            "Ask Eva anything in plain English — just type your question here.",
-            None,
-        )
+        return (telegram_ui.ASK_EVA_PROMPT, None)
     return "Unknown section.", None
 
 

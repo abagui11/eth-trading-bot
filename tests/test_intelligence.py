@@ -633,7 +633,8 @@ class TestInternalGate(unittest.TestCase):
     def test_internal_ids_prefer_internal_env(self) -> None:
         import access
 
-        with mock.patch.object(config, "INTERNAL_TELEGRAM_IDS", [111, 222]):
+        with mock.patch.object(config, "INTERNAL_TELEGRAM_IDS", [111, 222]), \
+                mock.patch.object(access, "_pool_admin_ids", return_value=set()):
             self.assertEqual(sorted(access.internal_recipient_ids()), [111, 222])
 
     def test_internal_ids_fallback_to_allowlist(self) -> None:
@@ -641,8 +642,15 @@ class TestInternalGate(unittest.TestCase):
 
         with mock.patch.object(config, "INTERNAL_TELEGRAM_IDS", []), mock.patch.object(
             config, "ALLOWED_TELEGRAM_IDS", [333]
-        ):
+        ), mock.patch.object(access, "_pool_admin_ids", return_value=set()):
             self.assertEqual(access.internal_recipient_ids(), [333])
+
+    def test_internal_ids_skip_pool_admins(self) -> None:
+        import access
+
+        with mock.patch.object(config, "INTERNAL_TELEGRAM_IDS", [111, 222]), \
+                mock.patch.object(access, "_pool_admin_ids", return_value={111}):
+            self.assertEqual(access.internal_recipient_ids(), [222])
 
 
 if __name__ == "__main__":

@@ -8,6 +8,7 @@ from telegram import InlineKeyboardButton, InlineKeyboardMarkup
 
 import bot_config
 import config
+import strategy_catalog
 
 CB_OPEN = "ui:open"
 CB_OPEN_SIZE_PREFIX = "ui:open:"
@@ -66,6 +67,9 @@ BOT_DESCRIPTION = (
     "Blazingly-fast trading intelligence at your fingertips with Eva. "
     "Use /start to open the main menu — fund with USDC, deploy into strategies, "
     "and follow Eva's live read.\n\n"
+    "You can also just talk to Eva in plain English — ask about your balance, "
+    "your portfolio, recent closed trades, the latest trade idea, or the "
+    "current market read.\n\n"
     "Powered by Republic Technologies\n"
     "https://eva.finance/"
 )
@@ -74,16 +78,59 @@ BOT_SHORT_DESCRIPTION = (
     "Eva — market intelligence & live strategy books. Powered by Republic Technologies."
 )
 
+
+def format_admin_message(text: str) -> str:
+    """Prefix every ops DM so a dual-role admin/tester can tell them apart.
+
+    Plain ``*admin*`` (no parse_mode) so the asterisks stay visible in Telegram.
+    """
+    body = (text or "").strip()
+    if not body:
+        return "*admin*"
+    if body.lower().startswith("*admin*"):
+        return body
+    return f"*admin*\n\n{body}"
+
+
 RESEARCH_HELP = (
     "Research — tap Brain on the main menu, or ask Eva in plain English.\n\n"
     "Topics: digest, funding, volume, dominance, macro, asian_session."
 )
 
+# How-to-talk-to-Eva copy, shared across the welcomes, Help, and the
+# Brain → Ask prompt so every surface teaches the same thing: Eva answers
+# from your account and its recorded data, and what-if math is out of scope
+# (the fact-check audit strips numbers it cannot verify).
+TALK_TO_EVA_TIPS = (
+    "You can also just talk to me — type a question in plain English. Try "
+    '"what\'s in my portfolio?", "which of my trades closed recently?", '
+    '"what\'s the latest trade idea?", or "what\'s your read on the market?". '
+    "I answer from your account and Eva's recorded data only — I can't "
+    'calculate hypotheticals like "how much would I have made if…", and my '
+    "fact-checker removes numbers it can't verify. Your real history lives "
+    "in Portfolio."
+)
+
+# Shown when the user taps Brain → Ask Eva.
+ASK_EVA_PROMPT = (
+    "Ask Eva anything in plain English — just type your question here.\n\n"
+    "Works well:\n"
+    '- "What\'s in my portfolio?" / "Is my wallet registered?"\n'
+    '- "Which of my trades closed recently?"\n'
+    '- "What\'s the latest trade idea, and why?"\n'
+    '- "What\'s your read on the market right now?"\n'
+    '- "Which update mentioned the sweep of the highs?"\n\n'
+    "Eva answers from your account and its recorded data. It can't run "
+    'what-if math (e.g. "how much would I have made if…") — a fact-checker '
+    "removes any numbers it can't verify against the records. For your real "
+    "history and P&L, tap Portfolio."
+)
+
 HELP_MESSAGE = (
     "Eva is Republic Technologies' market intelligence layer — structure, "
     "cycle, and news — with live strategy books built on top.\n\n"
-    f"Questions? {config.EVA_SUPPORT_EMAIL}\n"
-    f"Website: {config.EVA_WEBSITE_URL}\n\n"
+    f"{TALK_TO_EVA_TIPS}\n\n"
+    f"Questions, or something not working? {config.EVA_WEBSITE_URL}\n\n"
     "Use the buttons below — Fund, Wallet, Strategies, Portfolio, Brain."
 )
 
@@ -92,7 +139,7 @@ HELP_MESSAGE = (
 ADMIN_HELP_MESSAGE = (
     "Admin commands (pool operators only):\n\n"
     "Onboarding\n"
-    "/users — roster of telegram ids + usernames + cash\n"
+    "/users — roster of telegram ids + usernames + cash + deployments\n"
     "  (Admit/Deny also arrives as a card when someone new messages)\n"
     "/credit <id> <usd> [note] — fund an approved account\n"
     "/debit <id> <usd> [note] — pull cash back\n"
@@ -227,7 +274,7 @@ def strategies_keyboard() -> InlineKeyboardMarkup:
                 callback_data=f"{CB_STRAT_PREFIX}{key}",
             )
         ]
-        for key in strategy_catalog.ORDER
+        for key in strategy_catalog.VISIBLE
     ]
     rows.append([InlineKeyboardButton("← Back", callback_data=CB_MENU_HOME)])
     return InlineKeyboardMarkup(rows)
@@ -368,6 +415,9 @@ CB_POOL_DEPOSIT_PREFIX = "pooldep:"    # pooldep:credit:<req_id> / pooldep:deny:
 CB_POOL_WALLET_PREFIX = "poolwal:"     # poolwal:approve:<row_id> / poolwal:reject:<row_id>
 CB_POOL_WITHDRAW_PREFIX = "poolwd:"    # poolwd:approve:<id> / poolwd:reject:<id>
 CB_POOL_UNSUB_PREFIX = "poolunsub:"    # poolunsub:yes:<id> / poolunsub:no:<id>
+# Admin tap that lets the hot-wallet signer broadcast one journaled
+# test_wallet → venue leg. Drawn only when treasury.signer_check passes.
+CB_TREASURY_SEND_PREFIX = "treasend:"  # treasend:<transfer_id>
 CB_POOL_PORTFOLIO = "pool:portfolio"
 CB_POOL_DEPOSIT = "pool:deposit"
 # Demo card Accept. A separate prefix on purpose: it carries a ref no
@@ -387,16 +437,20 @@ POOL_WELCOME_MESSAGE = (
     "Welcome to Eva — you're in.\n\n"
     "Tap the buttons below to Fund, check Wallet, deploy into Strategies, "
     "or open Portfolio. Brain shows what Eva sees right now.\n\n"
-    "Each Accept risks about "
-    f"{bot_config.POOL_RISK_PCT * 100:.1f}% of your deployment to that "
-    "strategy — not your full balance.\n\n"
+    "What you fund stays undeployed until you select a strategy and deploy "
+    "into it. "
+    f"{strategy_catalog.visible_accept_risk_sentence()} "
+    "On autopilot, every trade that strategy takes is accepted for you "
+    "automatically.\n\n"
+    f"{TALK_TO_EVA_TIPS}\n\n"
     "Trading involves substantial risk of loss. Not financial advice."
 )
 
 
 # /subscribe flow. sub:choose:<key> picks a strategy; sub:alloc:<key>:<pct>
 # allocates that percent of available cash; sub:skip:<key> subscribes without
-# capital. Keys are strategy_catalog wire keys.
+# capital; sub:auto:<key>:<on|off> flips autopilot for an executable lane.
+# Keys are strategy_catalog wire keys.
 CB_SUB_PREFIX = "sub:"
 
 # Percent-of-available presets on the allocation prompt.
@@ -411,28 +465,48 @@ def subscribe_keyboard() -> InlineKeyboardMarkup:
             strategy_catalog.STRATEGIES[key].label,
             callback_data=f"{CB_SUB_PREFIX}choose:{key}",
         )]
-        for key in strategy_catalog.ORDER
+        for key in strategy_catalog.VISIBLE
     ]
     return InlineKeyboardMarkup(rows)
 
 
-def alloc_keyboard(strategy_key: str) -> InlineKeyboardMarkup:
-    presets = [
-        InlineKeyboardButton(
-            f"{pct}% of available",
+def alloc_keyboard(
+    strategy_key: str, autopilot: bool | None = None
+) -> InlineKeyboardMarkup:
+    """Allocation presets, plus the autopilot toggle on executable lanes.
+
+    `autopilot=None` hides the row (lane can't execute); True/False renders
+    the toggle showing the action, not the state — tapping it flips it.
+
+    100% is labelled "after $N fee" when ``POOL_DEPLOY_FEE_USD`` is on, so a
+    $500 wallet never looks like a broken 100% → $500 tap.
+    """
+    fee = max(0.0, float(getattr(bot_config, "POOL_DEPLOY_FEE_USD", 0) or 0))
+    presets = []
+    for pct in SUB_ALLOC_PRESETS:
+        if pct >= 100 and fee > 0:
+            label = f"100% after ${fee:,.0f} fee"
+        else:
+            label = f"{pct}% of available"
+        presets.append(InlineKeyboardButton(
+            label,
             callback_data=f"{CB_SUB_PREFIX}alloc:{strategy_key}:{pct}",
-        )
-        for pct in SUB_ALLOC_PRESETS
-    ]
-    return InlineKeyboardMarkup(
-        [
-            presets,
-            [InlineKeyboardButton(
-                "Not now", callback_data=f"{CB_SUB_PREFIX}skip:{strategy_key}"
-            )],
-            [InlineKeyboardButton("← Back", callback_data=CB_MENU_STRATEGIES)],
-        ]
-    )
+        ))
+    rows = [presets]
+    if autopilot is not None:
+        rows.append([InlineKeyboardButton(
+            "Turn autopilot OFF" if autopilot
+            else "Enable autopilot — ride every trade",
+            callback_data=(
+                f"{CB_SUB_PREFIX}auto:{strategy_key}:"
+                f"{'off' if autopilot else 'on'}"
+            ),
+        )])
+    rows.append([InlineKeyboardButton(
+        "Not now", callback_data=f"{CB_SUB_PREFIX}skip:{strategy_key}"
+    )])
+    rows.append([InlineKeyboardButton("← Back", callback_data=CB_MENU_STRATEGIES)])
+    return InlineKeyboardMarkup(rows)
 
 
 def pool_admin_access_keyboard(telegram_id: int) -> InlineKeyboardMarkup:
@@ -447,6 +521,18 @@ def pool_admin_access_keyboard(telegram_id: int) -> InlineKeyboardMarkup:
                 ),
             ]
         ]
+    )
+
+
+def treasury_send_keyboard(transfer_id: int, *, amount_usd: float, to_loc: str) -> InlineKeyboardMarkup:
+    """One button: let the signer broadcast this journaled leg."""
+    return InlineKeyboardMarkup(
+        [[
+            InlineKeyboardButton(
+                f"Send ${amount_usd:,.2f} → {to_loc}",
+                callback_data=f"{CB_TREASURY_SEND_PREFIX}{int(transfer_id)}",
+            )
+        ]]
     )
 
 
@@ -544,7 +630,7 @@ def pool_account_keyboard() -> InlineKeyboardMarkup:
 def format_pool_welcome(*, wallet_usd: float = 0.0) -> str:
     """Short /start welcome for the live pool (progressive disclosure)."""
     lines = [
-        "Welcome to Eva — the intelligence layer for crypto markets.",
+        "Welcome to Eva — you're in.",
         "Powered by Republic Technologies.",
         "",
     ]
@@ -557,9 +643,13 @@ def format_pool_welcome(*, wallet_usd: float = 0.0) -> str:
         )
     lines += [
         "",
-        "Each Accept risks about "
-        f"{bot_config.POOL_RISK_PCT * 100:.1f}% of what you deployed into "
-        "that strategy — not your full balance.",
+        "What you fund stays undeployed until you select a strategy and "
+        "deploy into it. "
+        f"{strategy_catalog.visible_accept_risk_sentence()} "
+        "On autopilot, every trade that strategy takes is accepted for you "
+        "automatically.",
+        "",
+        TALK_TO_EVA_TIPS,
         "",
         "Trading involves substantial risk of loss. Not financial advice.",
     ]
@@ -636,8 +726,8 @@ def format_fund_moonpay(
         return "\n".join([
             "Fund your wallet\n",
             "USDC deposits on Base are being wired up. "
-            f"Message {config.EVA_SUPPORT_EMAIL} if you need a manual credit, "
-            "or try again shortly.",
+            f"Reach out at {config.EVA_WEBSITE_URL} if you need a manual "
+            "credit, or try again shortly.",
             "",
             f"Minimum once live: ${minimum:,.0f} USDC on Base.",
         ])
@@ -648,12 +738,27 @@ def format_fund_moonpay(
         "",
         f"Network: Base · Asset: USDC only · Minimum: ${minimum:,.0f}",
         "",
-        "Once it settles, your balance updates here automatically — "
-        "tap Refresh or Wallet.",
+        "Settlement usually takes about 5 minutes on the network "
+        "(sometimes a bit longer when it's busy). Your balance updates "
+        "here automatically once it settles — tap Refresh or Wallet.",
     ]
     if widget_url:
         lines += ["", f"Or buy USDC with a card: {widget_url}"]
     return "\n".join(lines)
+
+
+def _testwallet_networks_label() -> str:
+    """'Base or Ethereum' — whatever chains the deposit watcher actually
+    covers, so the copy can never promise a network nobody is reading."""
+    try:
+        import chain
+
+        names = [chain.chain_name(int(c)) for c in config.TEST_WALLET_CHAIN_IDS]
+    except Exception:  # noqa: BLE001 — copy must render regardless
+        names = ["Base"]
+    if len(names) <= 1:
+        return names[0] if names else "Base"
+    return ", ".join(names[:-1]) + f" or {names[-1]}"
 
 
 def format_fund_testwallet(
@@ -670,10 +775,11 @@ def format_fund_testwallet(
     instead of crediting.
     """
     minimum = float(bot_config.POOL_MIN_DEPOSIT_USD)
+    networks = _testwallet_networks_label()
     lines = ["Fund your wallet\n"]
     if registered_wallet:
         lines += [
-            f"Send USDC on Base **from your registered wallet** "
+            f"Send USDC on {networks} **from your registered wallet** "
             f"(`{registered_wallet}`) to (tap to copy):",
         ]
     else:
@@ -684,15 +790,26 @@ def format_fund_testwallet(
             "",
             "/wallet 0x<your address>",
             "",
-            "Then send USDC on Base from that wallet to (tap to copy):",
+            f"If something doesn't work, reach out at {config.EVA_WEBSITE_URL}",
+            "",
+            f"Then send USDC on {networks} from that wallet to (tap to copy):",
         ]
     lines += [
         f"`{address}`",
         "",
-        f"Network: Base · Asset: USDC only · Minimum: ${minimum:,.0f}",
+        f"Network: {networks}"
+        + (" (same address on each)" if " or " in networks else "")
+        + f" · Asset: USDC only · Minimum: ${minimum:,.0f}",
         "",
-        "Your balance updates here automatically once it settles — "
-        "tap Refresh or Wallet.",
+        "Send from a wallet you control (MetaMask, Rabby, Coinbase Wallet "
+        "app, Ledger…) — *not* from an exchange account (Coinbase.com, "
+        "Binance, Kraken…). Exchange withdrawals arrive from the exchange's "
+        "wallet, so we can't match them to you, and we can't pay out to "
+        "an exchange's address.",
+        "",
+        "Settlement usually takes about 5 minutes on the network "
+        "(sometimes a bit longer when it's busy). Your balance updates "
+        "here automatically once it settles — tap Refresh or Wallet.",
     ]
     if widget_url:
         lines += ["", f"Or buy USDC with a card: {widget_url}"]
@@ -701,19 +818,48 @@ def format_fund_testwallet(
 
 def format_wallet_surface(
     *,
-    address: str | None,
+    registered_address: str | None = None,
+    registered_status: str | None = None,
+    deposit_address: str | None = None,
+    test_wallet: bool = False,
     wallet_usd: float,
     deployed_usd: float,
     reserved_usd: float = 0.0,
+    # Back-compat: older callers passed MoonPay deposit as `address`.
+    address: str | None = None,
 ) -> str:
+    """Wallet button: payout/sender address + cash split (not the Fund intake)."""
+    if deposit_address is None and address:
+        deposit_address = address
     total = wallet_usd + deployed_usd
-    lines = [
-        "Your wallet\n",
-        (
-            f"Address: `{address}`"
-            if address
-            else "Address: not provisioned yet — tap Deposit USDC."
-        ),
+    lines = ["Your wallet\n"]
+
+    if registered_address:
+        verified = str(registered_status or "") == "verified"
+        lines.append(f"Registered sender / payout: `{registered_address}`")
+        lines.append(
+            "Confirmed — deposits from here credit you automatically, "
+            "and withdrawals return here."
+            if verified else
+            "Registered, not yet confirmed — confirmed the first time a "
+            "deposit arrives from it."
+        )
+    else:
+        lines += [
+            "No payout wallet registered yet.",
+            "Send `/wallet 0x<your address>` — that's the wallet you fund "
+            "from, and the only address withdrawals go back to.",
+        ]
+        if test_wallet:
+            lines.append(
+                "Required for Fund: the shared intake address matches "
+                "deposits by sender."
+            )
+
+    if deposit_address:
+        lines += ["", f"Personal deposit address: `{deposit_address}`"]
+
+    lines += [
         "",
         f"Wallet (undeployed): ${wallet_usd:,.2f} USDC",
         f"Deployed in strategies: ${deployed_usd:,.2f} USDC",
@@ -723,7 +869,7 @@ def format_wallet_surface(
         lines.append(f"In open trades / reserved: ${reserved_usd:,.2f}")
     lines += [
         "",
-        "Deposit USDC on Base, or withdraw back to an address you control.",
+        "Tap Deposit USDC (Fund) to top up, or Withdraw to cash out.",
     ]
     return "\n".join(lines)
 
@@ -768,7 +914,8 @@ def format_deposit_instructions(
         "   /deposit 1000 0x<transaction hash>",
         "",
         "*The hash is what credits you.* We watch the exchange for it and "
-        "credit your balance automatically the moment your transfer settles.",
+        "credit your balance automatically once it settles — usually about "
+        "5 minutes on the network (longer when it's busy).",
     ]
     if has_pending:
         lines.append("")
@@ -790,13 +937,44 @@ def format_wallet_status(
 ) -> str:
     """What /wallet shows: the payout address and how settled it is."""
     if wallet is None:
-        return "\n".join([
+        lines = [
             "Your payout wallet\n",
-            "You haven't registered one yet. For withdrawals, send:",
+            "You haven't registered one yet. Send:",
             "   /wallet 0x<your address>",
             "",
-            "Funding uses the Fund button (USDC on Base) — no registration needed.",
-        ])
+        ]
+        if config.TEST_WALLET_ADDRESS:
+            try:
+                import moonpay as _moonpay
+                moonpay_live = _moonpay.configured()
+            except Exception:
+                moonpay_live = False
+            if not moonpay_live:
+                lines.append(
+                    "Required before Fund credits you: the shared intake "
+                    "address matches deposits by the wallet they come from."
+                )
+                lines.append(
+                    "Use a wallet you hold the keys to (MetaMask, Rabby, "
+                    "Coinbase Wallet app, Ledger…), not an exchange deposit "
+                    "address — exchanges send from their own wallets, and a "
+                    "payout to an exchange address is lost."
+                )
+            else:
+                lines.append(
+                    "Funding uses the Fund button (USDC on Base). Registering "
+                    "here is what withdrawals return to."
+                )
+        else:
+            lines.append(
+                "Funding uses the Fund button (USDC on Base). Registering "
+                "here is what withdrawals return to."
+            )
+        lines += [
+            "",
+            f"If something doesn't work, reach out at {config.EVA_WEBSITE_URL}",
+        ]
+        return "\n".join(lines)
 
     verified = str(wallet.get("status")) == "verified"
     lines = [
@@ -859,6 +1037,58 @@ def format_wallet_status(
     return "\n".join(lines)
 
 
+def _what_if_date(raw: str | None) -> str:
+    if not raw:
+        return ""
+    try:
+        from datetime import datetime
+        dt = datetime.strptime(str(raw)[:19], "%Y-%m-%dT%H:%M:%S")
+        return f"{dt.strftime('%b')} {dt.day}"
+    except ValueError:
+        return str(raw)[:10]
+
+
+def format_autopilot_what_if(d: dict) -> list[str]:
+    """Plain-text lines for the recorded autopilot counterfactual.
+
+    Empty when there is nothing honest to show (no deployment, no deposit,
+    house ledger unmounted, or no settled house trades in the window yet).
+    The figure is an estimate by construction — every render says so and
+    names the assumption (house-price fills; real autopilot refuses slipped
+    windows, so the live figure runs lower).
+    """
+    if not d.get("ok") or int(d.get("sized_trades") or 0) < 1:
+        return []
+    try:
+        import strategy_catalog
+        strat = strategy_catalog.STRATEGIES.get(str(d.get("strategy")))
+        label = strat.label if strat else str(d.get("strategy"))
+    except Exception:
+        label = str(d.get("strategy"))
+    since = _what_if_date(d.get("since"))
+    alloc = float(d.get("alloc_usd") or 0)
+    lines = [
+        f"What if — autopilot on {label}:",
+        (
+            f"  Your settled trades: {int(d.get('actual_trades') or 0)} · "
+            f"${float(d.get('actual_pnl_usd') or 0):+,.2f} "
+            f"({float(d.get('actual_return_pct') or 0):+.1f}% of your "
+            f"${alloc:,.0f} deployment)"
+        ),
+        (
+            f"  Every trade since {since} ({int(d.get('sized_trades') or 0)} "
+            f"windows, sized like your deployment): "
+            f"~${float(d.get('est_pnl_usd') or 0):+,.2f} "
+            f"({float(d.get('est_return_pct') or 0):+.1f}%), fees included"
+        ),
+        (
+            "  Estimate — assumes each entry filled at the house price; "
+            "autopilot skips windows that slip, so the live figure runs lower."
+        ),
+    ]
+    return lines
+
+
 def format_portfolio(p: dict) -> str:
     """Telegram text for Portfolio — wallet, deployments, PnL, open trades."""
     if not p.get("ok"):
@@ -878,12 +1108,29 @@ def format_portfolio(p: dict) -> str:
     pnl_total = realized + unrealized
     pnl_pct = (pnl_total / deposited * 100.0) if deposited > 0 else 0.0
 
-    lines = [
-        "Your portfolio\n",
-        f"Total size: ${total:,.2f}",
+    lines = ["Your portfolio\n"]
+    if deposited > 0:
+        since = ""
+        raw = p.get("first_deposit_at")
+        if raw:
+            try:
+                from datetime import datetime
+                dt = datetime.strptime(str(raw), "%Y-%m-%dT%H:%M:%SZ")
+                since = f" since {dt.strftime('%b')} {dt.day}"
+            except ValueError:
+                since = ""
+        lines.append(
+            f"Beginning balance: ${deposited:,.2f} (net deposits{since})"
+        )
+    lines += [
+        f"Current balance: ${total:,.2f}",
         f"  Wallet: ${wallet:,.2f}",
         f"  Deployed: ${deployed:,.2f}",
     ]
+    if deposited > 0:
+        change = total - deposited
+        change_pct = change / deposited * 100.0
+        lines.append(f"Change: ${change:+,.2f} ({change_pct:+.2f}%)")
     if float(p.get("reserved_usd") or 0) > 0:
         lines.append(
             f"  Reserved in trades: ${float(p['reserved_usd']):,.2f}"
@@ -907,6 +1154,34 @@ def format_portfolio(p: dict) -> str:
                 label = key
             lines.append(f"• {label}: ${float(amt):,.2f} (yours)")
 
+    kalshi_keys = [k for k, amt in by_strat.items() if str(k).startswith("kalshi") and float(amt) > 0]
+    kalshi_open = p.get("kalshi_open") or []
+    kalshi_closed = p.get("kalshi_closed") or []
+    if kalshi_keys or kalshi_open or kalshi_closed:
+        kalshi_deployed = sum(float(by_strat.get(k) or 0) for k in kalshi_keys)
+        open_cost = sum(float(k.get("cost_usd") or 0) for k in kalshi_open)
+        # Lifetime settled PnL from the pool aggregate; the kalshi_closed
+        # list is capped for display and undercounts past ~20 settles.
+        if p.get("kalshi_settled_pnl_usd") is not None:
+            settled_pnl = float(p["kalshi_settled_pnl_usd"])
+        else:
+            settled_pnl = sum(float(k.get("pnl_usd") or 0) for k in kalshi_closed)
+        # Sleeve mark = deployment + settled PnL. Open windows still hold
+        # their cost inside cash (reserved), so they do not double-count here.
+        sleeve = round(kalshi_deployed + settled_pnl, 2)
+        lines.append("")
+        lines.append("Kalshi sleeve:")
+        lines.append(f"  Deployed: ${kalshi_deployed:,.2f}")
+        if open_cost > 0:
+            lines.append(f"  In open windows: ${open_cost:,.2f} at risk")
+        lines.append(f"  Settled PnL: ${settled_pnl:+,.2f}")
+        lines.append(f"  Sleeve mark: ${sleeve:,.2f}")
+
+    what_if_lines = format_autopilot_what_if(p.get("autopilot_what_if") or {})
+    if what_if_lines:
+        lines.append("")
+        lines.extend(what_if_lines)
+
     opens = p.get("open_stakes") or []
     if opens:
         lines.append("")
@@ -921,7 +1196,6 @@ def format_portfolio(p: dict) -> str:
                 f"({float(s['share_frac']) * 100:.1f}%) · "
                 f"risk ${float(s['risk_usd']):,.2f}{unreal_bit}"
             )
-    kalshi_open = p.get("kalshi_open") or []
     if kalshi_open:
         lines.append("")
         lines.append(f"Kalshi windows open ({len(kalshi_open)}):")
@@ -933,7 +1207,6 @@ def format_portfolio(p: dict) -> str:
                 f"${float(k.get('cost_usd') or 0):,.2f} at risk"
             )
     closed = p.get("closed_stakes") or []
-    kalshi_closed = p.get("kalshi_closed") or []
     if closed or kalshi_closed:
         lines.append("")
         lines.append("Recent closed:")
@@ -955,7 +1228,9 @@ def format_portfolio(p: dict) -> str:
             lines.append("No funds yet — tap Fund to get started.")
         else:
             lines.append(
-                "No open trades. Accept a card after deploying into a strategy."
+                "No open trades yet. With autopilot on, fills and settles "
+                "land here as each window closes — or Accept a card after "
+                "deploying into a strategy."
             )
     if p.get("frozen"):
         lines.append("")

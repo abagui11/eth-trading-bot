@@ -60,6 +60,7 @@ class DemocardFillableBroadcastTests(unittest.TestCase):
             patch.object(bot_config, "POOL_ADMIN_TELEGRAM_IDS", (ADMIN,)),
             patch.object(bot_config, "POOL_RISK_PCT", 0.007),
             patch.object(bot_config, "POOL_MIN_EQUITY_USD", 500.0),
+            patch.object(bot_config, "POOL_DEPLOY_FEE_USD", 0.0),
             # Shipped as True, so a tester's own Accept takes the clip rather
             # than reserving against a house fill that may never land.
             patch.object(bot_config, "LIVE_MILL_ANY_ACCEPT_FILLS", True),

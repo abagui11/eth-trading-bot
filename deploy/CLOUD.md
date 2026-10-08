@@ -96,13 +96,15 @@ IDEAS_DB=/opt/trade-ideas/ideas.db
 
 **Important:** Leave `TELEGRAM_CHAT_ID` **empty** unless it is a *different* chat from your user ID (avoids duplicate hourly messages).
 
-For the beta, keep `PAYWALL_ENABLED=false`. Anyone with the bot link can send `/start`, use the inline keyboard, and receive bot access without being added to `ALLOWED_TELEGRAM_IDS`. `DASHBOARD_PUBLIC_URL` supplies the Telegram **Agent journal** button and **My book** magic links; use the final public HTTPS URL with no trailing path.
+For the beta with **`POOL_ENABLED=true`** (production), access is admin-gated: `/start` files an Admit request; after Admit the home keyboard is **Fund · Wallet · Strategies · Portfolio · Brain · Help**. `DASHBOARD_PUBLIC_URL` still supplies the public agent journal / dashboard HTTPS URL when used.
 
-Optional: set `ME_TOKEN_SECRET` in `.env` for `/me` HMAC links (defaults to `TELEGRAM_BOT_TOKEN` if unset).
+Optional: set `ME_TOKEN_SECRET` in `.env` for legacy `/me` HMAC links when the personal demo path is used (`POOL_ENABLED=false`; defaults to `TELEGRAM_BOT_TOKEN` if unset).
 
 Live Coinbase (CDE nano futures) needs `EXECUTION_MODE=live` and a CDP key. **Always double-quote** `COINBASE_CDP_PRIVATE_KEY` — systemd `EnvironmentFile` mangles unquoted `\n` in a PEM (it strips the backslash). `config.py` also re-reads that key from `.env` so a mangled process env cannot win. Restart `eth-agent` and `eth-dashboard` after any `.env` edit.
 
-**Open account** creates a personal demo paper book ($500 / $1,000 / $2,500 once). Demo capital — not real funding. Legacy users who Funded before are migrated to a $1,000 personal account (`python deploy/migrate_personal_accounts.py`, also runs on `paper.init_db`). Trade suggestions arrive as a **concise card** (decision chart + friendly caption with Accept / Reject / **See more**). Only Accept deploys that user's cash. **See more** loads the detailed charts and full audited rationale. The public dashboard shows the **agent/house** journal plus participation aggregates; personal equity is on `/me` via **My book**.
+**Product path (pool on):** Admit → Fund USDC → register payout wallet (`/wallet`) for withdrawals → deploy into Strategies → Accept/Reject trade cards → Portfolio. Ask Eva free-text answers are grounded on **that user's** wallet, allocations, and stakes — not the house paper journal. The house paper book remains the public control journal on the dashboard.
+
+**Legacy (`POOL_ENABLED=false` only):** **Open account** creates a personal demo paper book ($500 / $1,000 / $2,500 once). Not real funding.
 
 ### 6. Start the service
 
@@ -126,16 +128,25 @@ You should get a Telegram DM within a minute of the first cycle.
 
 ## Part 2 — Subscriber onboarding
 
-### Open beta flow (`PAYWALL_ENABLED=false`)
+### Pool flow (`POOL_ENABLED=true` — production)
 
-1. **You** share the bot link (for example, `https://t.me/YourBotName`).
-2. **They** open it and send **`/start`**.
-3. Their `telegram_id` is saved in `ledger.db` → `subscribers`, and the bot returns the inline keyboard.
-4. They can use **Open account**, **My Metrics**, **My book**, **Agent journal**, and **Research** immediately.
+1. **You** share the bot link (for example, `https://t.me/YourBotName`) or an eva.finance invite.
+2. **They** open it and send **`/start`** — this files an access request and DMs pool admins an **Admit/Deny** card.
+3. **You** Admit them (Telegram card or ops tools). They get the welcome + **Fund · Wallet · Strategies · Portfolio · Brain** keyboard.
+4. They **Fund** USDC, optionally **`/wallet 0x…`** for withdrawals, **deploy** into a strategy, then **Accept** trade cards. **`/portfolio`** (and `/me`) shows their real book.
+5. Free-text questions to Eva (Ask Eva) are answered with that user's pool context injected — wallet registered?, balances, allocations, open stakes — plus the latest suggestion / market snapshot. The house paper journal is not presented as their portfolio.
 
-No manual approval or @userinfobot lookup is required in beta mode.
+Trade cards are personal DMs with Accept / Reject / **See more**. See more loads detailed charts and full rationale.
 
-### Restricted flow (`PAYWALL_ENABLED=true`)
+### Legacy open-demo flow (`POOL_ENABLED=false`)
+
+1. **You** share the bot link.
+2. **They** send **`/start`**.
+3. Their `telegram_id` is saved in `ledger.db` → `subscribers`, and the bot returns the legacy inline keyboard (**Open account**, **My Metrics**, **My book**, **Agent journal**, **Research**).
+
+No Admit gate in this mode. Prefer the pool flow for any real-capital rehearsal.
+
+### Restricted flow (`PAYWALL_ENABLED=true`, typically with pool off)
 
 1. **You** share the bot link (e.g. `t.me/YourBotName`).
 2. **They** open it and send **`/start`** (they may see the paywall — that's expected).
@@ -218,8 +229,8 @@ edit, no restart:
    pooled sizing; `/portfolio` shows their real book. `/credit <id> <usd>`
    and `/debit <id> <usd>` are the admin escape hatches (a debit can never
    touch margin reserved in open trades). `/users` prints every telegram
-   id + username + cash so you can copy an id into `/credit` without SSH;
-   `/admin` lists the full operator command set.
+   id + username + cash + per-strategy deployments so you can copy an id
+   into `/credit` without SSH; `/admin` lists the full operator command set.
 
 #### One-time forum setup
 
@@ -259,16 +270,48 @@ Everything below is inert until its keys exist. Full pending-item list in
 `deploy/PENDING_ITEMS.md`.
 
 ```env
-# Shared deposit/routing wallet (operator-held EOA; key NEVER on this box).
-# When set and MoonPay is not configured, the Fund surface shows this address
-# and deposits credit by SENDER against the user's registered /wallet.
+# Shared deposit/routing wallet (operator-held EOA). When set and MoonPay is
+# not configured, the Fund surface shows this address and deposits credit by
+# SENDER against the user's registered /wallet.
 TEST_WALLET_ADDRESS=0x...
-# Chain the wallet lives on: 8453 = Base (default), 1 = Ethereum mainnet.
+# Primary chain: 8453 = Base (default), 1 = Ethereum mainnet. An EOA is the
+# same address on every EVM chain, so every chain in TEST_WALLET_CHAIN_IDS is
+# swept for deposits and summed in /treasury; the Fund copy says "Base or
+# Ethereum" from this list. Senders can use either network.
 TEST_WALLET_CHAIN_ID=8453
+TEST_WALLET_CHAIN_IDS=8453,1
+# Chain reads. Etherscan's FREE plan does not serve Base ("Free API access is
+# not supported for this chain") — Base deposits were invisible from 2026-09-28
+# until the RPC fallback shipped 2026-10-05. Reads now go to Etherscan where
+# it answers and to these public JSON-RPC endpoints where it does not; both
+# are read-only and hold no key. Override to a paid RPC if the public ones
+# rate-limit. Base's public node caps eth_getLogs at 500 blocks (RPC_LOG_RANGE);
+# the sweep keeps a per-chain cursor in pool_meta (testwallet_scan_block:<id>)
+# so it scans ~30 new blocks a minute and catches up in 500-block chunks.
+ETHERSCAN_API_KEY=...
+#BASE_RPC_URL=https://mainnet.base.org
+#ETH_RPC_URL=https://ethereum-rpc.publicnode.com
+#RPC_LOG_RANGE=500
 # Card on-ramp widget for the test wallet (any provider that pins the
 # destination and echoes an external id). Dark until a provider account
 # exists; {telegram_id} is substituted.
 #ONRAMP_WIDGET_URL_TEMPLATE=https://buy.example.com/?address=0x...&externalCustomerId=tg_{telegram_id}
+
+# Deploy routing signer. Rule: deployed money lives at the strategy's venue,
+# undeployed money stays in the test wallet. Every allocation change journals
+# a test_wallet → venue leg and cards admins. With the key below set, that
+# card has a Send button and the bot signs the USDC transfer itself; unset,
+# you send from MetaMask and /transfer_sent the hash. The key must derive to
+# TEST_WALLET_ADDRESS (signer refuses otherwise) and can only ever target the
+# two deposit addresses here — see PROJECT_STATE §9 for the full guardrails.
+# Fund the wallet with a little ETH on each target chain for gas (~$1 on
+# Base covers hundreds of legs; mainnet is pricier).
+#TEST_WALLET_PRIVATE_KEY=0x...
+#POOL_DEPOSIT_CHAIN_ID=8453       # chain POOL_DEPOSIT_ADDRESS expects (Coinbase USDC: Base or Ethereum — check the deposit page)
+#KALSHI_DEPOSIT_ADDRESS=0x...     # Kalshi house account's USDC deposit address
+#KALSHI_DEPOSIT_CHAIN_ID=1        # chain Kalshi's deposit page names for it
+#TREASURY_SEND_MAX_USD=2000
+#TREASURY_SEND_DAILY_MAX_USD=5000
 
 # Kalshi execution for the two Kalshi lanes. Key id + RSA PEM from the Kalshi
 # account settings page. Unset = lanes stay feed-only. Also needs KALSHI_DB
@@ -284,20 +327,75 @@ KALSHI_LASTMIN_DB=/opt/kalshi-15m-bot/lastmin.db
 #KALSHI_API_BASE=https://api.elections.kalshi.com/trade-api/v2
 ```
 
-Operator flow for moving client capital (the bot never moves funds itself —
-it journals, watches, and refuses):
+Operator flow for moving client capital. Every move is a journal row first;
+the only way the bot itself sends is the signer, on an admin tap, from the
+test wallet, to one of the two venue deposit addresses:
 
 1. `/treasury` — balances by location (test wallet / Coinbase / Kalshi),
-   per-venue allocation demand, open transfers, and the claims-vs-assets
-   invariant.
-2. `/transfer test_wallet coinbase 500` — journal the intention first.
-3. Move the funds by hand (wallet app / venue UI), then
-   `/transfer_sent <id> <txid>`. Chain-visible legs auto-confirm from the
-   watchdog sweep; the Kalshi leg needs `/transfer_confirm <id>` after the
-   venue shows the deposit. `/transfer_cancel <id>` only works before "sent".
-4. Reconcile (every ~10 min) now checks user claims against **all** configured
+   per-venue allocation demand, open transfers, signer state + caps, and the
+   claims-vs-assets invariant.
+2. A leg appears one of two ways: **automatically** when a user deploys or
+   undeploys (routing card: "user N deployed $X into <lane> — move $X
+   test_wallet → <venue>"), or by hand with `/transfer test_wallet coinbase 500`.
+3. Send it. **Deploy legs send themselves** (`TREASURY_AUTO_SEND_DEPLOYS`,
+   on): the card you get already says "Auto-sent … tx …". Before a deploy
+   is even journaled, `deployable_usd` must cover it
+   (`on_chain − pending_outs − undeployed_claims − TREASURY_GAS_RESERVE_USD`);
+   otherwise the soft-lock rolls back and the user is told the intake
+   wallet cannot cover the send. Each successful deploy also debits
+   `POOL_DEPLOY_FEE_USD` (default $5) from the tester's undeployed cash —
+   the full allocation still goes to the venue; the fee stays in the intake
+   wallet as house gas float. If the signer refused *after* journaling
+   (over cap, no gas, race) the card says why and carries a **Send**
+   button to retry once fixed. Hand-journaled
+   `/transfer` legs get the Send button rather than auto-sending;
+   `/transfer_send <id>` is the button as a command. If there is no button,
+   move the funds by hand (wallet app / venue UI) and
+   `/transfer_sent <id> <txid>`. Legs *out of* a venue (undeploys:
+   `kalshi → test_wallet`) are always by hand — they are venue withdrawals,
+   not on-chain sends.
+4. Confirmation: Coinbase / test-wallet legs auto-confirm from the watchdog
+   sweep once the chain shows the txid; Kalshi legs do too once
+   `KALSHI_DEPOSIT_ADDRESS` is set, otherwise `/transfer_confirm <id>` after
+   the venue shows the deposit. `/transfer_cancel <id>` only works before
+   "sent". A leg the signer failed *before* broadcast goes back to
+   `pending_send` with the reason in its note (visible in `/treasury`) and
+   can simply be tapped again once fixed (gas, balance, RPC).
+5. Reconcile (every ~10 min) checks user claims against **all** configured
    locations + in-flight; a shortfall freezes new Accepts and pages you, and
    an unreadable leg skips the check rather than guessing.
+
+Turning the signer on: add `TEST_WALLET_PRIVATE_KEY` + the two deposit
+address/chain pairs to `.env`, `pip install -r requirements.txt` in the venv
+(`eth-account`), restart `eth-agent`, then `/treasury` should read
+`Signer: on · coinbase on Base · kalshi on …`. If it says
+`key_address_mismatch` the key pasted is not the test wallet's — nothing
+will send until that is fixed.
+
+Withdrawals and the two rails: a tester's `/withdraw` is paid from the
+**test wallet** when the signer is on and the wallet holds the amount on a
+chain that tester has deposited from (the sweep checks `pool.payout_chains_for`),
+otherwise from **Coinbase** as before. The tester is told which network it
+went on and gets a block-explorer link; on the test-wallet rail the house pays
+gas and the fee reserve is refunded. Capital a tester has deployed into the
+Kalshi lane cannot be paid from either rail until it is back in the test
+wallet — `/transfer kalshi test_wallet <amt>`, withdraw on Kalshi's side,
+`/transfer_sent` — so watch for payouts that fail with "insufficient venue
+balance" after a Kalshi-heavy tester asks for a large withdrawal.
+
+Gas: both venue deposit addresses are on Ethereum mainnet, so routing legs
+cost mainnet gas (~$3–8 each at normal fees); payouts go on whatever chain
+the tester deposited from. Keep ~0.01–0.02 ETH on mainnet and a few dollars
+of ETH on Base in the test wallet as a **bootstrap**. After that, deploys
+auto-buy gas from free USDC in the wallet via Uniswap (`GAS_TOPUP_ENABLED`,
+target `GAS_TOPUP_TARGET_ETH`, cap `GAS_TOPUP_MAX_USD`) so an Accept can go
+out without an admin tap. The top-up **never spends into the pending leg
+or other testers' undeployed claims** (`reserve_usdc = leg + undeployed`).
+A completely empty ETH balance still needs a
+one-time manual top-up — the approve/swap itself needs dust gas. Pending
+deploy legs that failed for gas are retried every watchdog pass once ETH
+is available; legs the intake wallet still cannot cover are skipped
+(`intake_short`) instead of hammering the signer.
 
 Unmatched test-wallet arrivals (unregistered sender, below minimum) page the
 admins once; credit them with `/assign <0x-hash> <telegram_id>`.
@@ -341,10 +439,11 @@ sudo -u ethagent /opt/eth-trading-agent/.venv/bin/python -c \
    print('recipients', access.broadcast_recipient_ids())"
 ```
 
-`admins` must be non-empty and `recipients` must still list everyone who was
-getting cards yesterday. Trading is unaffected while every account is
-unfunded: `extra_contracts_for` returns 0, so house order size, levels and
-exits are identical to before the flip.
+`admins` must be non-empty and `recipients` must list every approved tester
+who should get cards — pool admins are intentionally absent from that list
+(ops inbox only: Admit / deposits / admin alerts). Trading is unaffected
+while every account is unfunded: `extra_contracts_for` returns 0, so house
+order size, levels and exits are identical to before the flip.
 
 #### Removing an account — `/unsubscribe`
 
@@ -881,6 +980,27 @@ http://YOUR_SERVER_IP:8080
 ```
 
 From your PC, open that URL in a browser once port 8080 is open in the firewall (testing only).
+
+### SQLite WAL + cross-service read permissions (2026-10-05)
+
+All three hot databases run in WAL mode so dashboard reads never block on
+(or get blocked by) the bots' writes — `journal_mode=delete` was the source
+of intermittent multi-second refresh stalls (the lastmin logger writes every
+5 seconds; the kalshi ledger bursts at every quarter-hour settlement):
+
+- `/opt/eth-trading-agent/ledger.db` — writer `eth-agent` (ethagent), same
+  user as the dashboard, no permission work needed.
+- `/opt/kalshi-15m-bot/ledger.db` + `lastmin.db` — writers run as **root**,
+  the dashboard reads as **ethagent**. WAL readers must be able to write the
+  `-shm` sidecar, so: the directory is `root:ethagent` with **setgid**
+  (`chmod g+rxs`), and both `kalshi-bot` / `kalshi-lastmin` services carry a
+  drop-in (`/etc/systemd/system/<svc>.service.d/umask.conf`) with
+  `UMask=0002` so recreated sidecars come up `0664 root:ethagent`.
+
+WAL is a persistent property of the file — nothing to re-run on restart. If a
+ledger is ever restored from a backup, re-flip it
+(`PRAGMA journal_mode=WAL`) and re-check the sidecar group, or the dashboard
+falls back to timing out on busy reads.
 
 ### Public HTTPS link — live at `https://dashboard.eva.finance`
 

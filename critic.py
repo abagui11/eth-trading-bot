@@ -1007,20 +1007,40 @@ def verify_llm(
     text: str,
     ctx: MarketContext,
     chart_paths: dict[str, str] | None = None,
+    extra_ground_truth: str | None = None,
 ) -> tuple[list[AuditFinding], list[str]]:
-    """Second-pass Claude review for structural / nuanced hallucinations."""
+    """Second-pass Claude review for structural / nuanced hallucinations.
+
+    ``extra_ground_truth`` carries authoritative facts from outside the market
+    snapshot — e.g. the asking user's account block (balances, settled trades,
+    the recorded autopilot what-if). Without it, a chat reply that truthfully
+    quotes the user's own trade history would be unverifiable against the
+    snapshot and could be falsely flagged — the exact failure that once
+    swapped a user's answer for an SFP/OB summary.
+    """
     if not text.strip():
         return [], []
+
+    review_text = (
+        "Review the following text for factual accuracy against the market context "
+        "and charts. Flag only clear HALLUCINATIONs.\n\n"
+        f"=== Text under review ===\n{text}\n\n"
+        f"=== Authoritative market context ===\n{ctx.summary_text}"
+    )
+    if extra_ground_truth:
+        review_text += (
+            "\n\n=== Authoritative user account facts ===\n"
+            "Treat these as ground truth alongside the market context. Claims "
+            "consistent with them (balances, deployments, the user's own "
+            "trades and P&L, the autopilot what-if estimate) are VERIFIED "
+            "even though they do not appear in the market context.\n"
+            f"{extra_ground_truth}"
+        )
 
     user_content: list[dict] = [
         {
             "type": "text",
-            "text": (
-                "Review the following text for factual accuracy against the market context "
-                "and charts. Flag only clear HALLUCINATIONs.\n\n"
-                f"=== Text under review ===\n{text}\n\n"
-                f"=== Authoritative market context ===\n{ctx.summary_text}"
-            ),
+            "text": review_text,
         },
     ]
     if chart_paths:
@@ -1100,13 +1120,17 @@ def audit_text(
     downgraded: bool = False,
     passes_used: int = 0,
     sanitize_reasons: list[str] | None = None,
+    extra_ground_truth: str | None = None,
 ) -> AuditVerdict:
     """Run deterministic checks and optional LLM critic; persist verdict."""
     deterministic = verify_deterministic(text, ctx, suggestion=suggestion)
     llm_hallucinations: list[AuditFinding] = []
     llm_verified: list[str] = []
     if run_llm and (deterministic or text.strip()):
-        llm_hallucinations, llm_verified = verify_llm(text, ctx, chart_paths=chart_paths)
+        llm_hallucinations, llm_verified = verify_llm(
+            text, ctx, chart_paths=chart_paths,
+            extra_ground_truth=extra_ground_truth,
+        )
         llm_hallucinations = [f for f in llm_hallucinations if f.code == "LLM_HALLUCINATION"]
 
     verdict = AuditVerdict(
@@ -1178,6 +1202,31 @@ _CHAT_CRITICAL_CODES = frozenset({
     "JSON_H4_AS_M5_OB",
 })
 
+# A chat reply is only fact-checked against the market snapshot when it talks
+# about the market. Account answers ("your wallet 0x… is registered"), menu
+# pointers, and the handler's own error string carry nothing the snapshot can
+# confirm, and the LLM critic has been seen returning HALLUCINATION for them
+# anyway — which then replaced a wallet answer with an SFP/OB summary.
+_CHAT_HEX_ADDRESS_RE = re.compile(r"\b0x[0-9a-fA-F]{6,}\b")
+# Dollar figures alone do not qualify — "Wallet: $1,250.00" is a balance, not
+# a level. A reply has to name market structure or trade mechanics.
+_CHAT_MARKET_TERMS_RE = re.compile(
+    r"\b(?:sfp|order\s*block|ob|h4|m5|h1|fvg|bos|choch|breaker|brkr|"
+    r"entry|stop[\s-]*loss|take[\s-]*profit|target|invalidation|"
+    r"support|resistance|bullish|bearish|spot|"
+    r"displacement|liquidity|retest|trade\s+idea)\b",
+    re.IGNORECASE,
+)
+_CHAT_ERROR_REPLY = "Sorry, something went wrong processing your message."
+
+
+def chat_reply_is_market_commentary(reply: str) -> bool:
+    """True when the reply makes market/trade claims the snapshot can check."""
+    if not reply or reply.strip() == _CHAT_ERROR_REPLY:
+        return False
+    scrubbed = _CHAT_HEX_ADDRESS_RE.sub(" ", reply)
+    return bool(_CHAT_MARKET_TERMS_RE.search(scrubbed))
+
 
 def refine_chat_reply(
     user_id: int,
@@ -1185,8 +1234,26 @@ def refine_chat_reply(
     reply: str,
     *,
     cycle_id: str | None = None,
+    account_context: str | None = None,
 ) -> tuple[str, AuditVerdict]:
-    """Audit chat reply; replace with grounded summary on critical factual failures."""
+    """Audit chat reply; replace with grounded summary on critical factual failures.
+
+    Only market commentary is audited. Account / wallet / menu answers and the
+    handler's error string pass through untouched (still logged to
+    ``chat_audits``) — there is nothing in the market snapshot to check them
+    against, and a false HALLUCINATION there used to swap the user's answer
+    for an SFP/OB summary.
+
+    ``account_context`` is the asking user's account block (the same text the
+    chat model answered from). Passing it keeps true claims about the user's
+    own trades, balances, and the autopilot what-if from being flagged when a
+    reply also mentions market terms like "entry" and therefore gets audited.
+    """
+    if not chat_reply_is_market_commentary(reply):
+        verdict = AuditVerdict(source="chat", user_id=user_id, text_excerpt=_text_excerpt(reply))
+        audit.log_chat_audit(user_id, question, reply, cycle_id=cycle_id)
+        return reply, verdict
+
     snapshot_row = audit.get_snapshot(cycle_id) if cycle_id else audit.get_latest_snapshot()
     if snapshot_row is None:
         logger.warning("No audit snapshot for chat refine (cycle_id=%s)", cycle_id)
@@ -1207,6 +1274,7 @@ def refine_chat_reply(
         suggestion=suggestion,
         chart_paths=chart_paths,
         run_llm=True,
+        extra_ground_truth=account_context,
     )
 
     critical = [

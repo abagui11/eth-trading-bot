@@ -34,6 +34,10 @@ class Strategy:
     pitch: str
     # Risk copy shown on the allocation prompt.
     risk_lines: str
+    # Median cadence shown on the Strategies list (no P&L figures).
+    cadence: str
+    # One short risk/return shape line — qualitative, no return numbers.
+    profile: str
     # Whether Accept on this lane can reach an executor today. For the Kalshi
     # lanes this is the *static* answer (False); `is_executable` upgrades it
     # at runtime once the Kalshi gateway is configured.
@@ -59,6 +63,8 @@ STRATEGIES: dict[str, Strategy] = {
             "automatic.\n"
             "• Typically a handful of trades a week, held hours to days."
         ),
+        cadence="Median ~a few trades/week",
+        profile="Fewer conviction trades; hard stop per Accept",
         executable=True,
     ),
     MILL: Strategy(
@@ -76,6 +82,8 @@ STRATEGIES: dict[str, Strategy] = {
             "concurrency halts.\n"
             "• Intraday holds — most ideas resolve within hours."
         ),
+        cadence="Median ~2 ideas/day",
+        profile="Small intraday ideas; hard stop per Accept",
         executable=True,
     ),
     KALSHI_REVERSAL: Strategy(
@@ -92,6 +100,8 @@ STRATEGIES: dict[str, Strategy] = {
             f"{bot_config.POOL_KALSHI_RISK_PCT * 100:.0f}% of your allocation "
             "on one window's contracts — the cost is the entire risk."
         ),
+        cadence="Median ~14 trades/day",
+        profile="Fast 15m settles; loss capped per Accept",
         executable=False,
         venue="kalshi",
     ),
@@ -109,6 +119,9 @@ STRATEGIES: dict[str, Strategy] = {
             f"{bot_config.POOL_KALSHI_RISK_PCT * 100:.0f}% of your allocation "
             "on one window's contracts — the cost is the entire risk."
         ),
+        # Weekday median from the recorded book (~137); rounded for copy.
+        cadence="Median ~130 trades/day (weekdays)",
+        profile="Many small, short holds; loss capped per Accept",
         executable=False,
         venue="kalshi",
     ),
@@ -116,6 +129,39 @@ STRATEGIES: dict[str, Strategy] = {
 
 # Fixed display order everywhere the strategies are listed.
 ORDER = (ICT, MILL, KALSHI_REVERSAL, KALSHI_WICK)
+
+# Which lanes the Telegram pickers (Strategies button, /subscribe) offer.
+# Presentation only: every key stays valid, callbacks and /allocate still
+# resolve, existing subscriptions and allocations are untouched. Phase 1
+# testers see the one lane that is live end-to-end.
+VISIBLE = (KALSHI_WICK,)
+
+
+def visible_accept_risk_sentence() -> str:
+    """Per-Accept risk line for /start, keyed off the Strategies picker.
+
+    Kalshi lanes cap spend at `POOL_KALSHI_RISK_PCT` (cost = entire risk).
+    ICT/Mill use stop-risk `POOL_RISK_PCT`. Mixed pickers stay qualitative
+    so we never quote the wrong percent for a lane the user might open.
+    """
+    venues = {STRATEGIES[k].venue for k in VISIBLE}
+    if venues == {"kalshi"}:
+        pct = float(bot_config.POOL_KALSHI_RISK_PCT) * 100
+        return (
+            f"Once deployed, each Accept can lose at most about {pct:.0f}% of "
+            "that strategy's deployment — the contract cost is the entire "
+            "risk, never your full wallet."
+        )
+    if venues == {"coinbase"}:
+        pct = float(bot_config.POOL_RISK_PCT) * 100
+        return (
+            f"Once deployed, each Accept risks about {pct:.1f}% of that "
+            "strategy's deployment at the stop — never your full wallet."
+        )
+    return (
+        "Once deployed, each Accept risks only a capped slice of that "
+        "strategy's deployment — never your full wallet."
+    )
 
 
 def get(key: str) -> Strategy | None:
@@ -252,19 +298,31 @@ def live_pnl_line(key: str) -> str | None:
 def allocation_prompt(key: str, portfolio: dict[str, Any],
                       current_alloc: float = 0.0) -> str:
     """The 'do you want to allocate now?' message for one strategy."""
+    import bot_config
+
     strat = STRATEGIES[key]
     cash = float(portfolio.get("cash_usd") or 0)
-    available = float(portfolio.get("available_usd", cash) or 0)
+    # Prefer undeployed wallet when present — percent buttons size from it.
+    wallet = float(portfolio.get("wallet_usd") or portfolio.get("available_usd", cash) or 0)
+    fee = max(0.0, float(getattr(bot_config, "POOL_DEPLOY_FEE_USD", 0) or 0))
     lines = [
         f"Allocate to {strat.label}?",
         "",
         "You're subscribed — idea cards from this strategy will arrive here "
         "either way. Allocating is what lets an Accept put money on one.",
         "",
-        f"Your cash: ${cash:,.2f} (${available:,.2f} not yet reserved)",
+        f"Your cash: ${cash:,.2f} (${wallet:,.2f} undeployed)",
     ]
     if current_alloc > 0:
         lines.append(f"Currently allocated here: ${current_alloc:,.2f}")
+    if fee > 0:
+        max_deploy = max(0.0, round(wallet - fee, 2))
+        lines += [
+            "",
+            f"Network fee: ${fee:,.2f} per deploy (kept for gas). "
+            "Percent buttons size from your wallet after that fee — "
+            f"100% sends up to ${max_deploy:,.2f} to the strategy.",
+        ]
     lines += ["", "Risk profile:", strat.risk_lines]
     live = live_pnl_line(key)
     if live:

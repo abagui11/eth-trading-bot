@@ -48,6 +48,9 @@ class Phase1TestCase(unittest.TestCase):
             patch.object(bot_config, "POOL_MIN_EQUITY_USD", 10.0),
             patch.object(bot_config, "POOL_MIN_DEPOSIT_USD", 20.0),
             patch.object(bot_config, "POOL_MIN_DEPLOY_USD", 5.0),
+            # Existing cases size allocations to the full cash claim; the
+            # live $5 deploy fee is covered by dedicated DeployFeeTests.
+            patch.object(bot_config, "POOL_DEPLOY_FEE_USD", 0.0),
             patch.object(bot_config, "POOL_KALSHI_RISK_PCT", 0.05),
             patch.object(bot_config, "KALSHI_MAX_CONTRACTS_PER_ACCEPT", 100),
             patch.object(bot_config, "POOL_ADMIN_TELEGRAM_IDS", (ADMIN,)),
@@ -155,6 +158,102 @@ class TestWalletDepositTests(Phase1TestCase):
         self.assertEqual(float(pool.get_account(ALICE)["cash_usd"]), 200.0)
         # The unknown historic transfer is baseline, not an unmatched alert.
         self.assertEqual(pool.unmatched_testwallet_deposits(), [])
+
+    # -- the same EOA on Base and Ethereum ---------------------------------
+
+    def test_each_chain_baselines_separately_and_records_where_money_landed(self) -> None:
+        """Base has been watched for weeks; Ethereum is switched on today.
+        The pre-existing Ethereum history is house history, not a stranger's
+        unclaimed money — and a registered sender credits on either chain."""
+        pool.approve_user(ALICE, admin_id=ADMIN)
+        address = wallet_for(ALICE)
+        pool.register_wallet(ALICE, address)
+        # Base already baselined (setUp); Ethereum never seen before.
+        pool.observe_testwallet_deposits([], chain_id=8453)
+        events = pool.observe_testwallet_deposits([
+            self._transfer(txid=txhash("1"), sender=wallet_for(9999), amount=5000.0),
+            self._transfer(txid=txhash("2"), sender=address, amount=150.0),
+        ], chain_id=1)
+        self.assertEqual([e["kind"] for e in events], ["credited"])
+        self.assertEqual(events[0]["chain_id"], 1)
+        self.assertEqual(pool.unmatched_testwallet_deposits(), [])
+        # A later Base arrival from an unknown sender is live, not baseline.
+        events = pool.observe_testwallet_deposits([
+            self._transfer(txid=txhash("3"), sender=wallet_for(9999), amount=40.0),
+        ], chain_id=8453)
+        self.assertEqual(events[0]["kind"], "unmatched")
+        held = pool.unmatched_testwallet_deposits()
+        self.assertEqual([(h["txid"], h["chain_id"]) for h in held],
+                         [(txhash("3"), 8453)])
+
+    def test_assign_reports_whether_the_sender_is_the_registered_wallet(self) -> None:
+        """An exchange withdrawal can be credited by hand, but it proves
+        nothing about the user's wallet — the result says so, so the bot can
+        warn both sides that withdrawals stay blocked."""
+        pool.approve_user(BOB, admin_id=ADMIN)
+        pool.register_wallet(BOB, wallet_for(BOB))
+        hot_wallet = wallet_for(424242)
+        tx = txhash("e")
+        pool.observe_testwallet_deposits(
+            [self._transfer(txid=tx, sender=hot_wallet, amount=90.0)]
+        )
+        result = pool.assign_testwallet_deposit(tx, BOB, admin_id=ADMIN)
+        self.assertTrue(result["ok"], result)
+        self.assertEqual(result["sender"], hot_wallet)
+        self.assertFalse(result["sender_is_registered"])
+        self.assertEqual(pool.get_wallet(BOB)["status"], "pending")
+        # ...and the withdrawal path agrees: unproven wallet, no payout.
+        self.assertFalse(pool.request_withdrawal(BOB, 50.0)["ok"])
+
+    def test_sweep_reads_every_chain_and_one_failing_source_does_not_hide_the_other(self) -> None:
+        import chain
+        import watchdog
+
+        pool.approve_user(ALICE, admin_id=ADMIN)
+        address = wallet_for(ALICE)
+        pool.register_wallet(ALICE, address)
+        for cid in (8453, 1):
+            pool.observe_testwallet_deposits([], chain_id=cid)
+
+        def fake_recent(addr, *, chain_id, cursor_block=None, limit=50):
+            if chain_id == 8453:
+                raise chain.ChainError("rpc down")
+            return ([{"txid": txhash("7"), "from": address, "to": addr,
+                      "amount_usd": 120.0, "confirmations": 40,
+                      "block": 100, "timestamp": 0, "symbol": "USDC"}],
+                    None)
+
+        sent: list[tuple[int, str]] = []
+        with patch.object(config, "TEST_WALLET_CHAIN_IDS", (8453, 1)), \
+             patch.object(chain, "readable", return_value=True), \
+             patch.object(chain, "recent_inbound_usdc", side_effect=fake_recent), \
+             patch("notify.send_pool_dm", side_effect=lambda uid, text: sent.append((uid, text))), \
+             patch("notify.send_pool_admin_alert", lambda text: None):
+            watchdog._testwallet_deposit_sweep()  # noqa: SLF001
+        self.assertEqual(float(pool.get_account(ALICE)["cash_usd"]), 120.0)
+        self.assertEqual(pool.get_wallet(ALICE)["status"], "verified")
+        self.assertEqual(len(sent), 1)
+        self.assertIn("on Ethereum", sent[0][1])
+
+    def test_sweep_persists_an_rpc_cursor_per_chain(self) -> None:
+        import chain
+        import watchdog
+
+        pool.observe_testwallet_deposits([], chain_id=8453)
+        pool.set_meta("testwallet_scan_block:8453", "1000")
+        seen: list[int | None] = []
+
+        def fake_recent(addr, *, chain_id, cursor_block=None, limit=50):
+            seen.append(cursor_block)
+            return [], 5000
+
+        with patch.object(config, "TEST_WALLET_CHAIN_IDS", (8453,)), \
+             patch.object(chain, "readable", return_value=True), \
+             patch.object(chain, "recent_inbound_usdc", side_effect=fake_recent), \
+             patch("notify.send_pool_admin_alert", lambda text: None):
+            watchdog._testwallet_deposit_sweep()  # noqa: SLF001
+        self.assertEqual(seen, [1000])
+        self.assertEqual(pool.get_meta("testwallet_scan_block:8453"), "5000")
 
 
 # ---------------------------------------------------------------------------
@@ -359,6 +458,32 @@ class TreasuryTests(Phase1TestCase):
         self.assertAlmostEqual(total["total_usd"], 1950.0, places=2)
         self.assertAlmostEqual(total["breakdown"]["in_flight_usd"], 50.0)
 
+    def test_test_wallet_leg_sums_every_watched_chain(self) -> None:
+        """One EOA, two chains: the treasury figure is the sum, and a single
+        unreadable chain makes the leg unknown rather than understated."""
+        import chain
+
+        reads = {8453: 400.0, 1: 25.5}
+        with patch.object(config, "TEST_WALLET_CHAIN_IDS", (8453, 1)), \
+             patch.object(chain, "usdc_balance",
+                          side_effect=lambda addr, *, chain_id: reads[chain_id]), \
+             patch.object(config, "EXECUTION_MODE", "paper"):
+            leg = treasury.balances()["test_wallet"]
+        self.assertEqual(leg["usd"], 425.5)
+        self.assertEqual(leg["per_chain"], {"Base": 400.0, "Ethereum": 25.5})
+
+        def flaky(addr, *, chain_id):
+            if chain_id == 1:
+                raise chain.ChainError("rate limited")
+            return 400.0
+
+        with patch.object(config, "TEST_WALLET_CHAIN_IDS", (8453, 1)), \
+             patch.object(chain, "usdc_balance", side_effect=flaky), \
+             patch.object(config, "EXECUTION_MODE", "paper"):
+            leg = treasury.balances()["test_wallet"]
+        self.assertIsNone(leg["usd"])
+        self.assertIn("Ethereum", leg["error"])
+
     def test_reconcile_total_refuses_on_unreadable_configured_leg(self) -> None:
         legs = {
             "test_wallet": {"configured": True, "usd": None, "error": "boom"},
@@ -377,6 +502,135 @@ class TreasuryTests(Phase1TestCase):
         demand = treasury.venue_demand()
         self.assertEqual(demand["coinbase"], 300.0)
         self.assertEqual(demand["kalshi"], 100.0)
+
+    def test_ensure_kalshi_coverage_journals_a_shortfall(self) -> None:
+        self._fund(ALICE, 1000.0)
+        pool.set_allocation(ALICE, "kalshi_wick", 500.0)
+        legs = {
+            "test_wallet": {"configured": True, "usd": 800.0, "error": None},
+            "coinbase": {"configured": False, "usd": None, "error": None},
+            "kalshi": {"configured": True, "usd": 100.0, "error": None},
+        }
+        with patch.object(treasury, "balances", return_value=legs), \
+                patch.object(config, "TEST_WALLET_ADDRESS", "0x" + "ab" * 20):
+            first = treasury.ensure_kalshi_coverage(
+                admin_id=ADMIN, note="auto: test"
+            )
+            second = treasury.ensure_kalshi_coverage(
+                admin_id=ADMIN, note="auto: again"
+            )
+        self.assertTrue(first["ok"], first)
+        self.assertTrue(first["created"])
+        self.assertEqual(first["shortfall_usd"], 400.0)
+        self.assertEqual(first["from_loc"], "test_wallet")
+        # Second call reuses the open pending transfer rather than stacking.
+        self.assertFalse(second["created"])
+        self.assertEqual(second["transfer_id"], first["transfer_id"])
+        row = treasury.get_transfer(int(first["transfer_id"]))
+        self.assertEqual(row["status"], "pending_send")
+        self.assertEqual(row["to_loc"], "kalshi")
+        self.assertAlmostEqual(float(row["amount_usd"]), 400.0, places=2)
+
+    def test_ensure_kalshi_coverage_is_quiet_when_covered(self) -> None:
+        self._fund(ALICE, 200.0)
+        pool.set_allocation(ALICE, "kalshi_wick", 100.0)
+        legs = {
+            "test_wallet": {"configured": True, "usd": 50.0, "error": None},
+            "coinbase": {"configured": False, "usd": None, "error": None},
+            "kalshi": {"configured": True, "usd": 250.0, "error": None},
+        }
+        with patch.object(treasury, "balances", return_value=legs):
+            gap = treasury.ensure_kalshi_coverage(admin_id=ADMIN)
+        self.assertTrue(gap["ok"])
+        self.assertEqual(gap["shortfall_usd"], 0.0)
+        self.assertFalse(gap.get("created"))
+        self.assertIsNone(gap.get("transfer_id"))
+        self.assertEqual(treasury.open_transfers(), [])
+
+    def test_set_allocation_reports_the_delta(self) -> None:
+        self._fund(ALICE, 1000.0)
+        first = pool.set_allocation(ALICE, "kalshi_wick", 300.0)
+        self.assertEqual(first["previous_usd"], 0.0)
+        self.assertEqual(first["delta_usd"], 300.0)
+        second = pool.set_allocation(ALICE, "kalshi_wick", 120.0)
+        self.assertEqual(second["previous_usd"], 300.0)
+        self.assertEqual(second["delta_usd"], -180.0)
+
+    def test_deploy_move_routes_delta_to_the_strategy_venue(self) -> None:
+        """Deployed money goes to the venue, undeployed money comes back."""
+        covered = {
+            "ok": True,
+            "deployable_usd": 10_000.0,
+            "on_chain_usd": 10_000.0,
+            "pending_out_usd": 0.0,
+            "undeployed_claims_usd": 0.0,
+            "gas_reserve_usd": 0.0,
+        }
+        with patch.object(config, "TEST_WALLET_ADDRESS", "0x" + "ab" * 20), \
+             patch.object(treasury, "deployable_usd", return_value=covered):
+            kalshi = treasury.journal_deploy_move(
+                telegram_id=ALICE, strategy="kalshi_wick",
+                delta_usd=250.0, admin_id=ADMIN,
+            )
+            coinbase = treasury.journal_deploy_move(
+                telegram_id=ALICE, strategy="ict",
+                delta_usd=100.0, admin_id=ADMIN,
+            )
+            back = treasury.journal_deploy_move(
+                telegram_id=ALICE, strategy="kalshi_wick",
+                delta_usd=-75.0, admin_id=ADMIN,
+            )
+        self.assertTrue(kalshi["ok"], kalshi)
+        self.assertEqual((kalshi["from_loc"], kalshi["to_loc"]), ("test_wallet", "kalshi"))
+        self.assertEqual(kalshi["amount_usd"], 250.0)
+        self.assertEqual(kalshi["verb"], "deploy")
+        self.assertTrue(coinbase["ok"], coinbase)
+        self.assertEqual((coinbase["from_loc"], coinbase["to_loc"]), ("test_wallet", "coinbase"))
+        self.assertTrue(back["ok"], back)
+        self.assertEqual((back["from_loc"], back["to_loc"]), ("kalshi", "test_wallet"))
+        self.assertEqual(back["amount_usd"], 75.0)
+        self.assertEqual(back["verb"], "undeploy")
+        # Every move is its own pending_send row, not folded into a shortfall.
+        rows = treasury.open_transfers()
+        self.assertEqual(len(rows), 3)
+        self.assertTrue(all(r["status"] == "pending_send" for r in rows))
+        self.assertIn(f"user {ALICE}", str(rows[0]["note"]))
+
+    def test_deploy_move_refuses_when_intake_cannot_cover(self) -> None:
+        short = {
+            "ok": True,
+            "deployable_usd": 475.0,
+            "on_chain_usd": 496.0,
+            "pending_out_usd": 0.0,
+            "undeployed_claims_usd": 21.0,
+            "gas_reserve_usd": 0.0,
+        }
+        with patch.object(config, "TEST_WALLET_ADDRESS", "0x" + "ab" * 20), \
+             patch.object(treasury, "deployable_usd", return_value=short):
+            blocked = treasury.journal_deploy_move(
+                telegram_id=ALICE, strategy="kalshi_wick",
+                delta_usd=500.0, admin_id=ADMIN,
+            )
+        self.assertFalse(blocked["ok"])
+        self.assertEqual(blocked["reason"], "intake_short")
+        self.assertEqual(blocked["need_usd"], 500.0)
+        self.assertEqual(blocked["deployable_usd"], 475.0)
+        self.assertEqual(treasury.open_transfers(), [])
+
+    def test_deploy_move_is_quiet_when_nothing_moves(self) -> None:
+        with patch.object(config, "TEST_WALLET_ADDRESS", "0x" + "ab" * 20):
+            same = treasury.journal_deploy_move(
+                telegram_id=ALICE, strategy="kalshi_wick",
+                delta_usd=0.0, admin_id=ADMIN,
+            )
+        self.assertEqual(same["reason"], "no_change")
+        with patch.object(config, "TEST_WALLET_ADDRESS", ""):
+            no_wallet = treasury.journal_deploy_move(
+                telegram_id=ALICE, strategy="kalshi_wick",
+                delta_usd=50.0, admin_id=ADMIN,
+            )
+        self.assertEqual(no_wallet["reason"], "no_intake_wallet")
+        self.assertEqual(treasury.open_transfers(), [])
 
 
 # ---------------------------------------------------------------------------
@@ -483,6 +737,70 @@ class KalshiAcceptTests(Phase1TestCase):
             float(pool.get_account(ALICE)["reserved_usd"]), 0.0
         )
         self.assertEqual(len(pool.open_kalshi_rows("placing")), 1)
+
+
+# ---------------------------------------------------------------------------
+# Flat deploy network fee (Ship 1)
+# ---------------------------------------------------------------------------
+
+class DeployFeeTests(Phase1TestCase):
+    """Fee from undeployed cash; full allocation still goes to the venue."""
+
+    def setUp(self) -> None:
+        super().setUp()
+        # Override the fixture's fee=0 so these cases exercise the live default.
+        self._fee_patch = patch.object(bot_config, "POOL_DEPLOY_FEE_USD", 5.0)
+        self._fee_patch.start()
+        self.addCleanup(self._fee_patch.stop)
+
+    def test_increase_requires_fee_room_and_does_not_shrink_allocation(self) -> None:
+        self._fund(ALICE, 505.0)
+        blocked = pool.set_allocation(ALICE, "kalshi_wick", 505.0)
+        self.assertFalse(blocked["ok"])
+        self.assertEqual(blocked["reason"], "exceeds_wallet")
+        self.assertEqual(blocked["fee_usd"], 5.0)
+        self.assertEqual(blocked["max_usd"], 500.0)
+
+        ok = pool.set_allocation(ALICE, "kalshi_wick", 500.0)
+        self.assertTrue(ok["ok"], ok)
+        self.assertEqual(ok["amount_usd"], 500.0)
+        self.assertEqual(ok["fee_usd"], 5.0)
+        self.assertEqual(ok["delta_usd"], 500.0)
+        # Soft-lock is the full venue amount; cash is unchanged until charge.
+        self.assertEqual(float(pool.get_account(ALICE)["cash_usd"]), 505.0)
+        self.assertEqual(pool.get_allocation(ALICE, "kalshi_wick"), 500.0)
+
+    def test_charge_deploy_fee_leaves_allocation_intact(self) -> None:
+        self._fund(ALICE, 505.0)
+        self.assertTrue(pool.set_allocation(ALICE, "kalshi_wick", 500.0)["ok"])
+        charged = pool.charge_deploy_fee(
+            ALICE, strategy="kalshi_wick", transfer_id=42,
+        )
+        self.assertTrue(charged["ok"], charged)
+        self.assertEqual(charged["fee_usd"], 5.0)
+        self.assertEqual(float(pool.get_account(ALICE)["cash_usd"]), 500.0)
+        self.assertEqual(pool.get_allocation(ALICE, "kalshi_wick"), 500.0)
+        # Undeployed claim is gone; the $5 sits as house float on-chain.
+        self.assertEqual(pool.wallet_balance(ALICE)["wallet_usd"], 0.0)
+
+        again = pool.charge_deploy_fee(
+            ALICE, strategy="kalshi_wick", transfer_id=42,
+        )
+        self.assertTrue(again["ok"], again)
+        self.assertTrue(again.get("duplicate"))
+        self.assertEqual(float(pool.get_account(ALICE)["cash_usd"]), 500.0)
+
+    def test_undeploy_and_no_change_are_free(self) -> None:
+        self._fund(ALICE, 505.0)
+        self.assertTrue(pool.set_allocation(ALICE, "kalshi_wick", 500.0)["ok"])
+        pool.charge_deploy_fee(ALICE, strategy="kalshi_wick", transfer_id=7)
+        lowered = pool.set_allocation(ALICE, "kalshi_wick", 200.0)
+        self.assertTrue(lowered["ok"], lowered)
+        self.assertEqual(lowered["fee_usd"], 0.0)
+        same = pool.set_allocation(ALICE, "kalshi_wick", 200.0)
+        self.assertTrue(same["ok"], same)
+        self.assertEqual(same["fee_usd"], 0.0)
+        self.assertEqual(same["delta_usd"], 0.0)
 
 
 if __name__ == "__main__":
